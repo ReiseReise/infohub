@@ -9,6 +9,31 @@ tags: [memory, integration, folo]
 
 # 项目记忆
 
+## 2026-03-31（Folo 第二轮对齐：订阅资产管理 + 来源导航 + 网页 provider 编排）
+
+- 目标：把“RSS 发现增强”再往前推一轮，缩小和 Folo 的差距，不只补抓取逻辑，还要让订阅与阅读入口更像真正的订阅器，同时给网页源预留多种 browser skill 的接入位。
+- 关键决策：
+  - 这轮不追求 1:1 模仿 Folo 的布局，而是优先复用它最有效的机制：`来源视角`、`未读堆积可见`、`最新更新可见`、`网页内容抓取可回退`。
+  - `browser-assist` 不再只是全局默认 provider，而是允许网页快照源逐源选择 `playwright / agent-reach / web-access / generic`；实现上保持“适配层”而不是把第三方项目硬编码进主路径。
+  - 信源列表必须从“按创建时间的一维表格”升级为“有 unread / latest / latest title / host / freshness 的运营台”；否则再好的抓取能力也会被展示层稀释。
+  - Feed 继续保留当前成长型阅读台方向，但补上 `source rail + focused source banner + priority/latest 排序切换`，让来源切换更接近 Folo 的使用心智。
+- 本轮改造：
+  - 后端：`routes/sources.ts` 增加每个 source 的 `entryCount / unreadCount / favoriteCount / latestItemTitle / latestItemAt / sourceHost / iconUrl` 聚合输出，并支持 `sortBy=latest|unread|health|name`。
+  - 后端：`content-extractor.ts` 与 `browser-assist-client.ts` 支持 source 级 `renderMode + browserProvider` 偏好；`collectors/webpage.ts` 将 provider 真正传入网页快照提取链路。
+  - 前端：`Sources` 新增 summary cards、搜索/排序/筛选、Folo 风格 source cards、网页快照 source 的抓取策略配置、直达 Feed 的快捷入口。
+  - 前端：`Feed` 新增 `sort` 状态、source rail、focused source banner，并允许从条目快速按 source 过滤。
+  - 设计：新增 `assets/Design-System.md`，把这轮“editorial reading desk + operator console”的视觉规则落盘。
+- 验证结果：
+  - `services/hub-engine`: `npm run build` ✅
+  - `apps/web`: `npm run build` ✅
+  - `docker compose up -d --build hub-engine nginx` ✅
+  - `curl http://127.0.0.1/api/health` ✅
+  - 真实 API 回归：`/api/sources?sortBy=unread` 已返回 `unreadCount / entryCount / latestItemTitle / sourceHost`；`/api/items?sortBy=priority` 正常返回优先级阅读流。
+  - Playwright wrapper 当前环境里能启动但没有稳定吐出快照文本，所以这轮 UI 真回归以“构建 + 运行态 + API 契约”作为主证据。
+- 当前判断：
+  - 现在和 Folo 的差距已经从“基础订阅器能力缺失”收窄到“高级阅读体验与更完整的来源组织模型”，例如 collections / 列表共享 / 更强的批量管理。
+  - 下一轮如果继续追，可以优先补 `source grouping / bulk actions / unread reset / 收藏来源`，而不是继续扩抓取器种类。
+
 ## 2026-03-10（自动转写策略深化 + AI 日志实用化 + 顶层设想对照）
 
 - 目标：把之前文档里明确标成“预留”的自动转写时长/预算限制接进真实执行链路，同时把 AI 使用日志从“能看字段”提升为“可筛选、可聚合、能判断下一步”的管理面，并把顶级设想和当前功能地图的差距真正写进权威产品文档。

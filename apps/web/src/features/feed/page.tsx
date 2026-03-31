@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { ExternalLink, RefreshCw, Search, Star, CheckCheck, FileText, Loader2, Headphones, ChevronDown, SkipForward } from 'lucide-react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, type FeedItemRecord, type FetchStatusResponse, type ItemScoreBreakdownPayload } from '../../lib/api';
+import { api, type FeedItemRecord, type FetchStatusResponse, type ItemScoreBreakdownPayload, type SourceRecord } from '../../lib/api';
 import { MarkdownContent } from '../../components/MarkdownContent';
 
 type FeedItem = FeedItemRecord;
+type FeedSortMode = 'latest' | 'priority';
 
 type DetailSectionKey = 'summary' | 'original' | 'translation' | 'transcript' | 'knowledge';
 type DetailSection = {
@@ -228,6 +229,8 @@ export function Feed() {
   const initialFilter = initialFilterParam === 'unread' || initialFilterParam === 'favorites'
     ? initialFilterParam
     : 'all';
+  const initialSortParam = searchParams.get('sort');
+  const initialSort = initialSortParam === 'priority' ? 'priority' : 'latest';
 
   const [items, setItems] = useState<FeedItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -237,8 +240,10 @@ export function Feed() {
   const [selectedItem, setSelectedItem] = useState<FeedItem | null>(null);
   const [search, setSearch] = useState(() => searchParams.get('q') || '');
   const [filter, setFilter] = useState<'all' | 'unread' | 'favorites'>(initialFilter);
+  const [sortMode, setSortMode] = useState<FeedSortMode>(initialSort);
   const [category, setCategory] = useState(() => searchParams.get('category') || '');
   const [sourceId, setSourceId] = useState(() => searchParams.get('sourceId') || '');
+  const [sourceRail, setSourceRail] = useState<SourceRecord[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [stats, setStats] = useState<{ total: number; unread: number; today: number; favorites: number } | null>(null);
   const [offset, setOffset] = useState(0);
@@ -263,6 +268,7 @@ export function Feed() {
     setError(null);
     try {
       const params: Record<string, string> = { limit: String(limit), offset: String(offset) };
+      params.sortBy = sortMode === 'priority' ? 'priority' : 'publishedAt';
       if (search) params.search = search;
       if (filter === 'unread') params.isRead = 'false';
       if (filter === 'favorites') params.isFavorite = 'true';
@@ -280,7 +286,7 @@ export function Feed() {
     } finally {
       setLoading(false);
     }
-  }, [offset, filter, category, search, sourceId]);
+  }, [offset, filter, category, search, sortMode, sourceId]);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -298,6 +304,15 @@ export function Feed() {
         .sort();
       setCategories(cats);
     } catch { /* non-critical */ }
+  }, []);
+
+  const fetchSourceRail = useCallback(async () => {
+    try {
+      const res = await api.sources.list({ sortBy: 'unread', status: 'active' });
+      setSourceRail(res.data || []);
+    } catch {
+      setSourceRail([]);
+    }
   }, []);
 
   const fetchFreshness = useCallback(async () => {
@@ -338,7 +353,7 @@ export function Feed() {
     }
   }, []);
 
-  const updateListQuery = useCallback((next: { q?: string; filter?: string; category?: string; sourceId?: string }) => {
+  const updateListQuery = useCallback((next: { q?: string; filter?: string; category?: string; sourceId?: string; sort?: FeedSortMode }) => {
     const params = new URLSearchParams(searchParams);
     if (next.q !== undefined) {
       if (next.q) params.set('q', next.q);
@@ -356,6 +371,10 @@ export function Feed() {
       if (next.sourceId) params.set('sourceId', next.sourceId);
       else params.delete('sourceId');
     }
+    if (next.sort !== undefined) {
+      if (next.sort && next.sort !== 'latest') params.set('sort', next.sort);
+      else params.delete('sort');
+    }
     setSearchParams(params, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -367,7 +386,8 @@ export function Feed() {
     void fetchStats();
     void fetchCategories();
     void fetchFreshness();
-  }, [fetchCategories, fetchFreshness, fetchStats]);
+    void fetchSourceRail();
+  }, [fetchCategories, fetchFreshness, fetchSourceRail, fetchStats]);
 
   const triggerDueSources = async () => {
     setDueRefreshing(true);
@@ -386,9 +406,11 @@ export function Feed() {
   useEffect(() => {
     const nextSearch = searchParams.get('q') || '';
     const nextFilter = searchParams.get('filter');
+    const nextSort = searchParams.get('sort');
     const nextCategory = searchParams.get('category') || '';
     const nextSourceId = searchParams.get('sourceId') || '';
     const normalizedFilter = nextFilter === 'unread' || nextFilter === 'favorites' ? nextFilter : 'all';
+    const normalizedSort = nextSort === 'priority' ? 'priority' : 'latest';
 
     let changed = false;
     if (search !== nextSearch) {
@@ -397,6 +419,10 @@ export function Feed() {
     }
     if (filter !== normalizedFilter) {
       setFilter(normalizedFilter);
+      changed = true;
+    }
+    if (sortMode !== normalizedSort) {
+      setSortMode(normalizedSort);
       changed = true;
     }
     if (category !== nextCategory) {
@@ -410,7 +436,7 @@ export function Feed() {
     if (changed) {
       setOffset(0);
     }
-  }, [searchParams, search, filter, category, sourceId]);
+  }, [searchParams, search, filter, sortMode, category, sourceId]);
 
   useEffect(() => {
     if (selectedIdFromRoute) {
@@ -751,6 +777,17 @@ export function Feed() {
     }
   }, [selectedItem?.url]);
 
+  const topSources = useMemo(() => (
+    sourceRail
+      .filter((source) => (source.unreadCount || 0) > 0 || Boolean(source.latestItemAt))
+      .slice(0, 14)
+  ), [sourceRail]);
+
+  const selectedSource = useMemo(
+    () => sourceRail.find((source) => String(source.id) === sourceId) || null,
+    [sourceId, sourceRail],
+  );
+
   const activeDetail = detailSections.find((section) => section.key === activeDetailTab) || detailSections[0];
 
   const getCollectorLabel = (item?: FeedItem | null) => {
@@ -817,6 +854,24 @@ export function Feed() {
             </button>
           ))}
         </div>
+        <div className="flex rounded-2xl bg-white border border-zinc-200 p-1">
+          {([
+            { value: 'latest', label: '按时间' },
+            { value: 'priority', label: '按优先级' },
+          ] as Array<{ value: FeedSortMode; label: string }>).map((option) => (
+            <button
+              key={option.value}
+              onClick={() => {
+                setSortMode(option.value);
+                setOffset(0);
+                updateListQuery({ sort: option.value });
+              }}
+              className={`px-3 py-2 text-xs rounded-xl transition-colors ${sortMode === option.value ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
         {categories.length > 0 && (
           <div className="relative">
             <select
@@ -849,6 +904,83 @@ export function Feed() {
           </button>
         )}
       </div>
+
+      {topSources.length > 0 && (
+        <div className="mb-4 overflow-x-auto rounded-[24px] border border-zinc-200 bg-white p-3 shadow-[0_18px_40px_-42px_rgba(15,23,42,0.45)]">
+          <div className="mb-2 text-[11px] uppercase tracking-[0.24em] text-zinc-500">Source Rail</div>
+          <div className="flex min-w-max gap-2">
+            {topSources.map((source) => {
+              const active = String(source.id) === sourceId;
+              return (
+                <button
+                  key={source.id}
+                  type="button"
+                  onClick={() => {
+                    setSourceId(String(source.id));
+                    setOffset(0);
+                    updateListQuery({ sourceId: String(source.id) });
+                  }}
+                  className={`rounded-2xl border px-3 py-2 text-left transition-colors ${
+                    active
+                      ? 'border-teal-200 bg-teal-50 text-teal-900'
+                      : 'border-zinc-200 bg-zinc-50/60 text-zinc-700 hover:bg-zinc-50'
+                  }`}
+                >
+                  <div className="max-w-[180px] truncate text-xs font-medium">{source.name}</div>
+                  <div className="mt-1 flex items-center gap-2 text-[10px]">
+                    <span>{source.unreadCount ?? 0} 未读</span>
+                    {source.latestItemAt && <span>{timeAgo(source.latestItemAt)}</span>}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {selectedSource && (
+        <div className="mb-4 rounded-[24px] border border-teal-100 bg-[linear-gradient(135deg,_rgba(240,253,250,0.9),_rgba(255,255,255,0.96))] px-4 py-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.24em] text-teal-700/75">Focused Source</div>
+              <div className="mt-1 text-lg font-semibold text-zinc-900">{selectedSource.name}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                {selectedSource.sourceHost && <span>{selectedSource.sourceHost}</span>}
+                <span>{selectedSource.unreadCount ?? 0} 未读</span>
+                <span>{selectedSource.entryCount ?? 0} 条可读</span>
+                {selectedSource.latestItemAt && <span>最近更新 {timeAgo(selectedSource.latestItemAt)}</span>}
+              </div>
+              {selectedSource.latestItemTitle && (
+                <div className="mt-2 text-sm text-zinc-700">最新一条：{selectedSource.latestItemTitle}</div>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setFilter('unread');
+                  setOffset(0);
+                  updateListQuery({ filter: 'unread' });
+                }}
+                className="rounded-xl border border-teal-200 bg-white px-3 py-2 text-xs text-teal-800 hover:bg-teal-50"
+              >
+                只看未读
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSourceId('');
+                  setOffset(0);
+                  updateListQuery({ sourceId: '' });
+                }}
+                className="rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
+              >
+                退出来源聚焦
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg">
@@ -934,7 +1066,19 @@ export function Feed() {
                     {normalizeAiSummary(item.aiSummary) && <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-500">{normalizeAiSummary(item.aiSummary)}</p>}
                     {!normalizeAiSummary(item.aiSummary) && item.snippet && <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-400">{item.snippet}</p>}
                     <div className="mt-2.5 flex items-center gap-2 flex-wrap">
-                      <span className="max-w-[160px] truncate text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">{item.sourceName}</span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!item.sourceId) return;
+                          setSourceId(String(item.sourceId));
+                          setOffset(0);
+                          updateListQuery({ sourceId: String(item.sourceId) });
+                        }}
+                        className="max-w-[180px] truncate text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400 hover:text-teal-700"
+                      >
+                        {item.sourceName}
+                      </button>
                       {item.sourceCategory && item.sourceCategory !== 'uncategorized' && (
                         <span className="text-[10px] bg-zinc-100 text-zinc-500 px-1.5 py-0.5 rounded-full">{item.sourceCategory}</span>
                       )}

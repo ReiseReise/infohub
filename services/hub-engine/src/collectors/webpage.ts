@@ -6,9 +6,21 @@ import type { Collector, CollectorResult, SourceConfig } from './base.js';
 export class WebpageCollector implements Collector {
   readonly type = 'webpage';
 
+  private formatEngineLabel(fetchEngine: string | null | undefined, renderMode: string, browserProvider: string): string {
+    if (fetchEngine === 'browser-assist') {
+      return browserProvider ? `browser-assist:${browserProvider}` : 'browser-assist';
+    }
+    if (renderMode === 'browser-assist' || renderMode === 'browser') {
+      return browserProvider ? `browser-assist:${browserProvider}` : 'browser-assist';
+    }
+    if (renderMode === 'auto') return 'native-or-scrapling';
+    return `scrapling:${renderMode}`;
+  }
+
   async fetch(source: SourceConfig): Promise<CollectorResult> {
     const targetUrl = String((source.config as { url?: string }).url || '').trim();
     const renderMode = String((source.config as { renderMode?: string }).renderMode || 'auto').trim() || 'auto';
+    const browserProvider = String((source.config as { browserProvider?: string }).browserProvider || '').trim();
     const previousHash = String((source.config as { lastSnapshotHash?: string }).lastSnapshotHash || '').trim();
     const previousSnippet = String((source.config as { lastSnapshotSnippet?: string }).lastSnapshotSnippet || '').trim();
     if (!targetUrl) {
@@ -16,14 +28,17 @@ export class WebpageCollector implements Collector {
     }
 
     try {
-      const snapshot = await fetchPageSnapshot(targetUrl);
+      const snapshot = await fetchPageSnapshot(targetUrl, 8000, {
+        renderMode,
+        browserProvider,
+      });
       if (!snapshot?.content) {
         return {
           items: [],
           fetchedAt: new Date(),
           error: '网页正文提取失败',
           sourceConfigPatch: {
-            lastFetchEngine: renderMode === 'auto' ? 'native-or-scrapling' : `scrapling:${renderMode}`,
+            lastFetchEngine: this.formatEngineLabel(snapshot?.fetchEngine, renderMode, browserProvider),
             lastBlockedReason: snapshot?.blockedReason || 'content_unavailable',
           },
         };
@@ -45,7 +60,7 @@ export class WebpageCollector implements Collector {
             lastSnapshotTitle: snapshot.title || source.name,
             lastSnapshotAt: capturedAt.toISOString(),
             lastChangeSummary: '网页内容未变化',
-            lastFetchEngine: renderMode === 'auto' ? 'native-or-scrapling' : `scrapling:${renderMode}`,
+            lastFetchEngine: this.formatEngineLabel(snapshot.fetchEngine, renderMode, browserProvider),
             lastBlockedReason: null,
           },
         };
@@ -69,7 +84,7 @@ export class WebpageCollector implements Collector {
           lastSnapshotTitle: snapshot.title || source.name,
           lastSnapshotAt: capturedAt.toISOString(),
           lastChangeSummary: changeSummary,
-          lastFetchEngine: snapshot.fetchEngine || (renderMode === 'auto' ? 'native-or-scrapling' : `scrapling:${renderMode}`),
+          lastFetchEngine: this.formatEngineLabel(snapshot.fetchEngine, renderMode, browserProvider),
           lastBlockedReason: null,
         },
       };
@@ -81,7 +96,7 @@ export class WebpageCollector implements Collector {
         fetchedAt: new Date(),
         error: message,
         sourceConfigPatch: {
-          lastFetchEngine: renderMode === 'auto' ? 'native-or-scrapling' : `scrapling:${renderMode}`,
+          lastFetchEngine: this.formatEngineLabel(null, renderMode, browserProvider),
           lastBlockedReason: message,
         },
       };

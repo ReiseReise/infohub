@@ -26,6 +26,7 @@ export function isBrowserAssistEnabled(): boolean {
 export async function fetchBrowserAssist(
   url: string,
   target: BrowserAssistTarget,
+  options: { provider?: string | null } = {},
 ): Promise<BrowserAssistResponse | null> {
   if (!isBrowserAssistEnabled()) return null;
 
@@ -34,9 +35,10 @@ export async function fetchBrowserAssist(
 
   try {
     const endpoint = `${normalizedBaseUrl()}/extract/${target}`;
+    const provider = (options.provider || config.browserAssist.provider || 'generic').trim() || 'generic';
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'x-browser-assist-provider': config.browserAssist.provider,
+      'x-browser-assist-provider': provider,
     };
     if (config.browserAssist.token) {
       headers.Authorization = `Bearer ${config.browserAssist.token}`;

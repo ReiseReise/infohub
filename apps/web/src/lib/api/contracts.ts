@@ -162,6 +162,8 @@ export interface SourceRecord {
   url?: string | null;
   sourceType: string;
   collectorType: string;
+  sourceHost?: string | null;
+  iconUrl?: string | null;
   sourceRole?: string | null;
   sourceTier?: 'S' | 'A' | 'B' | 'C' | 'D' | string | null;
   processingProfile?: 'full' | 'smart' | 'brief' | 'monitor' | string | null;
@@ -180,7 +182,9 @@ export interface SourceRecord {
   lastSuccessAt?: string | null;
   lastOutcome?: string | null;
   lastError?: string | null;
-  renderMode?: 'auto' | 'native' | 'dynamic' | 'stealth' | string | null;
+  createdAt?: string;
+  updatedAt?: string;
+  renderMode?: 'auto' | 'native' | 'dynamic' | 'stealth' | 'browser-assist' | string | null;
   lastFetchEngine?: string | null;
   blockedReason?: string | null;
   lastChangeSummary?: string | null;
@@ -188,6 +192,12 @@ export interface SourceRecord {
   staleReason?: string | null;
   errorMessage?: string | null;
   itemCount?: number;
+  entryCount?: number;
+  unreadCount?: number;
+  favoriteCount?: number;
+  latestItemTitle?: string | null;
+  latestItemUrl?: string | null;
+  latestItemAt?: string | null;
   config?: Record<string, unknown> | null;
 }
 
