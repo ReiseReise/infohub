@@ -1,0 +1,329 @@
+# ============================================================
+# 信息中枢 v3 — Docker Compose (开发 + 生产通用)
+# 启动：docker compose up -d
+# ============================================================
+
+services:
+  # ---- 基础设施 ----
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: infohub-postgres
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/pg:/var/lib/postgresql/data"
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: infohub
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-infohub_dev_2026}
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d infohub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: infohub-redis
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/redis:/data"
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---- 开源组件 ----
+  rsshub:
+    image: diygod/rsshub:latest
+    container_name: infohub-rsshub
+    ports:
+      - "1200:1200"
+    environment:
+      NODE_ENV: production
+      CACHE_TYPE: redis
+      REDIS_URL: redis://redis:6379
+      REQUEST_TIMEOUT: "30000"
+      BILIBILI_COOKIE: ${BILIBILI_COOKIE:-}
+      TWITTER_AUTH_TOKEN: ${TWITTER_AUTH_TOKEN:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:1200/').then((resp) => { if (!resp.ok) process.exit(1); }).catch(() => process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  changedetection:
+    image: ghcr.io/dgtlmoon/changedetection.io:latest
+    container_name: infohub-changedetection
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/changedetection:/datastore"
+    ports:
+      - "5555:5000"
+    environment:
+      BASE_URL: "http://localhost:5555"
+      FETCH_WORKERS: "4"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # kill-the-newsletter: 无官方 Docker 镜像，Phase 4 自建或用 RSS-Bridge 替代
+  # 如需 Newsletter→RSS，可先用 kill-the-newsletter.com 公共服务
+
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: infohub-ntfy
+    command: serve
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/ntfy:/var/lib/ntfy"
+    ports:
+      - "8081:80"
+    environment:
+      NTFY_BASE_URL: "http://localhost:8081"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:80/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  scrapling-service:
+    build:
+      context: ./services/scrapling
+    container_name: infohub-scrapling
+    ports: ["8010:8010"]
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---- 核心服务 ----
+  hub-engine:
+    build:
+      context: ./services/hub-engine
+    container_name: infohub-engine
+    ports: ["3001:3001"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      scrapling-service: { condition: service_started }
+    environment:
+      DATABASE_URL: postgres://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      REDIS_URL: redis://redis:6379
+      RSSHUB_BASE_URL: http://rsshub:1200
+      CHANGEDETECTION_URL: http://changedetection:5000
+      CHANGEDETECTION_API_KEY: ${CHANGEDETECTION_API_KEY:-}
+      NTFY_URL: http://ntfy:80
+      NTFY_TOPIC: ${NTFY_TOPIC:-infohub}
+      FEISHU_WEBHOOK_URL: ${FEISHU_WEBHOOK_URL:-}
+      JWT_SECRET: ${JWT_SECRET}
+      AUDIO_SERVICE_URL: ${AUDIO_SERVICE_URL:-http://audio-service:8000}
+      HUB_ENGINE_INTERNAL_URL: ${HUB_ENGINE_INTERNAL_URL:-http://hub-engine:3001}
+      AUDIO_WEBHOOK_SECRET: ${AUDIO_WEBHOOK_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      SCRAPLING_ENABLED: ${SCRAPLING_ENABLED:-true}
+      SCRAPLING_SERVICE_URL: ${SCRAPLING_SERVICE_URL:-http://scrapling-service:8010}
+      SCRAPLING_TIMEOUT_MS: ${SCRAPLING_TIMEOUT_MS:-20000}
+      INFOHUB_HN_POPULAR_BLOGS_PATH: /app/fixtures/hn-popular-blogs-2025.opml
+      KNOWLEDGE_DIR: ${KNOWLEDGE_DIR:-/app/knowledge}
+      HOST_DATA_ROOT: ${HOST_DATA_ROOT:-./data}
+      HOST_EXPORT_ROOT: ${HOST_EXPORT_ROOT:-./exports}
+      HOST_BACKUP_ROOT: ${HOST_BACKUP_ROOT:-./backups}
+      BACKUP_LOCAL_DIR: ${BACKUP_LOCAL_DIR:-/app/backups}
+      BACKUP_STATUS_FILE: ${BACKUP_STATUS_FILE:-/app/backups/backup-status.json}
+      BACKUP_OSS_ENABLED: ${BACKUP_OSS_ENABLED:-false}
+      BACKUP_OSS_BUCKET: ${BACKUP_OSS_BUCKET:-}
+      BACKUP_OSS_PREFIX: ${BACKUP_OSS_PREFIX:-infohub-v3/}
+      BACKUP_OSS_REGION: ${BACKUP_OSS_REGION:-cn-beijing}
+      BACKUP_LOCAL_RETENTION: ${BACKUP_LOCAL_RETENTION:-7}
+      BACKUP_OSS_RETENTION: ${BACKUP_OSS_RETENTION:-30}
+      AUDIO_STORAGE_BACKEND: ${AUDIO_STORAGE_BACKEND:-local}
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/knowledge:/app/knowledge"
+      - "${HOST_BACKUP_ROOT:-./backups}:/app/backups"
+      - "${HOST_EXPORT_ROOT:-./exports}:/app/exports"
+      - ./hn-popular-blogs-2025.opml:/app/fixtures/hn-popular-blogs-2025.opml:ro
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  audio-service:
+    build:
+      context: ./services/audio
+    container_name: infohub-audio
+    ports: ["8000:8000"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${JWT_SECRET}
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      STORAGE_BACKEND: ${AUDIO_STORAGE_BACKEND:-local}
+      LOCAL_STORAGE_PATH: /app/uploads
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_BUCKET_NAME: ${OSS_BUCKET_NAME:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-https://oss-cn-beijing.aliyuncs.com}
+      OSS_REGION: ${OSS_REGION:-cn-beijing}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_MODEL: ${ARK_MODEL:-}
+      DOUBAO_ENDPOINT_ID: ${DOUBAO_ENDPOINT_ID:-}
+      DEFAULT_LLM_ENDPOINT_ID: ${DEFAULT_LLM_ENDPOINT_ID:-}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-}
+      TINGWU_ACCESS_KEY_ID: ${TINGWU_ACCESS_KEY_ID:-}
+      TINGWU_ACCESS_KEY_SECRET: ${TINGWU_ACCESS_KEY_SECRET:-}
+      TINGWU_REGION: ${TINGWU_REGION:-cn-beijing}
+      TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
+      INTERNAL_ARTICLE_URL: http://hub-engine:3001
+      CORS_ORIGINS: http://localhost:5173,http://localhost
+      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${AUDIO_ADMIN_PASSWORD}
+      FIRST_INVITE_CODE: ${FIRST_INVITE_CODE}
+      APP_ENV: ${AUDIO_APP_ENV:-production}
+      APP_DEBUG: ${AUDIO_APP_DEBUG:-false}
+      AUDIO_WEBHOOK_SECRET: ${AUDIO_WEBHOOK_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/audio-uploads:/app/uploads"
+      - "${HOST_BACKUP_ROOT:-./backups}:/app/backups"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\" || exit 1"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+
+  audio-worker:
+    build:
+      context: ./services/audio
+    container_name: infohub-audio-worker
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4 -Q celery
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${JWT_SECRET}
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      STORAGE_BACKEND: ${AUDIO_STORAGE_BACKEND:-local}
+      LOCAL_STORAGE_PATH: /app/uploads
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_BUCKET_NAME: ${OSS_BUCKET_NAME:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-https://oss-cn-beijing.aliyuncs.com}
+      OSS_REGION: ${OSS_REGION:-cn-beijing}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_MODEL: ${ARK_MODEL:-}
+      DOUBAO_ENDPOINT_ID: ${DOUBAO_ENDPOINT_ID:-}
+      DEFAULT_LLM_ENDPOINT_ID: ${DEFAULT_LLM_ENDPOINT_ID:-}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-}
+      TINGWU_ACCESS_KEY_ID: ${TINGWU_ACCESS_KEY_ID:-}
+      TINGWU_ACCESS_KEY_SECRET: ${TINGWU_ACCESS_KEY_SECRET:-}
+      TINGWU_REGION: ${TINGWU_REGION:-cn-beijing}
+      TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
+      INTERNAL_ARTICLE_URL: http://hub-engine:3001
+      CORS_ORIGINS: http://localhost:5173,http://localhost
+      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${AUDIO_ADMIN_PASSWORD}
+      FIRST_INVITE_CODE: ${FIRST_INVITE_CODE}
+      APP_ENV: ${AUDIO_APP_ENV:-production}
+      APP_DEBUG: ${AUDIO_APP_DEBUG:-false}
+      AUDIO_WEBHOOK_SECRET: ${AUDIO_WEBHOOK_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/audio-uploads:/app/uploads"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      audio-service: { condition: service_started }
+    restart: always
+
+  audio-worker-asr:
+    build:
+      context: ./services/audio
+    container_name: infohub-audio-worker-asr
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=1 --pool=solo -Q asr
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${JWT_SECRET}
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      STORAGE_BACKEND: ${AUDIO_STORAGE_BACKEND:-local}
+      LOCAL_STORAGE_PATH: /app/uploads
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_BUCKET_NAME: ${OSS_BUCKET_NAME:-}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-https://oss-cn-beijing.aliyuncs.com}
+      OSS_REGION: ${OSS_REGION:-cn-beijing}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      ARK_MODEL: ${ARK_MODEL:-}
+      DOUBAO_ENDPOINT_ID: ${DOUBAO_ENDPOINT_ID:-}
+      DEFAULT_LLM_ENDPOINT_ID: ${DEFAULT_LLM_ENDPOINT_ID:-}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-}
+      TINGWU_ACCESS_KEY_ID: ${TINGWU_ACCESS_KEY_ID:-}
+      TINGWU_ACCESS_KEY_SECRET: ${TINGWU_ACCESS_KEY_SECRET:-}
+      TINGWU_REGION: ${TINGWU_REGION:-cn-beijing}
+      TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
+      INTERNAL_ARTICLE_URL: http://hub-engine:3001
+      CORS_ORIGINS: http://localhost:5173,http://localhost
+      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${AUDIO_ADMIN_PASSWORD}
+      FIRST_INVITE_CODE: ${FIRST_INVITE_CODE}
+      APP_ENV: ${AUDIO_APP_ENV:-production}
+      APP_DEBUG: ${AUDIO_APP_DEBUG:-false}
+      AUDIO_WEBHOOK_SECRET: ${AUDIO_WEBHOOK_SECRET}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      CELERY_TASK_SOFT_LIMIT_SECONDS: ${CELERY_TASK_SOFT_LIMIT_SECONDS:-7200}
+      CELERY_TASK_LIMIT_SECONDS: ${CELERY_TASK_LIMIT_SECONDS:-7500}
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/audio-uploads:/app/uploads"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      audio-service: { condition: service_started }
+    restart: always
+
+  nginx:
+    build:
+      context: .
+      dockerfile: ./nginx/Dockerfile
+    container_name: infohub-nginx
+    ports: ["80:80"]
+    depends_on:
+      hub-engine: { condition: service_started }
+      audio-service: { condition: service_started }
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

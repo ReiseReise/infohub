@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Docker volumes (local data)
+data/
+backups/
+exports/
+portable-bundles/
+migration-backups/
+local-secrets/
+
+# Build artifacts
+dist/
+build/
+*.tgz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Reports
+qa/reports/
+
+# OS
+Thumbs.db

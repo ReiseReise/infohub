@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>信息中枢 V3 总览仪表板</title>
+    <style>
+      :root {
+        --bg: #f4efe7;
+        --panel: rgba(255, 252, 247, 0.88);
+        --panel-strong: #fffaf2;
+        --line: rgba(103, 82, 49, 0.18);
+        --ink: #1f1b16;
+        --muted: #6d6356;
+        --accent: #0b6e4f;
+        --accent-soft: rgba(11, 110, 79, 0.12);
+        --warn: #c25b2b;
+        --warn-soft: rgba(194, 91, 43, 0.12);
+        --todo: #7a5c00;
+        --todo-soft: rgba(122, 92, 0, 0.12);
+        --shadow: 0 24px 60px rgba(49, 34, 14, 0.12);
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "PingFang SC", "Noto Sans SC", "Helvetica Neue", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(245, 180, 91, 0.22), transparent 28%),
+          radial-gradient(circle at top right, rgba(11, 110, 79, 0.16), transparent 26%),
+          linear-gradient(180deg, #f8f4ee 0%, var(--bg) 100%);
+      }
+
+      .wrap {
+        width: min(1240px, calc(100vw - 40px));
+        margin: 0 auto;
+        padding: 32px 0 56px;
+      }
+
+      .hero {
+        background: linear-gradient(135deg, rgba(255, 250, 242, 0.96), rgba(244, 236, 220, 0.9));
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        padding: 28px;
+        box-shadow: var(--shadow);
+        position: relative;
+        overflow: hidden;
+      }
+
+      .hero::after {
+        content: "";
+        position: absolute;
+        right: -80px;
+        top: -80px;
+        width: 220px;
+        height: 220px;
+        border-radius: 999px;
+        background: radial-gradient(circle, rgba(11, 110, 79, 0.18), transparent 68%);
+      }
+
+      h1, h2, h3, p { margin: 0; }
+      h1 {
+        font-size: clamp(28px, 5vw, 44px);
+        line-height: 1.05;
+        margin-bottom: 10px;
+      }
+
+      .subtitle {
+        max-width: 780px;
+        color: var(--muted);
+        line-height: 1.7;
+        font-size: 15px;
+      }
+
+      .hero-meta,
+      .quick-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .chip,
+      .quick-links a {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.72);
+        color: var(--ink);
+        text-decoration: none;
+        font-size: 13px;
+      }
+
+      .grid-4,
+      .grid-2 {
+        display: grid;
+        gap: 16px;
+        margin-top: 20px;
+      }
+
+      .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        padding: 18px;
+        box-shadow: 0 12px 30px rgba(53, 39, 20, 0.06);
+        backdrop-filter: blur(10px);
+      }
+
+      .metric {
+        font-size: 34px;
+        font-weight: 700;
+        margin-top: 10px;
+      }
+
+      .kicker {
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .section {
+        margin-top: 24px;
+      }
+
+      .section-head {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 12px;
+      }
+
+      .section-head p {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th, td {
+        text-align: left;
+        padding: 12px 10px;
+        border-bottom: 1px solid rgba(103, 82, 49, 0.12);
+        vertical-align: top;
+      }
+
+      th {
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .done { color: var(--accent); background: var(--accent-soft); }
+      .part { color: var(--warn); background: var(--warn-soft); }
+      .todo { color: var(--todo); background: var(--todo-soft); }
+
+      .flow {
+        display: grid;
+        gap: 14px;
+      }
+
+      .flow.system { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+      .flow.auto { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+      .node {
+        position: relative;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 14px;
+        background: var(--panel-strong);
+        min-height: 120px;
+      }
+
+      .node strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 15px;
+      }
+
+      .node p {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .arrow-row {
+        display: flex;
+        justify-content: center;
+        color: var(--muted);
+        font-size: 24px;
+        margin: 2px 0;
+      }
+
+      .acceptance {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .acceptance ul {
+        margin: 12px 0 0;
+        padding-left: 18px;
+        color: var(--muted);
+        line-height: 1.8;
+      }
+
+      .doc-map {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .doc-map a {
+        display: block;
+        text-decoration: none;
+        color: inherit;
+      }
+
+      .doc-map .card:hover {
+        transform: translateY(-2px);
+        transition: transform 180ms ease;
+      }
+
+      .footer-note {
+        margin-top: 20px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      @media (max-width: 1080px) {
+        .grid-4, .doc-map, .flow.system, .flow.auto { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+
+      @media (max-width: 720px) {
+        .wrap { width: min(100vw - 24px, 1240px); padding-top: 18px; }
+        .grid-4, .grid-2, .doc-map, .flow.system, .flow.auto, .acceptance { grid-template-columns: 1fr; }
+        .hero { padding: 22px; border-radius: 22px; }
+        .card { border-radius: 18px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <section class="hero">
+        <div class="kicker">InfoHub V3 / Product Dashboard</div>
+        <h1>信息中枢 V3 总览仪表板</h1>
+        <p class="subtitle">
+          这是给“看整体的人”准备的页面。它不负责技术细节穷举，而是把当前进度、功能地图、P0 问题收口、AI 治理方式、网页监控结果落点、页面验收路径和文档主入口收进一个视图里。
+        </p>
+        <div class="hero-meta">
+          <span class="chip">当前判断：内部可长期使用</span>
+          <span class="chip">主风险：ASR 凭证与非 RSS 扩展</span>
+          <span class="chip">当前主线：文档治理 + P0 可用性收口</span>
+          <span class="chip">最新 Gate：13 / 13 PASS</span>
+          <span class="chip">真实 URL 烟测：已单独接入</span>
+        </div>
+        <div class="quick-links">
+          <a href="./02-当前状态与功能地图.md">当前状态与功能地图</a>
+          <a href="./02-Folo继续借鉴策略.md">Folo 借鉴策略</a>
+          <a href="./03-路线图与优化计划.md">路线图与优化计划</a>
+          <a href="./00-文档总导航.md">文档总导航</a>
+        </div>
+      </section>
+
+      <section class="grid-4 section">
+        <div class="card">
+          <div class="kicker">功能成熟度</div>
+          <div class="metric">8 / 11</div>
+          <p class="subtitle">采集、阅读、导出、音频工坊、统一入口、AI 中心、规则治理、监控结果视图已进入可用区间。</p>
+        </div>
+        <div class="card">
+          <div class="kicker">当前主缺口</div>
+          <div class="metric">4</div>
+          <p class="subtitle">ASR 凭证接入、自动策略深化、非 RSS 信源、对外共享级稳定化。</p>
+        </div>
+        <div class="card">
+          <div class="kicker">文档状态</div>
+          <div class="metric">主入口已立</div>
+          <p class="subtitle">已从碎入口切到受众主导航，但历史短文档仍待物理归并。</p>
+        </div>
+        <div class="card">
+          <div class="kicker">验收准备</div>
+          <div class="metric">已就绪</div>
+          <p class="subtitle">管理员与普通用户双账号脚本已验证，可直接进入页面验收。</p>
+        </div>
+      </section>
+
+      <section class="section card">
+        <div class="section-head">
+          <div>
+            <h2>能力地图</h2>
+            <p>先看领域，不先看文件。项目状态必须从能力域来理解，而不是被文档目录牵着走。</p>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>能力域</th>
+              <th>状态</th>
+              <th>当前判断</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>采集域</td><td><span class="status done">高完成度</span></td><td>RSS / RSSHub / 网页快照 / 变更监控 / Custom / 播客已可用</td><td>YouTube 仍属半成品</td></tr>
+            <tr><td>处理域</td><td><span class="status part">中高完成度</span></td><td>规则、评分、摘要、翻译、音频链路可用</td><td>自动转写刚进入保守策略闭环</td></tr>
+            <tr><td>存储域</td><td><span class="status done">已完成</span></td><td>PG / pgvector / 文件存储主干稳定</td><td>已能支撑导出与知识沉淀</td></tr>
+            <tr><td>输出域</td><td><span class="status done">高完成度</span></td><td>Feed / Insights / Export / Audio 结果页 / 监控结果回流可用</td><td>重度阅读体验仍可继续打磨</td></tr>
+            <tr><td>管理域</td><td><span class="status part">中高完成度</span></td><td>登录、配额、管理员后台、AI 中心、诊断中心可用</td><td>自动策略维度还不够深</td></tr>
+            <tr><td>运维域</td><td><span class="status done">中高完成度</span></td><td>统一入口、健康检查、门禁链路已建立</td><td>文档治理正在收口</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="grid-2 section">
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>系统主链路</h2>
+              <p>这是“项目为什么已经可用”的主因，重点在于从采集到阅读再到输出已经闭环。</p>
+            </div>
+          </div>
+          <div class="flow system">
+            <div class="node"><strong>信源接入</strong><p>RSS、RSSHub、播客订阅、网页快照、变更监控、自定义 API。</p></div>
+            <div class="node"><strong>采集队列</strong><p>Cron 和手动触发并存，统一进入 fetch 队列。</p></div>
+            <div class="node"><strong>处理层</strong><p>去重、规则、评分、摘要、翻译、音频任务联动。</p></div>
+            <div class="node"><strong>输出层</strong><p>Feed、日报、导出、播客/音频结果、监控结果查看。</p></div>
+            <div class="node"><strong>沉淀与运维</strong><p>知识库、Obsidian、门禁、文档、统一入口。</p></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>自动转写策略</h2>
+              <p>本轮只做保守策略，目标是先把规则闭环做真，再谈更多策略维度。</p>
+            </div>
+          </div>
+          <div class="flow auto">
+            <div class="node"><strong>新音频条目</strong><p>仅对本次采集新入库的音频条目评估，不回填历史。</p></div>
+            <div class="node"><strong>Source 开关</strong><p>必须开启 `source.autoTranscribe`。</p></div>
+            <div class="node"><strong>用户总开关</strong><p>必须开启 `quota.autoTranscribeEnabled`。</p></div>
+            <div class="node"><strong>每日上限</strong><p>当前只真正执行 `maxAutoPerDay`。</p></div>
+            <div class="node"><strong>创建任务</strong><p>调用 audio-service 创建任务并回写 `audioTaskId`。</p></div>
+            <div class="node"><strong>Webhook 回写</strong><p>完成后回写 transcript / knowledge / duration。</p></div>
+          </div>
+          <p class="footer-note">
+            预留但未执行：`maxEpisodeMinutes`、`monthlyBudgetLimit`。这两项在页面和文档中必须明确写成“预留策略”，不能伪装成已生效。
+          </p>
+        </div>
+      </section>
+
+      <section class="grid-2 section">
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>AI 治理方式</h2>
+              <p>这轮的关键变化不是“又多了几个模型字段”，而是把模型、提示词和场景绑定收回到管理员统一治理。</p>
+            </div>
+          </div>
+          <div class="flow auto">
+            <div class="node"><strong>模型库</strong><p>统一维护 LLM / ASR / 多模态模型配置。</p></div>
+            <div class="node"><strong>模板库</strong><p>统一维护评分、摘要、翻译、日报总览等提示词模板。</p></div>
+            <div class="node"><strong>场景绑定</strong><p>把模型和模板绑定到 `scoring / summary / translation / daily_report`。</p></div>
+            <div class="node"><strong>阅读 AI</strong><p>普通用户在 Feed 里只消费已生效能力，不再自填 provider。</p></div>
+            <div class="node"><strong>日报总览</strong><p>日报保留确定性骨架，再拼上可编辑的 AI 总览段落。</p></div>
+            <div class="node"><strong>管理员控制</strong><p>配置入口统一在 Settings 的 AI 管理中心。</p></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-head">
+            <div>
+              <h2>网页监控结果落点</h2>
+              <p>网页监控以前最大的问题不是能不能抓，而是“抓完去哪看”。现在用双层视图把语义拆清楚。</p>
+            </div>
+          </div>
+          <div class="flow auto">
+            <div class="node"><strong>新建来源</strong><p>在 Monitor 里选择模式：网页快照或变更监控。</p></div>
+            <div class="node"><strong>网页快照</strong><p>一次性抓取网页内容，适合人工触发的采集任务。</p></div>
+            <div class="node"><strong>变更监控</strong><p>持续监听变化，适合 changedetection 类 watch。</p></div>
+            <div class="node"><strong>统一入 Feed</strong><p>两类结果都进入 Feed，不额外造第二套内容库。</p></div>
+            <div class="node"><strong>Monitor 时间线</strong><p>右侧时间线专门看结果和最近变化。</p></div>
+            <div class="node"><strong>回到阅读器</strong><p>点击结果可跳转 Feed 详情阅读。</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section card">
+        <div class="section-head">
+          <div>
+            <h2>P0 问题收口矩阵</h2>
+            <p>这部分直接回答“现在那些吐槽点到底有没有收口”。</p>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>问题</th>
+              <th>当前状态</th>
+              <th>结论</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>小宇宙 URL 解析失败</td><td>已验证到下载完成、预处理完成，并进入 ASR 阶段</td><td>问题已收敛为 ASR 环境未配置，不再是 URL 本身不可用</td></tr>
+            <tr><td>Feed 阅读体验差</td><td>已改为高密度列表 + 双栏阅读器 + 分区内容阅读</td><td>可以进入页面验收</td></tr>
+            <tr><td>提示词模板 / 日报提示词没法管</td><td>已进入管理员 AI 管理中心</td><td>模型、模板、场景绑定可统一管理</td></tr>
+            <tr><td>规则只有个人作用域</td><td>已支持全局规则 + 个人规则</td><td>管理员可配置对所有用户生效的规则</td></tr>
+            <tr><td>网页监控看不到结果</td><td>结果统一进 Feed，Monitor 提供时间线视图</td><td>快照抓取和变更监控已经分清</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section card">
+        <div class="section-head">
+          <div>
+            <h2>本轮进度看板</h2>
+            <p>只跟踪会真正改变理解和可用性的事项，不把小修小补堆成“进度”。</p>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>事项</th>
+              <th>状态</th>
+              <th>当前说明</th>
+              <th>验收信号</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>统一入口默认化</td><td><span class="status done">已完成</span></td><td>Nginx 默认进入 Compose</td><td>`/health` / `/api/health` / `/api/audio/health` 可用</td></tr>
+            <tr><td>文档主入口重建</td><td><span class="status done">已完成</span></td><td>状态、路线、策略回到产品主文档</td><td>新人能快速找到“当前状态 + 下一步”</td></tr>
+            <tr><td>HTML 总览板</td><td><span class="status done">已完成</span></td><td>提供独立可视化总览，不依赖 Web 构建</td><td>本页可直接打开</td></tr>
+            <tr><td>Feed 阅读器重构</td><td><span class="status done">已完成</span></td><td>阅读体验对齐高密度阅读流</td><td>列表和详情可直观看出层级</td></tr>
+            <tr><td>AI 管理中心收口</td><td><span class="status done">已完成</span></td><td>模型库 / 模板库 / 场景绑定进入管理员后台</td><td>阅读 AI 与日报总览已可统一配置</td></tr>
+            <tr><td>规则双作用域</td><td><span class="status done">已完成</span></td><td>支持全局规则与个人规则</td><td>管理员规则对所有用户生效</td></tr>
+            <tr><td>网页监控双层视图</td><td><span class="status done">已完成</span></td><td>快照与变更监控分层，结果有时间线</td><td>Monitor 不再只有“源管理”</td></tr>
+            <tr><td>真实平台音频烟测</td><td><span class="status done">已完成</span></td><td>新增独立 `qa-real-audio` 入口</td><td>默认门禁不依赖外网，真实 URL 仍可单独验证</td></tr>
+            <tr><td>自动转写保守策略</td><td><span class="status done">已完成（本轮范围）</span></td><td>Source 开关 + 全局开关 + 每日上限</td><td>P0 自动转写回归通过</td></tr>
+            <tr><td>验收账号标准化</td><td><span class="status done">已完成</span></td><td>管理员 / 普通用户双账号脚本</td><td>每次都能得到同一套可登录账号</td></tr>
+            <tr><td>ASR 凭证接入</td><td><span class="status todo">下一轮 P0</span></td><td>真实 URL 已收敛到环境配置问题</td><td>补齐凭证后可跑完整转写</td></tr>
+            <tr><td>非 RSS 信源扩展</td><td><span class="status todo">后续</span></td><td>X / 公众号等仍未工程化</td><td>后续再推进</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="section acceptance">
+        <div class="card">
+          <div class="kicker">User Acceptance</div>
+          <h3 style="margin-top: 6px;">普通用户验收路径</h3>
+          <ul>
+            <li>登录</li>
+            <li>进入 Feed 阅读与详情，切换摘要 / 原文 / 翻译 / 转写 / 知识</li>
+            <li>在 Sources 新增信源并开启自动转写</li>
+            <li>在 Monitor 验证网页快照与变更监控的结果时间线</li>
+            <li>在 Audio 查看真实 URL 任务详情与失败码 / 策略信息</li>
+            <li>在 Rules 验证个人规则</li>
+            <li>在 Settings 检查全局自动转写与“阅读 AI”状态</li>
+          </ul>
+        </div>
+        <div class="card">
+          <div class="kicker">Admin Acceptance</div>
+          <h3 style="margin-top: 6px;">管理员验收路径</h3>
+          <ul>
+            <li>登录</li>
+            <li>进入 Settings 的 AI 管理中心，验证模型库 / 模板库 / 场景绑定</li>
+            <li>在 Rules 切换到全局规则并验证生效边界</li>
+            <li>进入 Settings 的 Diagnostics</li>
+            <li>查看 Admin Dashboard / Tasks / Users / Invites</li>
+            <li>验证权限边界：普通用户不可见后台页签</li>
+            <li>确认队列、代理测试与邀请管理正常</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <div>
+            <h2>文档地图</h2>
+            <p>真正重要的文档只保留少数主入口，其余都应该是参考或归档材料。</p>
+          </div>
+        </div>
+        <div class="doc-map">
+          <a href="./02-当前状态与功能地图.md"><div class="card"><div class="kicker">Status</div><h3 style="margin-top: 6px;">当前状态与功能地图</h3><p class="footer-note">判断现在到底能不能用、哪些能力成熟、哪些还只是半成品。</p></div></a>
+          <a href="./02-Folo继续借鉴策略.md"><div class="card"><div class="kicker">Benchmark</div><h3 style="margin-top: 6px;">Folo 借鉴策略</h3><p class="footer-note">说明为什么继续学 Folo，但只学 UX / IA，不做架构迁移。</p></div></a>
+          <a href="./03-路线图与优化计划.md"><div class="card"><div class="kicker">Roadmap</div><h3 style="margin-top: 6px;">路线图与优化计划</h3><p class="footer-note">看当前正在做什么、下一步优先级是什么、Definition of Done 怎么定。</p></div></a>
+          <a href="./00-文档总导航.md"><div class="card"><div class="kicker">Docs</div><h3 style="margin-top: 6px;">文档总导航</h3><p class="footer-note">从顶层设计、当前状态、路线图、实现专题、运维和归档六条主线进入。</p></div></a>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>
