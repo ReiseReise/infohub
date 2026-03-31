@@ -96,12 +96,16 @@ export interface DiscoveryCandidate {
   description?: string | null;
   websiteUrl?: string | null;
   feedUrl?: string | null;
+  sourceHost?: string | null;
+  iconUrl?: string | null;
   sourceType: string;
   collectorType: string;
   config: Record<string, unknown>;
   reason: string;
   confidence: number;
   discoveryKey: string;
+  sampleCount: number;
+  latestPublishedAt?: string | null;
   alreadySubscribed?: boolean;
   sampleItems: Array<{
     title: string;

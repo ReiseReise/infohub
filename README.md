@@ -149,7 +149,7 @@ make portable-import BUNDLE=./portable-bundles/infohub-v3-portable-<timestamp>.t
 
 - 当前默认是`本地手动启动`模式：如果整套容器未运行，系统不会持续抓取；重新启动后，`hub-engine` 会先补抓一轮到期来源，再回到 5 分钟混合调度。
 - 现在可以在 `/feed`、`/sources`、`/settings` 直接看到数据新鲜度状态；如果看到 `warning / stale`，优先执行“立即补抓到期来源”。
-- 动态网页正文和网页快照监控采用“原生提取优先，Scrapling 失败兜底”的分层策略。
+- 动态网页正文和网页快照监控采用“原生提取优先，Scrapling 失败兜底，必要时 browser-assist 再兜一层”的分层策略。
 - 历史数据默认只保留最近 30 天；收藏、稍后读和仍被保留条目引用的音频任务不会被直接清理。
 - AI 管理中心现在分成 `场景控制台 / 模型仓库 / 评分 Skills / 使用日志` 四层；模型支持人类可读 `alias`，Skills 不再埋在“功能管理”深处。
 - 管理员可在 `Settings > 诊断中心` 查看 Scrapling 健康状态、抓取新鲜度和最近一次历史裁剪结果。

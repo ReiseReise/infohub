@@ -96,12 +96,19 @@ async function checkRedis(): Promise<ServiceHealth> {
 // GET /api/diagnostics/network
 app.get('/network', async (c) => {
   requireAuth(c);
-  const checks = await Promise.all([
+  const httpChecks = [
     checkHttpService('hub-engine', `http://127.0.0.1:${config.port}/`),
     checkHttpService('rsshub', `${config.rsshub.baseUrl}/`),
     checkHttpService('changedetection', config.changedetection.url),
     checkHttpService('scrapling-service', `${config.scrapling.url.replace(/\/+$/, '')}/health`),
     checkHttpService('ntfy', `${config.ntfy.url.replace(/\/+$/, '')}/v1/health`),
+  ];
+  if (config.browserAssist.enabled && config.browserAssist.url) {
+    httpChecks.push(checkHttpService('browser-assist', `${config.browserAssist.url.replace(/\/+$/, '')}/health`));
+  }
+
+  const checks = await Promise.all([
+    ...httpChecks,
     checkDatabase(),
     checkRedis(),
   ]);

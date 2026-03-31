@@ -6,6 +6,7 @@ import { parseOpml } from '../lib/opml-parser.js';
 import { requireAuth } from '../lib/auth.js';
 import { computeSourceFreshness } from '../lib/freshness.js';
 import { deriveSourceProfile, normalizeGrowthAxes } from '../lib/growth.js';
+import { buildSourceFingerprint } from '../lib/source-normalization.js';
 
 const app = new Hono();
 
@@ -293,16 +294,46 @@ app.post('/import-opml', async (c) => {
       return c.json({ error: 'No feeds found in OPML' }, 400);
     }
 
+    const existingSources = await db
+      .select({
+        collectorType: schema.sources.collectorType,
+        config: schema.sources.config,
+      })
+      .from(schema.sources)
+      .where(eq(schema.sources.userId, authUser.userId));
+
+    const existingFingerprints = new Set(
+      existingSources
+        .map((source) => buildSourceFingerprint(source.collectorType, source.config))
+        .filter((value): value is string => Boolean(value)),
+    );
+
     let imported = 0;
     let skipped = 0;
     const errors: string[] = [];
 
     for (const feed of feeds) {
       try {
-        const sourceType = feed.xmlUrl.includes('youtube.com') ? 'rsshub' :
-                           feed.xmlUrl.includes('rsshub.app') ? 'rsshub' : 'rss';
-        const collectorType = feed.xmlUrl.includes('youtube.com') ? 'youtube' :
-                              feed.xmlUrl.includes('rsshub.app') ? 'rsshub' : 'rss';
+        let sourceType = feed.xmlUrl.includes('youtube.com') ? 'rsshub' : 'rss';
+        let collectorType = feed.xmlUrl.includes('youtube.com') ? 'youtube' : 'rss';
+        let configPayload: Record<string, unknown> = { url: feed.xmlUrl, htmlUrl: feed.htmlUrl };
+
+        try {
+          const parsed = new URL(feed.xmlUrl);
+          if (/rsshub/i.test(parsed.hostname)) {
+            sourceType = 'rsshub';
+            collectorType = 'rsshub';
+            configPayload = { route: parsed.pathname + parsed.search, htmlUrl: feed.htmlUrl };
+          }
+        } catch {
+          // keep rss defaults
+        }
+
+        const fingerprint = buildSourceFingerprint(collectorType, configPayload);
+        if (fingerprint && existingFingerprints.has(fingerprint)) {
+          skipped++;
+          continue;
+        }
 
         const inserted = await db.insert(schema.sources).values({
           userId: authUser.userId,
@@ -315,7 +346,7 @@ app.post('/import-opml', async (c) => {
           noiseScore: collectorType === 'youtube' ? 24 : 42,
           growthAxes: ['认知升级'],
           upgradeRules: {},
-          config: { url: feed.xmlUrl, htmlUrl: feed.htmlUrl },
+          config: configPayload,
           category: feed.category || 'uncategorized',
           priority: 3,
           fetchInterval: 60,
@@ -323,6 +354,7 @@ app.post('/import-opml', async (c) => {
 
         if (inserted.length > 0) {
           imported++;
+          if (fingerprint) existingFingerprints.add(fingerprint);
         } else {
           skipped++;
         }

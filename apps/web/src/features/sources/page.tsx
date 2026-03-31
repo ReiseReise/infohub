@@ -139,6 +139,37 @@ function freshnessLabel(source: SourceRecord) {
   }
 }
 
+function discoveryReasonLabel(reason: string) {
+  switch (reason) {
+    case 'direct-feed':
+      return '直接命中 feed';
+    case 'html-alternate':
+      return '站点 alternate feed';
+    case 'rsshub-route':
+      return 'RSSHub 路由';
+    case 'existing-source-match':
+      return '已有关联源';
+    case 'url-probe':
+      return '常见 feed 路径探测';
+    default:
+      return reason;
+  }
+}
+
+function sourceFeedLabel(source: SourceRecord) {
+  const config = (source.config || {}) as Record<string, unknown>;
+  if (source.collectorType === 'rsshub' && typeof config.route === 'string') return config.route;
+  if (typeof config.url === 'string') return config.url;
+  if (typeof config.endpoint === 'string') return config.endpoint;
+  return '';
+}
+
+function sourceWebsiteLabel(source: SourceRecord) {
+  const config = (source.config || {}) as Record<string, unknown>;
+  if (typeof config.htmlUrl === 'string') return config.htmlUrl;
+  return '';
+}
+
 export function Sources() {
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [stats, setStats] = useState<SourceStats | null>(null);
@@ -590,31 +621,82 @@ export function Sources() {
         {discoverResults.length > 0 && (
           <div className="mt-3 space-y-2 max-h-72 overflow-y-auto">
             {discoverResults.map((candidate) => (
-              <div key={candidate.discoveryKey} className="border border-zinc-100 rounded-lg px-3 py-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium text-zinc-800 truncate">{candidate.title}</p>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-500">
-                        {candidate.collectorType}
-                      </span>
-                      {candidate.alreadySubscribed && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
-                          已订阅
-                        </span>
+              <div key={candidate.discoveryKey} className="rounded-xl border border-zinc-200 bg-zinc-50/60 px-3 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start gap-3">
+                      {candidate.iconUrl ? (
+                        <img src={candidate.iconUrl} alt="" className="mt-0.5 h-8 w-8 rounded-lg border border-zinc-200 bg-white object-cover" />
+                      ) : (
+                        <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200 bg-white text-[11px] font-semibold uppercase text-zinc-500">
+                          {(candidate.sourceHost || candidate.title || '?').slice(0, 1)}
+                        </div>
                       )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-medium text-zinc-800 truncate">{candidate.title}</p>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-500">
+                            {candidate.collectorType}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-100 text-sky-700">
+                            {Math.round(candidate.confidence * 100)}% 命中
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">
+                            {discoveryReasonLabel(candidate.reason)}
+                          </span>
+                          {candidate.alreadySubscribed && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
+                              已订阅
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                          {candidate.sourceHost && <span>{candidate.sourceHost}</span>}
+                          {candidate.latestPublishedAt && <span>最近更新 {new Date(candidate.latestPublishedAt).toLocaleString()}</span>}
+                          {candidate.sampleCount > 0 && <span>预览 {candidate.sampleCount} 条</span>}
+                        </div>
+                        {candidate.description && (
+                          <p className="mt-1 text-xs leading-5 text-zinc-500 line-clamp-2">{candidate.description}</p>
+                        )}
+                        <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+                          {candidate.websiteUrl && (
+                            <a
+                              href={candidate.websiteUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-zinc-600 hover:bg-zinc-100"
+                            >
+                              站点
+                            </a>
+                          )}
+                          {candidate.feedUrl && (
+                            <a
+                              href={candidate.feedUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-zinc-600 hover:bg-zinc-100"
+                            >
+                              Feed
+                            </a>
+                          )}
+                        </div>
+                        {candidate.sampleItems.length > 0 && (
+                          <div className="mt-2 space-y-1 rounded-lg border border-zinc-200 bg-white px-2.5 py-2">
+                            {candidate.sampleItems.slice(0, 3).map((sample, index) => (
+                              <div key={`${candidate.discoveryKey}-${index}`} className="flex items-start justify-between gap-3 text-[11px] text-zinc-500">
+                                <span className="min-w-0 flex-1 truncate">{sample.title}</span>
+                                {sample.publishedAt && <span className="shrink-0 text-zinc-400">{new Date(sample.publishedAt).toLocaleDateString()}</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    {candidate.feedUrl && (
-                      <p className="text-xs text-zinc-500 truncate mt-0.5">{candidate.feedUrl}</p>
-                    )}
-                    {candidate.sampleItems[0]?.title && (
-                      <p className="text-xs text-zinc-400 truncate mt-0.5">示例：{candidate.sampleItems[0].title}</p>
-                    )}
                   </div>
                   <button
                     onClick={() => void handleSubscribeCandidate(candidate)}
                     disabled={Boolean(candidate.alreadySubscribed) || subscribingKey === candidate.discoveryKey}
-                    className="px-2.5 py-1.5 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
+                    className="shrink-0 px-2.5 py-1.5 text-xs rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 disabled:opacity-40"
                   >
                     {subscribingKey === candidate.discoveryKey ? '订阅中...' : candidate.alreadySubscribed ? '已订阅' : '订阅'}
                   </button>
@@ -845,6 +927,8 @@ export function Sources() {
           {sources.map((source) => {
             const schedule = scheduleLabel(source);
             const freshness = freshnessLabel(source);
+            const feedLabel = sourceFeedLabel(source);
+            const websiteLabel = sourceWebsiteLabel(source);
             return (
               <div key={source.id} className="flex items-center gap-3 p-3 rounded-lg border border-zinc-100 hover:border-zinc-200 transition-colors">
               <div className={`w-2 h-2 rounded-full ${source.status === 'active' ? 'bg-emerald-500' : source.status === 'error' ? 'bg-red-500' : 'bg-zinc-300'}`} />
@@ -882,6 +966,15 @@ export function Sources() {
                   {source.staleReason && <span className="text-[10px] text-amber-500 truncate max-w-60">{source.staleReason}</span>}
                   {source.lastError && <span className="text-[10px] text-red-400 truncate max-w-60">{source.lastError}</span>}
                 </div>
+                {(feedLabel || websiteLabel || source.lastFetchEngine || source.blockedReason || source.lastChangeSummary) && (
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-zinc-400">
+                    {websiteLabel && <span className="max-w-72 truncate">站点: {websiteLabel}</span>}
+                    {feedLabel && <span className="max-w-80 truncate">订阅: {feedLabel}</span>}
+                    {source.lastFetchEngine && <span>引擎: {source.lastFetchEngine}</span>}
+                    {source.lastChangeSummary && <span className="max-w-72 truncate">变化: {source.lastChangeSummary}</span>}
+                    {source.blockedReason && <span className="max-w-72 truncate text-amber-600">阻断: {source.blockedReason}</span>}
+                  </div>
+                )}
                 <div className="mt-2 flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                   <div className="flex flex-wrap gap-2">
                     <select

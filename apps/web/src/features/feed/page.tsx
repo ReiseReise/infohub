@@ -113,6 +113,8 @@ function fetchEngineLabel(item?: FeedItem | null): string {
       return 'Scrapling Dynamic';
     case 'scrapling-stealth':
       return 'Scrapling Stealth';
+    case 'browser-assist':
+      return 'Browser Assist';
     default:
       return '';
   }
@@ -128,6 +130,8 @@ function renderModeLabel(mode?: string | null): string {
       return 'stealth';
     case 'auto':
       return 'auto';
+    case 'browser-assist':
+      return 'browser-assist';
     default:
       return '';
   }
@@ -952,6 +956,13 @@ export function Feed() {
                       )}
                     </div>
                   </div>
+                  {item.mediaUrl && item.mediaType === 'image' && (
+                    <img
+                      src={item.mediaUrl}
+                      alt=""
+                      className="mt-1 h-16 w-16 shrink-0 rounded-xl border border-zinc-200 object-cover"
+                    />
+                  )}
 
                   <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button

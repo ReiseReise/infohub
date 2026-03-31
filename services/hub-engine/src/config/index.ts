@@ -86,6 +86,14 @@ export const config = {
     timeoutMs: parseInt(process.env.SCRAPLING_TIMEOUT_MS || '20000', 10),
   },
 
+  browserAssist: {
+    enabled: process.env.BROWSER_ASSIST_ENABLED === 'true',
+    url: process.env.BROWSER_ASSIST_URL || '',
+    token: process.env.BROWSER_ASSIST_TOKEN || '',
+    provider: process.env.BROWSER_ASSIST_PROVIDER || 'generic',
+    timeoutMs: parseInt(process.env.BROWSER_ASSIST_TIMEOUT_MS || '25000', 10),
+  },
+
   ntfy: {
     url: process.env.NTFY_URL || 'http://localhost:8081',
     topic: process.env.NTFY_TOPIC || 'infohub',

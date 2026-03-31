@@ -8,6 +8,9 @@ export interface RawItem {
   mediaUrl?: string;
   mediaType?: 'audio' | 'video' | 'image';
   audioDuration?: number;
+  fetchEngine?: string;
+  renderMode?: string;
+  blockedReason?: string;
   rawData?: Record<string, unknown>;
 }
 
@@ -24,6 +27,9 @@ export interface SourceConfig {
   name: string;
   sourceType: string;
   collectorType: string;
+  sourceTier?: string;
+  processingProfile?: string;
+  sourceRole?: string;
   config: Record<string, unknown>;
   category: string;
   priority: number;

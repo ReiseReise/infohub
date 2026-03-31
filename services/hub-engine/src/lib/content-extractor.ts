@@ -1,11 +1,17 @@
 import { fetch } from 'undici';
+import { fetchBrowserAssist } from './browser-assist-client.js';
 import {
   fetchScraplingArticle,
   fetchScraplingSnapshot,
   resolvePreferredScraplingMode,
 } from './scrapling-client.js';
 
-export type FetchEngine = 'native' | 'scrapling-http' | 'scrapling-dynamic' | 'scrapling-stealth';
+export type FetchEngine =
+  | 'native'
+  | 'scrapling-http'
+  | 'scrapling-dynamic'
+  | 'scrapling-stealth'
+  | 'browser-assist';
 
 export interface ExtractedArticleResult {
   title: string | null;
@@ -398,6 +404,24 @@ function normalizeRenderedArticle(
   };
 }
 
+function normalizeBrowserAssistArticle(
+  assisted: Awaited<ReturnType<typeof fetchBrowserAssist>> | null,
+): ExtractedArticleResult | null {
+  if (!assisted) return null;
+  const content = cleanArticleBody(assisted.content || assisted.html || '', 50000)
+    || cleanArticleBody(assisted.html || '', 50000)
+    || assisted.content
+    || null;
+  if (!content) return null;
+  return {
+    title: assisted.title || null,
+    content: content.slice(0, 50000),
+    fetchEngine: 'browser-assist',
+    renderMode: assisted.renderMode || 'browser-assist',
+    blockedReason: assisted.blockedReason || null,
+  };
+}
+
 export async function fetchArticleResult(url: string, timeoutMs = 8000): Promise<ExtractedArticleResult | null> {
   if (!/^https?:\/\//i.test(url)) return null;
 
@@ -469,9 +493,24 @@ export async function fetchArticleResult(url: string, timeoutMs = 8000): Promise
       };
     }
 
-    return normalizeRenderedArticle(await fetchScraplingArticle(url, 'auto'));
+    const rendered = normalizeRenderedArticle(await fetchScraplingArticle(url, 'auto'));
+    if (rendered?.content && plainTextLength(rendered.content) >= 80) {
+      return rendered;
+    }
+
+    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article'));
+    if (assisted?.content && plainTextLength(assisted.content) >= 80) {
+      return assisted;
+    }
+
+    return rendered || assisted;
   } catch {
-    return normalizeRenderedArticle(await fetchScraplingArticle(url, preferredScraplingMode));
+    const rendered = normalizeRenderedArticle(await fetchScraplingArticle(url, preferredScraplingMode));
+    if (rendered?.content && plainTextLength(rendered.content) >= 80) {
+      return rendered;
+    }
+    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article'));
+    return assisted || rendered;
   } finally {
     clearTimeout(timeout);
   }
@@ -547,13 +586,32 @@ export async function fetchPageSnapshot(
     }
 
     const rendered = normalizeRenderedArticle(await fetchScraplingSnapshot(url, 'auto'));
+    if (rendered?.content && plainTextLength(rendered.content) >= 80) {
+      return {
+        ...rendered,
+        title: rendered.title || snapshot.title || null,
+        content: rendered.content || snapshot.content || null,
+      };
+    }
+
+    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'snapshot'));
+    if (assisted?.content) {
+      return {
+        ...assisted,
+        title: assisted.title || rendered?.title || snapshot.title || null,
+        content: assisted.content || rendered?.content || snapshot.content || null,
+      };
+    }
+
     return rendered ? {
       ...rendered,
       title: rendered.title || snapshot.title || null,
       content: rendered.content || snapshot.content || null,
     } : snapshot;
   } catch {
-    return normalizeRenderedArticle(await fetchScraplingSnapshot(url, preferredScraplingMode));
+    const rendered = normalizeRenderedArticle(await fetchScraplingSnapshot(url, preferredScraplingMode));
+    if (rendered?.content) return rendered;
+    return normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'snapshot'));
   } finally {
     clearTimeout(timeout);
   }
