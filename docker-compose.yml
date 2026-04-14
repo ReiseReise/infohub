@@ -138,6 +138,7 @@ services:
       SCRAPLING_ENABLED: ${SCRAPLING_ENABLED:-true}
       SCRAPLING_SERVICE_URL: ${SCRAPLING_SERVICE_URL:-http://scrapling-service:8010}
       SCRAPLING_TIMEOUT_MS: ${SCRAPLING_TIMEOUT_MS:-20000}
+      INFOHUB_FOLLOW_OPML_PATH: /app/fixtures/follow.opml
       INFOHUB_HN_POPULAR_BLOGS_PATH: /app/fixtures/hn-popular-blogs-2025.opml
       KNOWLEDGE_DIR: ${KNOWLEDGE_DIR:-/app/knowledge}
       HOST_DATA_ROOT: ${HOST_DATA_ROOT:-./data}
@@ -156,6 +157,7 @@ services:
       - "${HOST_DATA_ROOT:-./data}/knowledge:/app/knowledge"
       - "${HOST_BACKUP_ROOT:-./backups}:/app/backups"
       - "${HOST_EXPORT_ROOT:-./exports}:/app/exports"
+      - ./follow.opml:/app/fixtures/follow.opml:ro
       - ./hn-popular-blogs-2025.opml:/app/fixtures/hn-popular-blogs-2025.opml:ro
     restart: always
     healthcheck:

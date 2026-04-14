@@ -10,6 +10,7 @@ import { WebpageCollector } from '../collectors/webpage.js';
 import type { Collector, SourceConfig, RawItem } from '../collectors/base.js';
 import { fetchQueue, type FetchJobData } from './queue.js';
 import type { Job } from 'bullmq';
+import { isFetchJobInFlight, shouldRemoveExistingFetchJob } from './fetch-dedupe.js';
 import { buildSnippet, detectLikelyLanguage } from '../lib/content-extractor.js';
 import { maybeAutoTranscribeItem, type AutoTranscribeCandidate } from '../services/auto-transcribe.js';
 import { applyFilterRules } from '../processors/filter.js';
@@ -57,8 +58,12 @@ export async function enqueueSourceFetch(
     const existing = await fetchQueue.getJob(jobId);
     if (existing) {
       const state = await existing.getState();
-      if (['waiting', 'active', 'delayed', 'prioritized'].includes(state)) {
+      if (isFetchJobInFlight(state)) {
         return { jobId, enqueued: false, state };
+      }
+      if (shouldRemoveExistingFetchJob(state)) {
+        await existing.remove();
+        logger.debug({ jobId, state, sourceId: params.sourceId }, 'Removed terminal fetch job before re-enqueue');
       }
     }
   }

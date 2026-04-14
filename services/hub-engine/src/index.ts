@@ -125,6 +125,12 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table hub.items add column if not exists translation_status text default 'pending'`);
   await db.execute(sql`alter table hub.items add column if not exists translation_reason text`);
   await db.execute(sql`alter table hub.items add column if not exists audio_status_reason text`);
+  await db.execute(sql`alter table hub.items drop constraint if exists items_audio_status_check`);
+  await db.execute(sql`
+    alter table hub.items
+    add constraint items_audio_status_check
+    check (audio_status in ('none', 'pending', 'processing', 'done', 'error', 'skipped'))
+  `);
   await db.execute(sql`
     update hub.items
     set content_status = case
@@ -410,8 +416,48 @@ async function ensureSchemaCompatibility() {
   `);
 }
 
+async function reconcileRunningFetchLogs() {
+  await db.execute(sql`
+    with superseded as (
+      select running.id,
+             coalesce(min(done.finished_at), now()) as reconciled_finished_at
+      from hub.fetch_logs running
+      join hub.fetch_logs done
+        on done.source_id = running.source_id
+       and done.status in ('success', 'error')
+       and done.started_at > running.started_at
+      where running.status = 'running'
+      group by running.id
+    ),
+    stale as (
+      select id,
+             now() as reconciled_finished_at
+      from hub.fetch_logs
+      where status = 'running'
+        and started_at < now() - interval '6 hours'
+    ),
+    candidates as (
+      select * from superseded
+      union
+      select * from stale
+    )
+    update hub.fetch_logs log
+    set status = 'error',
+        outcome = coalesce(log.outcome, 'error'),
+        finished_at = coalesce(log.finished_at, candidates.reconciled_finished_at),
+        error = coalesce(nullif(log.error, ''), 'Fetch log reconciled after worker restart or superseded completion'),
+        duration_ms = coalesce(
+          log.duration_ms,
+          greatest(0, floor(extract(epoch from (candidates.reconciled_finished_at - log.started_at)) * 1000)::int)
+        )
+    from candidates
+    where log.id = candidates.id
+  `);
+}
+
 async function bootstrap() {
   await ensureSchemaCompatibility();
+  await reconcileRunningFetchLogs();
   pinoLogger.info('Fetch worker started');
   startCronJobs();
   void enqueueDueFetches(50).then((result) => {

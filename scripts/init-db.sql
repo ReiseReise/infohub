@@ -128,7 +128,7 @@ CREATE TABLE hub.items (
   transcript         TEXT,
   knowledge          TEXT,
   audio_duration     INT,
-  audio_status       TEXT DEFAULT 'none' CHECK (audio_status IN ('none', 'pending', 'processing', 'done', 'error')),
+  audio_status       TEXT DEFAULT 'none' CHECK (audio_status IN ('none', 'pending', 'processing', 'done', 'error', 'skipped')),
   audio_task_id      TEXT,
 
   -- 向量（pgvector）

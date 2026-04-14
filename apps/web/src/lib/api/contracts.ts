@@ -342,6 +342,8 @@ export interface SubscriptionPackageMeta {
   title: string;
   description: string;
   sourceCount: number;
+  categoryDefault?: string;
+  tierSummary?: Partial<Record<'S' | 'A' | 'B' | 'C' | 'D' | string, number>>;
 }
 
 export interface BatchSubscriptionResult {

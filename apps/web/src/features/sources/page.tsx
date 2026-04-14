@@ -634,7 +634,7 @@ export function Sources() {
     setNotice(null);
     try {
       const result = await api.subscriptions.importPackage(pkg.slug, {
-        categoryDefault: 'hn-popular-blogs',
+        categoryDefault: pkg.categoryDefault || pkg.slug,
         limit: pkg.sourceCount,
       });
       setNotice(`${pkg.title} 导入完成：新增 ${result.summary.created}，重复 ${result.summary.duplicates}，失败 ${result.summary.failed}`);
@@ -717,10 +717,13 @@ export function Sources() {
             <div key={pkg.slug} className="rounded-xl border border-amber-200 bg-[linear-gradient(135deg,_rgba(254,243,199,0.55),_rgba(255,255,255,0.96))] p-4">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-amber-700/80">Bundled Test Package</div>
+                  <div className="text-[11px] uppercase tracking-[0.22em] text-amber-700/80">Bundled Subscription Package</div>
                   <h2 className="mt-1 text-base font-semibold text-zinc-900">{pkg.title}</h2>
                   <p className="mt-1 text-sm text-zinc-600">{pkg.description}</p>
-                  <p className="mt-1 text-xs text-zinc-500">内置 {pkg.sourceCount} 个真实博客源，适合验证 RSS 抓取、AI 评分、摘要、翻译与规则过滤。</p>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    内置 {pkg.sourceCount} 个源
+                    {pkg.tierSummary ? ` · ${Object.entries(pkg.tierSummary).map(([tier, count]) => `${tier} ${count}`).join(' / ')}` : ''}
+                  </p>
                 </div>
                 <button
                   onClick={() => void handleImportPackage(pkg)}
@@ -728,7 +731,7 @@ export function Sources() {
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-amber-900 hover:bg-amber-50 disabled:opacity-50"
                 >
                   <Upload size={14} />
-                  {packageImportingSlug === pkg.slug ? '导入中...' : '导入测试包'}
+                  {packageImportingSlug === pkg.slug ? '导入中...' : '导入订阅包'}
                 </button>
               </div>
             </div>
