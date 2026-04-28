@@ -1282,6 +1282,16 @@ export function Sources() {
                       )}
 
                       <div className="mt-4 flex flex-col gap-3">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                          <span>单源质检覆盖在过滤策略台编辑</span>
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/rules?source=${source.id}`)}
+                            className="rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[10px] text-zinc-700 hover:bg-zinc-100"
+                          >
+                            打开过滤策略
+                          </button>
+                        </div>
                         <div className="flex flex-wrap gap-2">
                           <select
                             value={source.sourceTier || 'B'}

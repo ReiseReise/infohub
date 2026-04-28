@@ -10,6 +10,7 @@ import { Rules } from './pages/Rules';
 import { Settings } from './pages/Settings';
 import { AudioStudio } from './pages/AudioStudio';
 import { PodcastHub } from './pages/PodcastHub';
+import { Filtered } from './pages/Filtered';
 import { Login } from './pages/Login';
 import { Register } from './pages/Register';
 import { useAuth } from './lib/use-auth';
@@ -63,6 +64,7 @@ function App() {
             <Route path="/insights" element={<Insights />} />
             <Route path="/export" element={<Export />} />
             <Route path="/rules" element={<Rules />} />
+            <Route path="/filtered" element={<Filtered />} />
             <Route path="/audio" element={<AudioStudio />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/" element={<Navigate to="/insights" replace />} />

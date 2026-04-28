@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Newspaper, Radio, Settings, BarChart3, Download, Filter, Upload, Mic, Globe } from 'lucide-react';
+import { Newspaper, Radio, Settings, BarChart3, Download, Filter, Upload, Mic, Globe, Archive } from 'lucide-react';
 import { useAuth } from '../lib/use-auth';
 
 const navItems = [
@@ -9,7 +9,8 @@ const navItems = [
   { to: '/audio', label: '音频工坊', icon: Upload },
   { to: '/sources', label: '信源管理', icon: Radio },
   { to: '/monitor', label: '网页监控', icon: Globe },
-  { to: '/rules', label: '规则过滤', icon: Filter },
+  { to: '/rules', label: '过滤策略', icon: Filter },
+  { to: '/filtered', label: '过滤池', icon: Archive },
   { to: '/export', label: '导出', icon: Download },
   { to: '/settings', label: '设置', icon: Settings },
 ];
