@@ -13,6 +13,7 @@ import {
 import { ensureItemContent, resolveItemText } from '../lib/item-enrichment.js';
 import { startAudioTaskForItem } from '../services/audio.js';
 import { scoreItems, scoreItemsDetailed } from '../processors/ai-scorer.js';
+import { qualityFilterItemsDetailed } from '../processors/quality-filter.js';
 import { summarizeItems, summarizeItemsDetailed, translateItemsDetailed, translateItemsWithOptions } from '../processors/ai-summarizer.js';
 import { getEffectiveAiSceneAvailability } from '../lib/ai-configs.js';
 import { getItemScoreBreakdowns, getLatestItemFeedback } from '../lib/scoring-skills.js';
@@ -86,21 +87,35 @@ app.get('/', async (c) => {
   const sourceType = c.req.query('sourceType');
   const collectorType = c.req.query('collectorType');
   const category = c.req.query('category');
+  const sourceTier = c.req.query('sourceTier');
   const monitorOnly = c.req.query('monitorOnly') === 'true';
   const search = c.req.query('search');
   const sortBy = c.req.query('sortBy') || 'publishedAt';
   const sourceId = c.req.query('sourceId');
   const includeFiltered = c.req.query('includeFiltered') === 'true';
+  const bucket = c.req.query('bucket');
+  const qualityDecision = c.req.query('qualityDecision');
+  const qualityTag = c.req.query('qualityTag');
+  const restored = c.req.query('restored');
 
   const conditions: SQL<unknown>[] = [eq(schema.items.userId, authUser.userId)];
-  if (!includeFiltered) conditions.push(eq(schema.items.isFiltered, false));
+  if (bucket === 'filtered') {
+    conditions.push(eq(schema.items.filterBucket, 'filtered'));
+  } else {
+    conditions.push(eq(schema.items.filterBucket, 'main'));
+    if (!includeFiltered) conditions.push(eq(schema.items.isFiltered, false));
+  }
   if (isRead !== undefined) conditions.push(eq(schema.items.isRead, isRead === 'true'));
   if (isFavorite !== undefined) conditions.push(eq(schema.items.isFavorite, isFavorite === 'true'));
   if (sourceType) conditions.push(eq(schema.items.sourceType, sourceType));
+  if (sourceTier) conditions.push(eq(schema.items.sourceTier, sourceTier));
   if (collectorType) conditions.push(eq(schema.sources.collectorType, collectorType));
   if (category) conditions.push(eq(schema.sources.category, category));
   if (monitorOnly) conditions.push(eq(schema.sources.sourceRole, 'monitor'));
   if (sourceId) conditions.push(eq(schema.items.sourceId, Number(sourceId)));
+  if (qualityDecision) conditions.push(eq(schema.items.qualityDecision, qualityDecision));
+  if (qualityTag) conditions.push(sql`coalesce(${schema.items.qualityTags}, '[]'::jsonb) ? ${qualityTag}`);
+  if (restored !== undefined) conditions.push(eq(schema.items.restoredFromFilter, restored === 'true'));
   if (search) {
     const searchCondition = or(
       ilike(schema.items.title, `%${search}%`),
@@ -139,6 +154,17 @@ app.get('/', async (c) => {
       processingStatus: schema.items.processingStatus,
       isFiltered: schema.items.isFiltered,
       filterReason: schema.items.filterReason,
+      qualityDecision: schema.items.qualityDecision,
+      qualitySummary: schema.items.qualitySummary,
+      qualityReason: schema.items.qualityReason,
+      qualityTags: schema.items.qualityTags,
+      qualityRiskFlags: schema.items.qualityRiskFlags,
+      qualityScore: schema.items.qualityScore,
+      qualityConfidence: schema.items.qualityConfidence,
+      qualityCheckedAt: schema.items.qualityCheckedAt,
+      filterBucket: schema.items.filterBucket,
+      restoredAt: schema.items.restoredAt,
+      restoredFromFilter: schema.items.restoredFromFilter,
       contentStatus: schema.items.contentStatus,
       contentError: schema.items.contentError,
       fetchEngine: schema.items.fetchEngine,
@@ -219,6 +245,9 @@ app.post('/:id/reprocess-ai', async (c) => {
     .select({
       id: schema.items.id,
       userId: schema.items.userId,
+      isFiltered: schema.items.isFiltered,
+      filterReason: schema.items.filterReason,
+      qualityTags: schema.items.qualityTags,
     })
     .from(schema.items)
     .where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)))
@@ -229,17 +258,19 @@ app.post('/:id/reprocess-ai', async (c) => {
   }
 
   const activeConfigs = await getEffectiveAiSceneAvailability(authUser.userId);
+  const hasQuality = activeConfigs.has('quality_filter');
   const hasScoring = activeConfigs.has('scoring');
   const hasSummary = activeConfigs.has('summary');
   const hasTranslation = activeConfigs.has('translation');
 
-  if (!hasScoring && !hasSummary && !hasTranslation) {
+  if (!hasQuality && !hasScoring && !hasSummary && !hasTranslation) {
     return c.json({ error: 'No active AI config found. Please configure in settings first.' }, 400);
   }
 
   const processingStatus = hasScoring ? 'raw' : hasSummary ? 'scored' : 'summarized';
-
-  await db.update(schema.items).set({
+  const current = rows[0];
+  const hardRuleFiltered = Array.isArray(current.qualityTags) && current.qualityTags.includes('硬规则过滤');
+  const resetUpdate: Record<string, unknown> = {
     aiScore: null,
     aiSummary: null,
     aiTags: [],
@@ -249,12 +280,35 @@ app.post('/:id/reprocess-ai', async (c) => {
     translationStatus: 'pending',
     translationReason: null,
     processingStatus,
-  }).where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)));
+  };
+  if (hasQuality) {
+    resetUpdate.qualityDecision = null;
+    resetUpdate.qualitySummary = null;
+    resetUpdate.qualityReason = null;
+    resetUpdate.qualityTags = [];
+    resetUpdate.qualityRiskFlags = [];
+    resetUpdate.qualityScore = null;
+    resetUpdate.qualityConfidence = null;
+    resetUpdate.qualityCheckedAt = null;
+    if (!hardRuleFiltered) {
+      resetUpdate.filterBucket = 'main';
+      resetUpdate.isFiltered = false;
+      resetUpdate.filterReason = null;
+    }
+  }
 
+  await db.update(schema.items)
+    .set(resetUpdate)
+    .where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)));
+
+  let filtered = 0;
   let scored = 0;
   let summarized = 0;
   let translated = 0;
 
+  if (hasQuality) {
+    filtered = (await qualityFilterItemsDetailed(authUser.userId, 1, { itemId: id })).processed;
+  }
   if (hasScoring) {
     scored = await scoreItems(authUser.userId, 1, { itemId: id });
   }
@@ -272,6 +326,7 @@ app.post('/:id/reprocess-ai', async (c) => {
 
   return c.json({
     message: 'AI reprocess complete',
+    filtered,
     scored,
     summarized,
     translated,
@@ -305,6 +360,10 @@ app.post('/:id/enrich', async (c) => {
       summaryBasis: schema.items.summaryBasis,
       processingStatus: schema.items.processingStatus,
       contentStatus: schema.items.contentStatus,
+      isFiltered: schema.items.isFiltered,
+      qualityDecision: schema.items.qualityDecision,
+      qualityCheckedAt: schema.items.qualityCheckedAt,
+      qualityTags: schema.items.qualityTags,
       fetchEngine: schema.items.fetchEngine,
       renderMode: schema.items.renderMode,
       blockedReason: schema.items.blockedReason,
@@ -320,6 +379,12 @@ app.post('/:id/enrich', async (c) => {
 
   const resolvedText = resolveItemText(current);
   const effectiveLanguage = current.language || detectLikelyLanguage(`${current.title}\n${resolvedText.text}`);
+  const hardRuleFiltered = Array.isArray(current.qualityTags) && current.qualityTags.includes('硬规则过滤');
+  const shouldQuality = scenes.has('quality_filter') && (
+    contentResult.contentFetched
+    || current.qualityCheckedAt == null
+    || current.qualityDecision === 'review'
+  );
   const shouldScore = scenes.has('scoring') && (
     contentResult.contentFetched
     || current.aiScore == null
@@ -343,9 +408,29 @@ app.post('/:id/enrich', async (c) => {
   if (!scenes.has('scoring')) warnings.push('未启用阅读评分模型');
   if (!scenes.has('summary')) warnings.push('未启用阅读摘要模型');
   if (!scenes.has('translation')) warnings.push('未启用阅读翻译模型');
+  if (!scenes.has('quality_filter')) warnings.push('未启用阅读质检模型');
   if (effectiveLanguage === 'zh') warnings.push('原文已是中文，跳过翻译');
 
-  if (shouldScore) {
+  if (shouldQuality) {
+    const resetUpdate: Record<string, unknown> = {
+      qualityDecision: null,
+      qualitySummary: null,
+      qualityReason: null,
+      qualityTags: [],
+      qualityRiskFlags: [],
+      qualityScore: null,
+      qualityConfidence: null,
+      qualityCheckedAt: null,
+      processingStatus: 'raw',
+    };
+    if (!hardRuleFiltered) {
+      resetUpdate.isFiltered = false;
+      resetUpdate.filterReason = null;
+      resetUpdate.filterBucket = 'main';
+    }
+    await db.update(schema.items).set(resetUpdate)
+      .where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)));
+  } else if (shouldScore) {
     await db.update(schema.items).set({
       aiScore: null,
       processingStatus: 'raw',
@@ -374,6 +459,11 @@ app.post('/:id/enrich', async (c) => {
   let translated = 0;
   let filterDecision = 'unchanged';
 
+  if (shouldQuality) {
+    const quality = await qualityFilterItemsDetailed(authUser.userId, 1, { itemId: id });
+    if (quality.errors.length > 0) warnings.push(...quality.errors);
+    filterDecision = quality.processed > 0 ? 'recomputed' : filterDecision;
+  }
   if (shouldScore) {
     const scoring = await scoreItemsDetailed(authUser.userId, 1, { itemId: id });
     scored = scoring.processed;
@@ -571,6 +661,105 @@ app.get('/:id/score-breakdown', async (c) => {
         riskFlags: Array.isArray(row.riskFlags) ? row.riskFlags : [],
       })),
     },
+  });
+});
+
+app.get('/:id/quality-check', async (c) => {
+  const authUser = requireAuth(c);
+  const id = c.req.param('id');
+  const itemRows = await db
+    .select({
+      id: schema.items.id,
+      sourceId: schema.items.sourceId,
+      sourceTier: schema.items.sourceTier,
+      isFiltered: schema.items.isFiltered,
+      filterBucket: schema.items.filterBucket,
+      filterReason: schema.items.filterReason,
+      qualityDecision: schema.items.qualityDecision,
+      qualitySummary: schema.items.qualitySummary,
+      qualityReason: schema.items.qualityReason,
+      qualityTags: schema.items.qualityTags,
+      qualityRiskFlags: schema.items.qualityRiskFlags,
+      qualityScore: schema.items.qualityScore,
+      qualityConfidence: schema.items.qualityConfidence,
+      qualityCheckedAt: schema.items.qualityCheckedAt,
+      restoredAt: schema.items.restoredAt,
+      restoredFromFilter: schema.items.restoredFromFilter,
+    })
+    .from(schema.items)
+    .where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)))
+    .limit(1);
+  const item = itemRows[0];
+  if (!item) {
+    return c.json({ error: 'Item not found' }, 404);
+  }
+
+  const auditRows = await db
+    .select()
+    .from(schema.itemQualityChecks)
+    .where(and(eq(schema.itemQualityChecks.itemId, id), eq(schema.itemQualityChecks.userId, authUser.userId)))
+    .orderBy(desc(schema.itemQualityChecks.createdAt), desc(schema.itemQualityChecks.id))
+    .limit(1);
+
+  return c.json({
+    data: {
+      itemId: id,
+      sourceId: item.sourceId,
+      sourceTier: item.sourceTier,
+      isFiltered: item.isFiltered,
+      filterBucket: item.filterBucket,
+      filterReason: item.filterReason,
+      qualityDecision: item.qualityDecision,
+      qualitySummary: item.qualitySummary,
+      qualityReason: item.qualityReason,
+      qualityTags: Array.isArray(item.qualityTags) ? item.qualityTags : [],
+      qualityRiskFlags: Array.isArray(item.qualityRiskFlags) ? item.qualityRiskFlags : [],
+      qualityScore: item.qualityScore,
+      qualityConfidence: item.qualityConfidence,
+      qualityCheckedAt: item.qualityCheckedAt,
+      restoredAt: item.restoredAt,
+      restoredFromFilter: item.restoredFromFilter,
+      latestCheck: auditRows[0] ? {
+        ...auditRows[0],
+        tags: Array.isArray(auditRows[0].tags) ? auditRows[0].tags : [],
+        riskFlags: Array.isArray(auditRows[0].riskFlags) ? auditRows[0].riskFlags : [],
+      } : null,
+    },
+  });
+});
+
+app.post('/:id/restore', async (c) => {
+  const authUser = requireAuth(c);
+  const id = c.req.param('id');
+
+  const rows = await db
+    .select({
+      id: schema.items.id,
+      isFiltered: schema.items.isFiltered,
+      filterBucket: schema.items.filterBucket,
+    })
+    .from(schema.items)
+    .where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)))
+    .limit(1);
+  if (rows.length === 0) {
+    return c.json({ error: 'Item not found' }, 404);
+  }
+
+  await db.update(schema.items).set({
+    isFiltered: false,
+    filterBucket: 'main',
+    restoredAt: new Date(),
+    restoredFromFilter: true,
+  }).where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)));
+
+  const refreshed = await db.select()
+    .from(schema.items)
+    .where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)))
+    .limit(1);
+
+  return c.json({
+    message: 'Item restored to main feed',
+    data: refreshed[0] ? mapFeedItemResponse(refreshed[0]) : null,
   });
 });
 

@@ -5,6 +5,7 @@ import { config } from '../config/index.js';
 import { enqueueDueFetches } from './pipeline.js';
 import { batchUpdatePriority } from '../processors/priority.js';
 import { scoreItems } from '../processors/ai-scorer.js';
+import { qualityFilterItems } from '../processors/quality-filter.js';
 import { summarizeItems, translateItems } from '../processors/ai-summarizer.js';
 import { generateDailyReport, formatMarkdown } from '../outputs/daily-report.js';
 import { pushDailyReport } from '../outputs/push.js';
@@ -70,14 +71,15 @@ export function startCronJobs() {
     if (!config.ai.enabled) return;
     try {
       const users = await getAiProcessingUserIds();
-      let scored = 0, summarized = 0, translated = 0;
+      let filtered = 0, scored = 0, summarized = 0, translated = 0;
       for (const userId of users) {
+        filtered += await qualityFilterItems(userId, 20);
         if (config.ai.scoringEnabled) scored += await scoreItems(userId, 20);
         if (config.ai.summaryEnabled) summarized += await summarizeItems(userId, 10);
         if (config.ai.translationEnabled) translated += await translateItems(userId, 5);
       }
-      if (scored + summarized + translated > 0) {
-        logger.info({ scored, summarized, translated, users: users.length }, 'Cron: AI processing complete');
+      if (filtered + scored + summarized + translated > 0) {
+        logger.info({ filtered, scored, summarized, translated, users: users.length }, 'Cron: AI processing complete');
       }
     } catch (err) {
       logger.error({ error: (err as Error).message }, 'Cron: AI processing failed');

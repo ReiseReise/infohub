@@ -10,6 +10,7 @@ import { getUserFetchSettings } from '../lib/fetch-settings.js';
 import { ensureItemContent } from '../lib/item-enrichment.js';
 import { computeSourceFreshness, summarizeFreshness } from '../lib/freshness.js';
 import { scoreItemsDetailed } from '../processors/ai-scorer.js';
+import { qualityFilterItemsDetailed } from '../processors/quality-filter.js';
 import { summarizeItemsDetailed, translateItemsDetailed } from '../processors/ai-summarizer.js';
 
 const app = new Hono();
@@ -88,7 +89,7 @@ app.post('/source/:id', async (c) => {
         collectorType: source.collectorType,
         config: source.config as Record<string, unknown>,
       });
-      let aiProcessed = { scored: 0, summarized: 0, translated: 0 };
+      let aiProcessed = { filtered: 0, scored: 0, summarized: 0, translated: 0 };
       const aiErrors: Record<string, string[]> = {};
       const itemIds = (summary?.newItemIds || []).slice(0, Math.min(summary?.itemsNew || 0, 10));
       if (itemIds.length > 0) {
@@ -99,6 +100,11 @@ app.post('/source/:id', async (c) => {
         const scenes = await getEffectiveAiSceneAvailability(authUser.userId);
         const limit = Math.min(summary.itemsNew, 10);
         const itemIds = (summary.newItemIds || []).slice(0, limit);
+        if (scenes.has('quality_filter')) {
+          const quality = await qualityFilterItemsDetailed(authUser.userId, limit, { itemIds });
+          aiProcessed.filtered = quality.processed;
+          if (quality.errors.length > 0) aiErrors.quality = quality.errors;
+        }
         if (scenes.has('scoring')) {
           const scoring = await scoreItemsDetailed(authUser.userId, limit, { itemIds });
           aiProcessed.scored = scoring.processed;

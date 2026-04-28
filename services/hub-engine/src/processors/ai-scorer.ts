@@ -1,7 +1,7 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
-import { completeWithModelConfig, getEffectiveAiConfig, type ResolvedAiConfig } from '../lib/ai-configs.js';
+import { completeWithModelConfig, getEffectiveAiConfig, getEffectiveAiSceneAvailability, type ResolvedAiConfig } from '../lib/ai-configs.js';
 import { logAiUsage } from '../lib/ai-usage.js';
 import { applyRulesAndPriority } from './priority.js';
 import { ensureItemContent, resolveItemText } from '../lib/item-enrichment.js';
@@ -52,7 +52,7 @@ function buildAiStageResult(processed: number, attempted: number, errors: string
 }
 
 async function callLLM(config: AiConfig, prompt: string, options: LlmCallOptions = {}): Promise<LlmCallResult> {
-  const maxTokens = Math.max(64, options.maxTokens ?? 200);
+  const maxTokens = Math.max(128, options.maxTokens ?? 200);
   if (config.modelConfigId) {
     return completeWithModelConfig(config.modelConfigId, prompt, {
       temperature: config.temperature,
@@ -176,6 +176,7 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
     logger.debug('No active scoring AI config, skipping');
     return buildAiStageResult(0, 0, []);
   }
+  const activeScenes = await getEffectiveAiSceneAvailability(userId);
   const activeSkills = await getActiveScoringSkills(userId);
   const preferenceProfile = await getPreferenceProfile(userId);
 
@@ -188,6 +189,9 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
     conditions.push(eq(schema.items.id, options.itemId));
   } else if (options.itemIds && options.itemIds.length > 0) {
     conditions.push(inArray(schema.items.id, options.itemIds));
+  }
+  if (activeScenes.has('quality_filter')) {
+    conditions.push(isNotNull(schema.items.qualityCheckedAt));
   }
 
   const rawItems = await db
