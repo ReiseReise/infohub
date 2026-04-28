@@ -34,6 +34,7 @@ type SettingsTab = 'general' | 'reading' | 'models' | 'integrations' | 'diagnost
 type AdminTab = 'dashboard' | 'tasks' | 'users' | 'invites';
 type AiCenterTab = 'scenes' | 'models' | 'skills' | 'logs';
 type AiConfigType =
+  | 'quality_filter'
   | 'scoring'
   | 'summary'
   | 'translation'
@@ -71,7 +72,19 @@ const AI_CENTER_TABS: Array<{ key: AiCenterTab; label: string }> = [
   { key: 'logs', label: '使用日志' },
 ];
 
+const READING_SCENE_TYPES: AiConfigType[] = ['quality_filter', 'scoring', 'summary', 'translation'];
+const DAILY_REPORT_SCENE_TYPES: AiConfigType[] = [
+  'daily_report',
+  'daily_report_cleaning',
+  'daily_report_decision',
+  'daily_report_research',
+  'daily_report_reading',
+  'daily_report_final',
+];
+const ALL_BATCH_SCENE_TYPES: AiConfigType[] = [...READING_SCENE_TYPES, ...DAILY_REPORT_SCENE_TYPES];
+
 const DEFAULT_PROMPTS: Record<AiConfigType, string> = {
+  quality_filter: '你是信息中枢的质量质检代理。请输出 JSON：{"decision":"pass|review|filter","summary":"一句话概要","reason":"一句话原因","tags":["..."],"riskFlags":["..."],"confidence":0-1,"score":0-100,"dimensionScores":{"density":0-100,"insight":0-100,"practicality":0-100,"objectivity":0-100,"goalFit":0-100,"novelty":0-100}}。\\n标题：{title}\\n内容：{content}',
   scoring: '请根据标题和内容给出 0-100 分相关性评分，仅输出数字。\\n标题：{title}\\n内容：{content}',
   summary: '请对内容做结构化摘要，返回 JSON：{"summary":"...","tags":["..."]}。\\n标题：{title}\\n内容：{content}',
   translation: '请将内容翻译成简体中文，保留专有名词。\\n标题：{title}\\n内容：{content}',
@@ -89,6 +102,7 @@ const DEFAULT_LLM_PROVIDER = VOLCENGINE_ARK_PROVIDER;
 const DEFAULT_LLM_ENDPOINT_ID = '';
 const DEFAULT_LLM_BASE_URL = VOLCENGINE_ARK_BASE_URL;
 const AI_SCENE_LABELS: Record<string, string> = {
+  quality_filter: '阅读质检',
   feed_scoring: '阅读评分',
   feed_summary: '阅读摘要',
   feed_translation: '阅读翻译',
@@ -394,6 +408,7 @@ export function Settings() {
   const [aiConfigs, setAiConfigs] = useState<AiConfig[]>([]);
   const [aiConfigMeta, setAiConfigMeta] = useState<AiConfigMeta | null>(null);
   const [aiForms, setAiForms] = useState<Record<AiConfigType, AiForm>>({
+    quality_filter: normalizeAiForm('quality_filter'),
     scoring: normalizeAiForm('scoring'),
     summary: normalizeAiForm('summary'),
     translation: normalizeAiForm('translation'),
@@ -446,6 +461,7 @@ export function Settings() {
     is_default: false,
     is_active: true,
   });
+  const [bulkModelConfigId, setBulkModelConfigId] = useState('');
   const [skillSaving, setSkillSaving] = useState(false);
   const [profileRebuilding, setProfileRebuilding] = useState(false);
 
@@ -461,7 +477,8 @@ export function Settings() {
     const map = new Map<AiConfigType, AiConfig>();
     for (const cfg of aiConfigs) {
       if (
-        cfg.type === 'scoring'
+        cfg.type === 'quality_filter'
+        || cfg.type === 'scoring'
         || cfg.type === 'summary'
         || cfg.type === 'translation'
         || cfg.type === 'daily_report'
@@ -485,6 +502,7 @@ export function Settings() {
   ), [adminModelConfigs]);
 
   const defaultPromptByType = useMemo(() => ({
+    quality_filter: adminPromptTemplates.find((item) => item.category === 'quality_filter') || null,
     scoring: adminPromptTemplates.find((item) => item.category === 'feed_scoring') || null,
     summary: adminPromptTemplates.find((item) => item.category === 'feed_summary') || null,
     translation: adminPromptTemplates.find((item) => item.category === 'feed_translation') || null,
@@ -581,6 +599,7 @@ export function Settings() {
 
   const aiFunctionCards = useMemo(() => (
     ([
+      ['quality_filter', 'quality_filter'],
       ['scoring', 'feed_scoring'],
       ['summary', 'feed_summary'],
       ['translation', 'feed_translation'],
@@ -844,6 +863,7 @@ export function Settings() {
 
   useEffect(() => {
     const defaultModelId = defaultLlmModel?.id;
+    const qualityFilter = normalizeAiForm('quality_filter', aiConfigByType.get('quality_filter'), defaultModelId, defaultPromptByType.quality_filter?.id);
     const scoring = normalizeAiForm('scoring', aiConfigByType.get('scoring'), defaultModelId, defaultPromptByType.scoring?.id);
     const summary = normalizeAiForm('summary', aiConfigByType.get('summary'), defaultModelId, defaultPromptByType.summary?.id);
     const translation = normalizeAiForm('translation', aiConfigByType.get('translation'), defaultModelId, defaultPromptByType.translation?.id);
@@ -854,6 +874,7 @@ export function Settings() {
     const reading = normalizeAiForm('daily_report_reading', aiConfigByType.get('daily_report_reading') || aiConfigByType.get('daily_report'), defaultModelId, defaultPromptByType.daily_report_reading?.id || defaultPromptByType.daily_report?.id);
     const final = normalizeAiForm('daily_report_final', aiConfigByType.get('daily_report_final') || aiConfigByType.get('daily_report'), defaultModelId, defaultPromptByType.daily_report_final?.id || defaultPromptByType.daily_report?.id);
     setAiForms({
+      quality_filter: qualityFilter,
       scoring,
       summary,
       translation,
@@ -957,6 +978,28 @@ export function Settings() {
       setNotice(`${type} 场景绑定已保存`);
     } catch (err) {
       setError((err as Error).message || '保存 AI 配置失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const applyModelToScenes = async (types: AiConfigType[], label: string) => {
+    if (!isAdmin) return;
+    const modelConfigId = bulkModelConfigId || defaultLlmModel?.id || '';
+    if (!modelConfigId) {
+      setError('请先在模型仓库创建并启用一个 LLM 模型');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.aiConfigs.batchModel({ modelConfigId, types, isActive: true });
+      await refreshBase();
+      const selectedModel = adminModelConfigs.find((item) => item.id === modelConfigId);
+      setNotice(`${label} 已切换到 ${modelDisplayName(selectedModel)}`);
+    } catch (err) {
+      setError((err as Error).message || '批量应用模型失败');
     } finally {
       setSaving(false);
     }
@@ -1316,33 +1359,28 @@ export function Settings() {
             ))}
           </select>
         </div>
-        <div className="grid grid-cols-2 gap-2">
-          <input
-            value={providerLabel(selectedModel?.provider || form.provider)}
-            disabled={!isAdmin}
-            onChange={(e) => setAiForms((prev) => ({ ...prev, [type]: { ...prev[type], provider: normalizeProvider(e.target.value) } }))}
-            placeholder="provider"
-            className="px-3 py-2 text-sm border border-zinc-200 rounded-lg"
-          />
-          <input
-            value={modelTarget(selectedModel) || form.model}
-            disabled={!isAdmin}
-            onChange={(e) => setAiForms((prev) => ({ ...prev, [type]: { ...prev[type], model: e.target.value } }))}
-            placeholder={isVolcengineArk(selectedModel?.provider || form.provider) ? '接入点 ID' : 'model'}
-            className="px-3 py-2 text-sm border border-zinc-200 rounded-lg"
-          />
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_160px] gap-2">
+          <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
+            {selectedModel ? (
+              <>
+                <div className="font-medium text-zinc-800">{modelDisplayName(selectedModel)}</div>
+                <div className="mt-1">
+                  {providerLabel(selectedModel.provider)}
+                  <span className="mx-1 text-zinc-300">·</span>
+                  目标 {modelTarget(selectedModel)}
+                  <span className="mx-1 text-zinc-300">·</span>
+                  Key {selectedModel.has_api_key ? '已配置' : '未配置'}
+                </div>
+              </>
+            ) : (
+              '请先选择模型仓库里的已配置模型'
+            )}
+          </div>
           <input
             value={String(form.temperature)}
             disabled={!isAdmin}
             onChange={(e) => setAiForms((prev) => ({ ...prev, [type]: { ...prev[type], temperature: Number(e.target.value || 0) } }))}
             placeholder="temperature"
-            className="px-3 py-2 text-sm border border-zinc-200 rounded-lg"
-          />
-          <input
-            value={selectedModel?.base_url || form.baseUrl}
-            disabled={!isAdmin}
-            onChange={(e) => setAiForms((prev) => ({ ...prev, [type]: { ...prev[type], baseUrl: e.target.value } }))}
-            placeholder={isVolcengineArk(selectedModel?.provider || form.provider) ? '方舟 Base URL' : 'Base URL（可选）'}
             className="px-3 py-2 text-sm border border-zinc-200 rounded-lg"
           />
         </div>
@@ -1507,6 +1545,7 @@ export function Settings() {
                 {sectionTitle('阅读 AI 当前状态', '阅读评分、摘要、翻译现在都走管理员统一配置；普通用户只查看生效状态。')}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   {([
+                    ['quality_filter', '阅读质检'],
                     ['scoring', '阅读评分'],
                     ['summary', '阅读摘要'],
                     ['translation', '阅读翻译'],
@@ -1623,9 +1662,56 @@ export function Settings() {
                   <div className="rounded-xl border border-zinc-200 bg-white p-4">
                     {sectionTitle('场景控制台', '把阅读链路与日报多智能体链路统一绑定到模型、别名和提示词模板。')}
                     <div className="space-y-4">
+                      {isAdmin && (
+                        <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-3">
+                          <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 lg:items-center">
+                            <select
+                              value={bulkModelConfigId || defaultLlmModel?.id || ''}
+                              onChange={(e) => setBulkModelConfigId(e.target.value)}
+                              className="px-3 py-2 text-sm border border-zinc-200 rounded-lg bg-white"
+                            >
+                              <option value="">选择要批量应用的模型</option>
+                              {modelConfigsWithUsage
+                                .filter((item) => item.model_type === 'llm' || item.model_type === 'multimodal')
+                                .map((item) => (
+                                  <option key={item.id} value={item.id}>
+                                    {modelDisplayName(item)} · {providerLabel(item.provider)}
+                                  </option>
+                                ))}
+                            </select>
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                onClick={() => void applyModelToScenes(ALL_BATCH_SCENE_TYPES, '全部阅读和日报场景')}
+                                disabled={saving}
+                                className="px-3 py-2 text-sm rounded-lg bg-zinc-900 text-white disabled:opacity-50"
+                              >
+                                应用到全部场景
+                              </button>
+                              <button
+                                onClick={() => void applyModelToScenes(READING_SCENE_TYPES, '阅读链路')}
+                                disabled={saving}
+                                className="px-3 py-2 text-sm rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 disabled:opacity-50"
+                              >
+                                只应用到阅读
+                              </button>
+                              <button
+                                onClick={() => void applyModelToScenes(DAILY_REPORT_SCENE_TYPES, '日报链路')}
+                                disabled={saving}
+                                className="px-3 py-2 text-sm rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 disabled:opacity-50"
+                              >
+                                只应用到日报
+                              </button>
+                            </div>
+                          </div>
+                          <div className="mt-2 text-xs text-zinc-500">
+                            批量操作只改模型绑定，不覆盖提示词模板和温度。
+                          </div>
+                        </div>
+                      )}
                       <div>
                         <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">阅读链路</div>
                         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                          {renderAiConfigCard('quality_filter', '阅读质检')}
                           {renderAiConfigCard('scoring', '阅读评分')}
                           {renderAiConfigCard('summary', '摘要生成')}
                           {renderAiConfigCard('translation', '阅读翻译')}

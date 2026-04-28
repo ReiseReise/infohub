@@ -31,7 +31,7 @@ export interface AiConfig {
   promptTemplateName?: string | null;
   promptTemplateId?: string | null;
   modelConfigId?: string | null;
-  type: 'scoring' | 'summary' | 'translation' | 'daily_report' | string;
+  type: 'quality_filter' | 'scoring' | 'summary' | 'translation' | 'daily_report' | string;
   isActive: boolean;
   createdAt: string;
 }
@@ -75,6 +75,7 @@ export interface FetchTriggerResult {
   outcome?: string;
   durationMs?: number;
   aiProcessed?: {
+    filtered?: number;
     scored: number;
     summarized: number;
     translated: number;
@@ -389,6 +390,17 @@ export interface FeedItemRecord {
   processingStatus?: string;
   isFiltered?: boolean;
   filterReason?: string | null;
+  qualityDecision?: 'pass' | 'review' | 'filter' | string | null;
+  qualitySummary?: string | null;
+  qualityReason?: string | null;
+  qualityTags?: string[];
+  qualityRiskFlags?: string[];
+  qualityScore?: number | null;
+  qualityConfidence?: number | null;
+  qualityCheckedAt?: string | null;
+  filterBucket?: 'main' | 'filtered' | string | null;
+  restoredAt?: string | null;
+  restoredFromFilter?: boolean | null;
   contentStatus?: string;
   contentBasis?: 'title' | 'snippet' | 'content' | null;
   contentError?: string | null;
@@ -477,6 +489,77 @@ export interface ItemScoreBreakdownPayload {
   filterReason?: string | null;
   latestFeedback?: ItemFeedbackRecord | null;
   breakdowns: ItemScoreBreakdownRecord[];
+}
+
+export interface QualityPolicyConfig {
+  mode: 'skip' | 'light' | 'standard' | 'strict' | 'monitor' | string;
+  onFilter: 'review' | 'filter' | string;
+  minConfidence: number;
+}
+
+export interface QualityTierPolicyRecord {
+  tier: 'S' | 'A' | 'B' | 'C' | 'D' | string;
+  overrideId?: number | null;
+  overrideScope: 'system' | 'global' | 'user' | string;
+  overrideConfig?: Partial<QualityPolicyConfig> | null;
+  resolved: QualityPolicyConfig;
+}
+
+export interface QualitySourceOverrideRecord {
+  id: number;
+  sourceId: number;
+  sourceName: string;
+  sourceTier: 'S' | 'A' | 'B' | 'C' | 'D' | string;
+  config: Partial<QualityPolicyConfig>;
+  resolved: QualityPolicyConfig;
+  scope: 'user' | string;
+}
+
+export interface QualityPolicySnapshot {
+  tiers: QualityTierPolicyRecord[];
+  sourceOverrides: QualitySourceOverrideRecord[];
+}
+
+export interface ItemQualityCheckRecord {
+  id: number;
+  itemId: string;
+  userId: string;
+  sourceId?: number | null;
+  sceneType: string;
+  decision?: string | null;
+  summary?: string | null;
+  reason?: string | null;
+  tags: string[];
+  riskFlags: string[];
+  score?: number | null;
+  confidence?: number | null;
+  policySnapshot?: Record<string, unknown>;
+  rawResponse?: string | null;
+  promptPreview?: string | null;
+  responsePreview?: string | null;
+  modelConfigId?: string | null;
+  promptTemplateId?: string | null;
+  createdAt: string;
+}
+
+export interface ItemQualityCheckPayload {
+  itemId: string;
+  sourceId?: number | null;
+  sourceTier?: string | null;
+  isFiltered?: boolean | null;
+  filterBucket?: string | null;
+  filterReason?: string | null;
+  qualityDecision?: string | null;
+  qualitySummary?: string | null;
+  qualityReason?: string | null;
+  qualityTags: string[];
+  qualityRiskFlags: string[];
+  qualityScore?: number | null;
+  qualityConfidence?: number | null;
+  qualityCheckedAt?: string | null;
+  restoredAt?: string | null;
+  restoredFromFilter?: boolean | null;
+  latestCheck?: ItemQualityCheckRecord | null;
 }
 
 export interface ItemEnrichResult {
