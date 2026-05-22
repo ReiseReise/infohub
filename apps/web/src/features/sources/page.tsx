@@ -5,7 +5,8 @@ import { api, type DiscoveryCandidate, type SourceRecord, type SourceStats, type
 
 type CollectorType = 'rss' | 'rsshub' | 'youtube' | 'changedetection' | 'webpage' | 'custom' | 'podcast';
 type DiscoverMode = 'search' | 'rss' | 'rsshub';
-type SourceTier = 'S' | 'A' | 'B' | 'C' | 'D';
+type SourceTier = 'T1' | 'T1.5' | 'T2' | 'S' | 'A' | 'B' | 'C' | 'D';
+type SourceKind = 'official' | 'blog' | 'rss' | 'x' | 'wechat' | 'media' | 'api' | 'webpage' | 'podcast' | 'other';
 type ProcessingProfile = 'full' | 'smart' | 'brief' | 'monitor';
 type GrowthAxis = '认知升级' | '技术能力' | '商业判断' | '表达输出';
 type WebCaptureRenderMode = 'auto' | 'native' | 'dynamic' | 'stealth' | 'browser-assist';
@@ -14,11 +15,27 @@ type SourceSortMode = 'latest' | 'unread' | 'health' | 'name';
 type SourceFocusMode = 'all' | 'high-signal' | 'monitor' | 'stale';
 
 const SOURCE_TIER_OPTIONS: Array<{ value: SourceTier; label: string }> = [
+  { value: 'T1', label: 'T1 一手官方' },
+  { value: 'T1.5', label: 'T1.5 官方社媒' },
+  { value: 'T2', label: 'T2 KOL/媒体' },
   { value: 'S', label: 'S级信号' },
   { value: 'A', label: 'A级分析' },
   { value: 'B', label: 'B级资讯' },
   { value: 'C', label: 'C级噪声观察' },
   { value: 'D', label: 'D级哨兵' },
+];
+
+const SOURCE_KIND_OPTIONS: Array<{ value: SourceKind; label: string }> = [
+  { value: 'official', label: '官方/一手' },
+  { value: 'blog', label: '博客/研究' },
+  { value: 'rss', label: '通用 RSS' },
+  { value: 'x', label: 'X/KOL' },
+  { value: 'wechat', label: '公众号' },
+  { value: 'media', label: '媒体/资讯' },
+  { value: 'api', label: 'API' },
+  { value: 'webpage', label: '网页监控' },
+  { value: 'podcast', label: '播客/视频' },
+  { value: 'other', label: '其他' },
 ];
 
 const PROCESSING_PROFILE_OPTIONS: Array<{ value: ProcessingProfile; label: string }> = [
@@ -50,7 +67,9 @@ interface SourceFormState {
   sourceType: string;
   collectorType: CollectorType;
   category: string;
+  sourceKind: SourceKind;
   sourceTier: SourceTier;
+  authorityWeight: number;
   processingProfile: ProcessingProfile;
   growthAxes: GrowthAxis[];
   url: string;
@@ -79,6 +98,13 @@ function getRecommendedProfile(collectorType: CollectorType): Pick<SourceFormSta
     return { sourceTier: 'S', processingProfile: 'full', growthAxes: ['认知升级'] };
   }
   return { sourceTier: 'B', processingProfile: 'brief', growthAxes: ['认知升级'] };
+}
+
+function getRecommendedSourceKind(collectorType: CollectorType): SourceKind {
+  if (collectorType === 'changedetection' || collectorType === 'webpage') return 'webpage';
+  if (collectorType === 'custom') return 'api';
+  if (collectorType === 'podcast' || collectorType === 'youtube') return 'podcast';
+  return 'rss';
 }
 
 function toggleGrowthAxis(axes: GrowthAxis[], axis: GrowthAxis) {
@@ -122,7 +148,9 @@ const initialForm: SourceFormState = {
   sourceType: 'rss',
   collectorType: 'rss',
   category: '',
+  sourceKind: 'rss',
   sourceTier: 'B',
+  authorityWeight: 1,
   processingProfile: 'brief',
   growthAxes: ['认知升级'],
   url: '',
@@ -221,6 +249,15 @@ function sourceWebsiteLabel(source: SourceRecord) {
   return '';
 }
 
+function sourceKindLabel(kind?: string | null) {
+  return SOURCE_KIND_OPTIONS.find((option) => option.value === kind)?.label || kind || '未分型';
+}
+
+function percentLabel(value?: number | null) {
+  if (value == null || Number.isNaN(Number(value))) return '0%';
+  return `${Math.round(Number(value) * 100)}%`;
+}
+
 export function Sources() {
   const navigate = useNavigate();
   const [sources, setSources] = useState<SourceRecord[]>([]);
@@ -245,6 +282,9 @@ export function Sources() {
   const [focusMode, setFocusMode] = useState<SourceFocusMode>('all');
   const [collectorFilter, setCollectorFilter] = useState<'all' | CollectorType>('all');
   const [tierFilter, setTierFilter] = useState<'all' | SourceTier>('all');
+  const [viewMode, setViewMode] = useState<'cards' | 'table'>('table');
+  const [selectedSourceIds, setSelectedSourceIds] = useState<number[]>([]);
+  const [bulkUpdating, setBulkUpdating] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const collectorOptions: Array<{ value: CollectorType; label: string }> = [
@@ -292,7 +332,7 @@ export function Sources() {
 
   const sourceSummary = useMemo(() => {
     const unreadBacklog = sources.reduce((sum, source) => sum + Number(source.unreadCount || 0), 0);
-    const highSignalCount = sources.filter((source) => source.sourceTier === 'S' || source.sourceTier === 'A').length;
+    const highSignalCount = sources.filter((source) => ['T1', 'T1.5', 'S', 'A'].includes(String(source.sourceTier || ''))).length;
     const monitorCount = sources.filter((source) => source.sourceRole === 'monitor' || source.collectorType === 'changedetection' || source.collectorType === 'webpage').length;
     const staleCount = sources.filter((source) => source.freshnessState === 'stale' || source.freshnessState === 'error').length;
     const activeCount = sources.filter((source) => source.status === 'active').length;
@@ -304,7 +344,7 @@ export function Sources() {
     const next = sources.filter((source) => {
       if (collectorFilter !== 'all' && source.collectorType !== collectorFilter) return false;
       if (tierFilter !== 'all' && source.sourceTier !== tierFilter) return false;
-      if (focusMode === 'high-signal' && source.sourceTier !== 'S' && source.sourceTier !== 'A') return false;
+      if (focusMode === 'high-signal' && !['T1', 'T1.5', 'S', 'A'].includes(String(source.sourceTier || ''))) return false;
       if (focusMode === 'monitor' && source.collectorType !== 'changedetection' && source.collectorType !== 'webpage' && source.sourceRole !== 'monitor') return false;
       if (focusMode === 'stale' && source.freshnessState !== 'stale' && source.freshnessState !== 'error') return false;
       if (!normalizedSearch) return true;
@@ -340,6 +380,52 @@ export function Sources() {
       return Number(b.unreadCount || 0) - Number(a.unreadCount || 0);
     });
   }, [collectorFilter, focusMode, sourceSearch, sourceSort, sources, tierFilter]);
+
+  const selectedSources = useMemo(
+    () => filteredSources.filter((source) => selectedSourceIds.includes(source.id)),
+    [filteredSources, selectedSourceIds],
+  );
+
+  const toggleSourceSelection = (sourceId: number) => {
+    setSelectedSourceIds((current) => (
+      current.includes(sourceId)
+        ? current.filter((id) => id !== sourceId)
+        : [...current, sourceId]
+    ));
+  };
+
+  const toggleAllVisibleSources = () => {
+    setSelectedSourceIds((current) => {
+      const visibleIds = filteredSources.map((source) => source.id);
+      const allSelected = visibleIds.length > 0 && visibleIds.every((id) => current.includes(id));
+      if (allSelected) return current.filter((id) => !visibleIds.includes(id));
+      return Array.from(new Set([...current, ...visibleIds]));
+    });
+  };
+
+  const handleBulkUpdate = async (
+    patch: Partial<Omit<SourceRecord, 'config'>> & { config?: Record<string, unknown> },
+    successMessage: string,
+  ) => {
+    if (selectedSources.length === 0) {
+      setNotice('请先在表格中选择要批量管理的信源');
+      return;
+    }
+    setBulkUpdating(true);
+    setError(null);
+    try {
+      for (const source of selectedSources) {
+        await api.sources.update(source.id, patch);
+      }
+      setNotice(`${successMessage}：${selectedSources.length} 个信源`);
+      setSelectedSourceIds([]);
+      await fetchData();
+    } catch (err) {
+      setError((err as Error).message || '批量更新信源失败');
+    } finally {
+      setBulkUpdating(false);
+    }
+  };
 
   const buildConfig = (): Record<string, unknown> => {
     switch (form.collectorType) {
@@ -420,6 +506,8 @@ export function Sources() {
         sourceTier: form.sourceTier,
         processingProfile: form.processingProfile,
         growthAxes: form.growthAxes,
+        sourceKind: form.sourceKind,
+        authorityWeight: form.authorityWeight,
         fetchInterval: form.fetchInterval,
         autoFetchEnabled: form.autoFetchEnabled,
         autoTranscribe: form.autoTranscribe,
@@ -647,10 +735,10 @@ export function Sources() {
   };
 
   return (
-    <div className="max-w-6xl p-6">
+    <div className="max-w-7xl p-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <div className="text-[11px] uppercase tracking-[0.28em] text-teal-700/70">Subscription Desk</div>
+          <div className="text-[11px] tracking-[0.28em] text-teal-700/70">信源治理台</div>
           <h1 className="mt-1 text-2xl font-bold text-zinc-900">信源管理</h1>
           {stats && <p className="mt-1 text-sm text-zinc-500">共 {stats.total} 个信源，当前聚焦 {filteredSources.length} 个</p>}
         </div>
@@ -679,22 +767,22 @@ export function Sources() {
 
       <div className="mb-6 grid gap-3 md:grid-cols-4">
         <div className="rounded-[24px] border border-teal-100 bg-[linear-gradient(135deg,_rgba(204,251,241,0.7),_rgba(255,255,255,0.96))] p-4 shadow-[0_18px_48px_-40px_rgba(13,148,136,0.7)]">
-          <div className="text-[11px] uppercase tracking-[0.22em] text-teal-700/75">Unread Backlog</div>
+          <div className="text-[11px] tracking-[0.22em] text-teal-700/75">未读堆积</div>
           <div className="mt-2 text-3xl font-semibold text-zinc-900">{sourceSummary.unreadBacklog}</div>
           <p className="mt-1 text-xs leading-5 text-zinc-600">订阅资产真正需要运营的是待处理堆积，而不是源总数。</p>
         </div>
         <div className="rounded-[24px] border border-zinc-200 bg-white p-4">
-          <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">High Signal</div>
+          <div className="text-[11px] tracking-[0.22em] text-zinc-500">高价值信源</div>
           <div className="mt-2 text-3xl font-semibold text-zinc-900">{sourceSummary.highSignalCount}</div>
-          <p className="mt-1 text-xs leading-5 text-zinc-500">S/A 级信源，适合像 Folo 那样放在订阅运营的最上层。</p>
+          <p className="mt-1 text-xs leading-5 text-zinc-500">T1/T1.5 与 S/A 信源，适合放在订阅运营的最上层。</p>
         </div>
         <div className="rounded-[24px] border border-zinc-200 bg-white p-4">
-          <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Web Monitors</div>
+          <div className="text-[11px] tracking-[0.22em] text-zinc-500">网页监控</div>
           <div className="mt-2 text-3xl font-semibold text-zinc-900">{sourceSummary.monitorCount}</div>
           <p className="mt-1 text-xs leading-5 text-zinc-500">网页变更监控和网页正文快照，适合做哨兵源与专题看板。</p>
         </div>
         <div className="rounded-[24px] border border-zinc-200 bg-white p-4">
-          <div className="text-[11px] uppercase tracking-[0.22em] text-zinc-500">Needs Repair</div>
+          <div className="text-[11px] tracking-[0.22em] text-zinc-500">待修复</div>
           <div className="mt-2 text-3xl font-semibold text-zinc-900">{sourceSummary.staleCount}</div>
           <p className="mt-1 text-xs leading-5 text-zinc-500">过期或异常的源优先处理，否则阅读体验永远像后台而不像阅读器。</p>
         </div>
@@ -717,7 +805,7 @@ export function Sources() {
             <div key={pkg.slug} className="rounded-xl border border-amber-200 bg-[linear-gradient(135deg,_rgba(254,243,199,0.55),_rgba(255,255,255,0.96))] p-4">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
-                  <div className="text-[11px] uppercase tracking-[0.22em] text-amber-700/80">Bundled Subscription Package</div>
+                  <div className="text-[11px] tracking-[0.22em] text-amber-700/80">内置信源包</div>
                   <h2 className="mt-1 text-base font-semibold text-zinc-900">{pkg.title}</h2>
                   <p className="mt-1 text-sm text-zinc-600">{pkg.description}</p>
                   <p className="mt-1 text-xs text-zinc-500">
@@ -898,6 +986,7 @@ export function Sources() {
                   collectorType,
                   sourceType: sourceTypeByCollector[collectorType],
                   sourceTier: recommended.sourceTier,
+                  sourceKind: getRecommendedSourceKind(collectorType),
                   processingProfile: recommended.processingProfile,
                   growthAxes: recommended.growthAxes,
                 }));
@@ -1047,6 +1136,33 @@ export function Sources() {
             </label>
           </div>
 
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="space-y-1">
+              <span className="text-xs font-medium text-zinc-600">信源类型</span>
+              <select
+                value={form.sourceKind}
+                onChange={(e) => setForm((prev) => ({ ...prev, sourceKind: e.target.value as SourceKind }))}
+                className="w-full px-3 py-2 border border-zinc-200 rounded-lg text-sm"
+              >
+                {SOURCE_KIND_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs font-medium text-zinc-600">权威权重</span>
+              <input
+                type="number"
+                min={0.35}
+                max={2}
+                step={0.01}
+                value={form.authorityWeight}
+                onChange={(e) => setForm((prev) => ({ ...prev, authorityWeight: Number(e.target.value || 1) }))}
+                className="w-full px-3 py-2 border border-zinc-200 rounded-lg text-sm"
+              />
+            </label>
+          </div>
+
           <div className="rounded-lg border border-zinc-200 bg-white px-3 py-3">
             <div className="text-sm font-medium text-zinc-800">成长维度</div>
             <div className="mt-1 text-xs text-zinc-500">决定这类信息优先进入哪一个成长象限，可多选。</div>
@@ -1183,7 +1299,97 @@ export function Sources() {
               {option.label}
             </button>
           ))}
+          <div className="ml-auto flex rounded-full border border-zinc-200 bg-zinc-50 p-1">
+            {([
+              { value: 'table', label: '表格全览' },
+              { value: 'cards', label: '卡片详情' },
+            ] as Array<{ value: 'table' | 'cards'; label: string }>).map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setViewMode(option.value)}
+                className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
+                  viewMode === option.value ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:bg-white'
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
         </div>
+        {viewMode === 'table' && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-xs text-zinc-600">
+            <span>已选 {selectedSources.length} 个信源</span>
+            <button
+              type="button"
+              onClick={toggleAllVisibleSources}
+              className="rounded-full border border-zinc-200 bg-white px-3 py-1 hover:bg-zinc-100"
+            >
+              全选/取消当前列表
+            </button>
+            <select
+              disabled={bulkUpdating || selectedSources.length === 0}
+              defaultValue=""
+              onChange={(event) => {
+                const value = event.target.value as SourceTier;
+                if (value) void handleBulkUpdate({ sourceTier: value }, '已批量更新信源等级');
+                event.target.value = '';
+              }}
+              className="rounded-full border border-zinc-200 bg-white px-3 py-1 disabled:opacity-50"
+            >
+              <option value="">批量改等级</option>
+              {SOURCE_TIER_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <select
+              disabled={bulkUpdating || selectedSources.length === 0}
+              defaultValue=""
+              onChange={(event) => {
+                const value = event.target.value as SourceKind;
+                if (value) void handleBulkUpdate({ sourceKind: value }, '已批量更新信源类型');
+                event.target.value = '';
+              }}
+              className="rounded-full border border-zinc-200 bg-white px-3 py-1 disabled:opacity-50"
+            >
+              <option value="">批量改类型</option>
+              {SOURCE_KIND_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <select
+              disabled={bulkUpdating || selectedSources.length === 0}
+              defaultValue=""
+              onChange={(event) => {
+                const value = event.target.value as ProcessingProfile;
+                if (value) void handleBulkUpdate({ processingProfile: value }, '已批量更新处理档位');
+                event.target.value = '';
+              }}
+              className="rounded-full border border-zinc-200 bg-white px-3 py-1 disabled:opacity-50"
+            >
+              <option value="">批量改处理档位</option>
+              {PROCESSING_PROFILE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={bulkUpdating || selectedSources.length === 0}
+              onClick={() => void handleBulkUpdate({ status: 'paused' }, '已批量暂停')}
+              className="rounded-full border border-zinc-200 bg-white px-3 py-1 hover:bg-zinc-100 disabled:opacity-50"
+            >
+              批量暂停
+            </button>
+            <button
+              type="button"
+              disabled={bulkUpdating || selectedSources.length === 0}
+              onClick={() => void handleBulkUpdate({ status: 'active' }, '已批量启用')}
+              className="rounded-full border border-zinc-200 bg-white px-3 py-1 hover:bg-zinc-100 disabled:opacity-50"
+            >
+              批量启用
+            </button>
+          </div>
+        )}
       </div>
 
       {loading ? (
@@ -1191,6 +1397,65 @@ export function Sources() {
       ) : filteredSources.length === 0 ? (
         <div className="rounded-[24px] border border-dashed border-zinc-300 bg-zinc-50/80 px-6 py-14 text-center text-sm text-zinc-500">
           当前筛选条件下没有信源。可以放宽筛选，或者直接添加 / 导入一批新源。
+        </div>
+      ) : viewMode === 'table' ? (
+        <div className="overflow-hidden rounded-[24px] border border-zinc-200 bg-white shadow-[0_20px_56px_-48px_rgba(15,23,42,0.45)]">
+          <div className="max-h-[70vh] overflow-auto">
+            <table className="min-w-[1120px] w-full text-left text-sm">
+              <thead className="sticky top-0 z-10 bg-zinc-50 text-xs text-zinc-500">
+                <tr>
+                  <th className="w-10 px-3 py-3">
+                    <input
+                      type="checkbox"
+                      checked={filteredSources.length > 0 && filteredSources.every((source) => selectedSourceIds.includes(source.id))}
+                      onChange={toggleAllVisibleSources}
+                    />
+                  </th>
+                  <th className="px-3 py-3">信源</th>
+                  <th className="px-3 py-3">类型</th>
+                  <th className="px-3 py-3">等级</th>
+                  <th className="px-3 py-3">权威</th>
+                  <th className="px-3 py-3">未读</th>
+                  <th className="px-3 py-3">精选率</th>
+                  <th className="px-3 py-3">重复率</th>
+                  <th className="px-3 py-3">健康</th>
+                  <th className="px-3 py-3">最近抓取</th>
+                  <th className="px-3 py-3">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100">
+                {filteredSources.map((source) => (
+                  <tr key={source.id} className="hover:bg-zinc-50/70">
+                    <td className="px-3 py-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedSourceIds.includes(source.id)}
+                        onChange={() => toggleSourceSelection(source.id)}
+                      />
+                    </td>
+                    <td className="px-3 py-3">
+                      <div className="max-w-[260px] truncate font-medium text-zinc-900">{source.name}</div>
+                      <div className="max-w-[260px] truncate text-xs text-zinc-500">{source.sourceHost || source.category || '未分类'}</div>
+                    </td>
+                    <td className="px-3 py-3 text-zinc-600">{sourceKindLabel(source.sourceKind)}</td>
+                    <td className="px-3 py-3 text-zinc-600">{SOURCE_TIER_OPTIONS.find((option) => option.value === source.sourceTier)?.label || source.sourceTier || '未分级'}</td>
+                    <td className="px-3 py-3 text-zinc-600">{Number(source.authorityWeight ?? 1).toFixed(2)}</td>
+                    <td className="px-3 py-3 font-medium text-zinc-900">{source.unreadCount ?? 0}</td>
+                    <td className="px-3 py-3 text-zinc-600">{percentLabel(source.selectedHitRate)}</td>
+                    <td className="px-3 py-3 text-zinc-600">{percentLabel(source.duplicateContribution)}</td>
+                    <td className="px-3 py-3 text-zinc-600">{source.healthScore ?? 0}%</td>
+                    <td className="px-3 py-3 text-zinc-600">{formatTimeLabel(source.latestItemAt || source.lastFetchedAt)}</td>
+                    <td className="px-3 py-3">
+                      <div className="flex gap-2">
+                        <button onClick={() => openSourceFeed(source, true)} className="rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-100">看未读</button>
+                        <button onClick={() => navigate(`/rules?source=${source.id}`)} className="rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-100">策略</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <div className="space-y-2">
@@ -1226,38 +1491,48 @@ export function Sources() {
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
                         {source.sourceHost && <span>{source.sourceHost}</span>}
                         <span>{source.category || 'uncategorized'}</span>
+                        <span>类型 {sourceKindLabel(source.sourceKind)}</span>
+                        <span>权威 {Number(source.authorityWeight ?? 1).toFixed(2)}</span>
                         <span>健康 {source.healthScore ?? 0}%</span>
                         <span>可信 {source.trustScore ?? 0}</span>
                         <span>噪音 {source.noiseScore ?? 0}</span>
                         <span>周期 {source.fetchInterval ?? 60} 分钟</span>
                       </div>
 
-                      <div className="mt-3 grid gap-2 sm:grid-cols-4">
+                      <div className="mt-3 grid gap-2 sm:grid-cols-6">
                         <button
                           type="button"
                           onClick={() => openSourceFeed(source, true)}
                           className="rounded-2xl border border-teal-100 bg-teal-50/70 px-3 py-2 text-left hover:bg-teal-50"
                         >
-                          <div className="text-[10px] uppercase tracking-[0.2em] text-teal-700/70">Unread</div>
+                          <div className="text-[10px] tracking-[0.2em] text-teal-700/70">未读</div>
                           <div className="mt-1 text-xl font-semibold text-zinc-900">{source.unreadCount ?? 0}</div>
                         </button>
                         <div className="rounded-2xl border border-zinc-200 bg-zinc-50/60 px-3 py-2">
-                          <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Entries</div>
+                          <div className="text-[10px] tracking-[0.2em] text-zinc-500">可读条目</div>
                           <div className="mt-1 text-xl font-semibold text-zinc-900">{source.entryCount ?? 0}</div>
                         </div>
                         <div className="rounded-2xl border border-zinc-200 bg-zinc-50/60 px-3 py-2">
-                          <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Favorites</div>
+                          <div className="text-[10px] tracking-[0.2em] text-zinc-500">收藏</div>
                           <div className="mt-1 text-xl font-semibold text-zinc-900">{source.favoriteCount ?? 0}</div>
                         </div>
                         <div className="rounded-2xl border border-zinc-200 bg-zinc-50/60 px-3 py-2">
-                          <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Latest</div>
+                          <div className="text-[10px] tracking-[0.2em] text-zinc-500">最近更新</div>
                           <div className="mt-1 text-sm font-semibold text-zinc-900">{formatTimeLabel(source.latestItemAt || source.lastFetchedAt)}</div>
+                        </div>
+                        <div className="rounded-2xl border border-zinc-200 bg-zinc-50/60 px-3 py-2">
+                          <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">精选率</div>
+                          <div className="mt-1 text-xl font-semibold text-zinc-900">{percentLabel(source.selectedHitRate)}</div>
+                        </div>
+                        <div className="rounded-2xl border border-zinc-200 bg-zinc-50/60 px-3 py-2">
+                          <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">重复率</div>
+                          <div className="mt-1 text-xl font-semibold text-zinc-900">{percentLabel(source.duplicateContribution)}</div>
                         </div>
                       </div>
 
                       {source.latestItemTitle && (
                         <div className="mt-3 rounded-2xl border border-zinc-200 bg-zinc-50/70 px-3 py-3">
-                          <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">Latest Entry</div>
+                          <div className="text-[10px] tracking-[0.2em] text-zinc-500">最新条目</div>
                           <div className="mt-1 text-sm font-medium leading-6 text-zinc-900">{source.latestItemTitle}</div>
                           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
                             <span>{formatTimeLabel(source.latestItemAt, { absolute: true })}</span>
@@ -1323,6 +1598,39 @@ export function Sources() {
                               <option key={option.value} value={option.value}>{option.label}</option>
                             ))}
                           </select>
+                          <select
+                            value={(source.sourceKind as SourceKind) || 'rss'}
+                            onChange={(e) => {
+                              void handleSourceStrategyUpdate(
+                                source,
+                                { sourceKind: e.target.value as SourceKind },
+                                `已更新「${source.name}」的信源类型`,
+                              );
+                            }}
+                            className="rounded-xl border border-zinc-200 px-3 py-2 text-[11px] text-zinc-700"
+                          >
+                            {SOURCE_KIND_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                          </select>
+                          <label className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 px-3 py-2 text-[11px] text-zinc-700">
+                            权威
+                            <input
+                              type="number"
+                              min={0.35}
+                              max={2}
+                              step={0.01}
+                              value={Number(source.authorityWeight ?? 1)}
+                              onChange={(e) => {
+                                void handleSourceStrategyUpdate(
+                                  source,
+                                  { authorityWeight: Number(e.target.value || 1) },
+                                  `已更新「${source.name}」的权威权重`,
+                                );
+                              }}
+                              className="w-16 bg-transparent outline-none"
+                            />
+                          </label>
                           {source.collectorType === 'webpage' && (
                             <>
                               <select

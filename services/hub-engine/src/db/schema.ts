@@ -39,8 +39,10 @@ export const sources = hubSchema.table('sources', {
   name: text('name').notNull(),
   sourceType: text('source_type').notNull(),
   collectorType: text('collector_type').notNull().default('rss'),
+  sourceKind: text('source_kind').notNull().default('rss'),
   sourceRole: text('source_role').notNull().default('normal'),
   sourceTier: text('source_tier').notNull().default('B'),
+  authorityWeight: real('authority_weight').notNull().default(1),
   processingProfile: text('processing_profile').notNull().default('brief'),
   trustScore: integer('trust_score').notNull().default(60),
   noiseScore: integer('noise_score').notNull().default(40),
@@ -67,6 +69,7 @@ export const sources = hubSchema.table('sources', {
 }, (table) => [
   index('idx_sources_user').on(table.userId),
   index('idx_sources_type').on(table.sourceType),
+  index('idx_sources_kind').on(table.sourceKind),
   index('idx_sources_role').on(table.sourceRole),
   index('idx_sources_tier').on(table.sourceTier),
   index('idx_sources_processing_profile').on(table.processingProfile),
@@ -77,6 +80,7 @@ export const sources = hubSchema.table('sources', {
 export const userSettings = hubSchema.table('user_settings', {
   userId: uuid('user_id').notNull().primaryKey().references(() => users.id, { onDelete: 'cascade' }),
   autoFetchEnabled: boolean('auto_fetch_enabled').notNull().default(true),
+  dailyReportWorkflow: jsonb('daily_report_workflow'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [

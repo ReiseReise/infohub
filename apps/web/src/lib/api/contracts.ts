@@ -166,7 +166,9 @@ export interface SourceRecord {
   sourceHost?: string | null;
   iconUrl?: string | null;
   sourceRole?: string | null;
+  sourceKind?: 'official' | 'blog' | 'rss' | 'x' | 'wechat' | 'media' | 'api' | 'webpage' | 'podcast' | 'other' | string | null;
   sourceTier?: 'S' | 'A' | 'B' | 'C' | 'D' | string | null;
+  authorityWeight?: number | null;
   processingProfile?: 'full' | 'smart' | 'brief' | 'monitor' | string | null;
   trustScore?: number | null;
   noiseScore?: number | null;
@@ -194,8 +196,12 @@ export interface SourceRecord {
   errorMessage?: string | null;
   itemCount?: number;
   entryCount?: number;
+  filteredCount?: number;
   unreadCount?: number;
   favoriteCount?: number;
+  selectedCount?: number;
+  selectedHitRate?: number;
+  duplicateContribution?: number;
   latestItemTitle?: string | null;
   latestItemUrl?: string | null;
   latestItemAt?: string | null;
@@ -369,8 +375,29 @@ export interface FeedItemRecord {
   aiTags?: string[];
   sourceType: string;
   sourceTier?: 'S' | 'A' | 'B' | 'C' | 'D' | string;
+  sourceKind?: string | null;
+  authorityWeight?: number | null;
   processingProfile?: 'full' | 'smart' | 'brief' | 'monitor' | string;
   growthAxes?: string[];
+  clusterId?: string | null;
+  eventCluster?: {
+    clusterId: string;
+    leadItemId: string;
+    relatedCount: number;
+    recommendationReason: string;
+    relatedItems: Array<{
+      id: string;
+      title: string;
+      url: string;
+      sourceName?: string | null;
+      sourceTier?: string | null;
+      sourceKind?: string | null;
+      aiScore?: number | null;
+      priorityScore?: number | null;
+      publishedAt?: string | null;
+      fetchedAt?: string | null;
+    }>;
+  } | null;
   sourceName?: string;
   sourceCategory?: string;
   sourceCollectorType?: string;
@@ -584,6 +611,13 @@ export interface ItemsStats {
   unread: number;
   today: number;
   favorites: number;
+  funnel?: {
+    allItems: number;
+    visibleItems: number;
+    filteredBucketItems: number;
+    mismatchedFilteredMain: number;
+    todayVisibleItems: number;
+  };
 }
 
 export interface FetchStatusResponse {
@@ -652,25 +686,47 @@ export interface InsightRecord {
       date?: string;
       totalItems?: number;
       newItems?: number;
+  selectionMode?: 'scored' | 'review' | 'latest_visible' | 'empty' | string;
+      reportFunnel?: {
+        newItems: number;
+        eligibleItems: number;
+        filteredItems: number;
+        filteredBucketItems: number;
+        reviewItems: number;
+        pendingItems: number;
+      };
       compareWindowDays?: number;
       topItems?: Array<{
         id: string;
         title: string;
+        displayTitle?: string | null;
         url: string;
         aiScore?: number | null;
         aiSummary?: string | null;
+        reportSummary?: string | null;
+        language?: string | null;
+        translationStatus?: string | null;
+        selectionReason?: string | null;
+        selectionMode?: string | null;
+        scopeMatched?: boolean | null;
         sourceName: string;
         category: string;
       }>;
       highScoreItems?: Array<{
         id: string;
         title: string;
+        displayTitle?: string | null;
         url: string;
         aiScore?: number | null;
         aiSummary?: string | null;
+        reportSummary?: string | null;
+        selectionReason?: string | null;
         sourceName: string;
         category: string;
       }>;
+      workflowConfig?: DailyReportWorkflowConfig;
+      candidateFunnel?: DailyReportWorkflowPreview['funnel'];
+      excludedCandidates?: DailyReportWorkflowPreview['excluded'];
       byCategory?: Array<{ category: string; count: number; baselineAvg?: number; delta?: number }>;
       topSources?: Array<{ sourceName: string; count: number }>;
       themeClusters?: Array<{ label: string; count: number; sampleTitles: string[] }>;
@@ -759,6 +815,8 @@ export interface GrowthDashboardAxis {
   count: number;
   averageScore?: number | null;
   summary: string;
+  emptyReason?: string | null;
+  sourceExplanation?: string | null;
   items: GrowthDashboardItem[];
 }
 
@@ -766,6 +824,11 @@ export interface GrowthDashboardRecord {
   windowDays: number;
   summary: {
     totalItems: number;
+    visibleItems?: number;
+    filteredItems?: number;
+    filteredBucketItems?: number;
+    mismatchedFilteredMain?: number;
+    unmappedItems?: number;
     activeSources: number;
     signalSources: number;
     mustReview: number;
@@ -788,6 +851,79 @@ export interface InsightGeneratePayload {
   compareWindowDays?: number;
   pipelineVersion?: number;
   [key: string]: unknown;
+}
+
+export interface DailyReportWorkflowConfig {
+  topN: number;
+  minScore: number;
+  enableLatestFallback: boolean;
+  perSourceLimit: number;
+  requireChinese: boolean;
+  scope: {
+    categories: string[];
+    keywords: string[];
+    sourceTiers: string[];
+  };
+  enabledModules: {
+    cleaning: boolean;
+    decision: boolean;
+    research: boolean;
+    reading: boolean;
+    final: boolean;
+  };
+}
+
+export interface DailyReportWorkflowAiScene {
+  type: string;
+  name: string;
+  isActive?: boolean | null;
+  promptTemplateId?: string | null;
+  modelConfigId?: string | null;
+  model?: string | null;
+  provider?: string | null;
+}
+
+export interface DailyReportWorkflowPreview {
+  selectionMode: 'scored' | 'review' | 'latest_visible' | 'empty' | string;
+  funnel: {
+    todayNew: number;
+    mainVisible: number;
+    scopeMatched: number;
+    scoredCandidates: number;
+    reviewCandidates?: number;
+    softFilteredRecovered?: number;
+    scoreFailedCandidates?: number;
+    latestFallbackCandidates: number;
+    translationPending: number;
+    translationFailed: number;
+    finalCandidates: number;
+    filteredItems?: number;
+    filteredBucketItems?: number;
+    reviewItems?: number;
+    pendingItems?: number;
+  };
+  candidates: Array<{
+    id: string;
+    title: string;
+    sourceName: string;
+    category: string;
+    aiScore?: number | null;
+    selectionMode: string;
+    selectionReason: string;
+    reportSummary: string;
+    translationStatus?: string | null;
+  }>;
+  excluded: Array<{
+    id: string;
+    title: string;
+    reason: string;
+    detail?: string | null;
+  }>;
+}
+
+export interface DailyReportWorkflowPayload {
+  workflow: DailyReportWorkflowConfig;
+  aiScenes?: DailyReportWorkflowAiScene[];
 }
 
 export interface ExportMutationResult {

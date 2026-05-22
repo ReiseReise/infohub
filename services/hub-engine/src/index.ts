@@ -80,6 +80,16 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table public.prompt_templates alter column category type text`);
   await db.execute(sql`alter table hub.ai_configs drop constraint if exists ai_configs_type_check`);
   await db.execute(sql`
+    update hub.filter_rules
+    set
+      type = 'source_priority',
+      config = '{"minScore":70,"boost":20,"description":"AI 评分达到 70 后优先展示；低于 70 不做硬过滤。"}'::jsonb
+    where scope = 'global'
+      and user_id is null
+      and name = 'AI高分优先'
+      and type = 'ai_score_filter'
+  `);
+  await db.execute(sql`
     with ranked as (
       select id,
              row_number() over (
@@ -105,10 +115,12 @@ async function ensureSchemaCompatibility() {
     create table if not exists hub.user_settings (
       user_id uuid primary key references auth.users(id) on delete cascade,
       auto_fetch_enabled boolean not null default true,
+      daily_report_workflow jsonb,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     )
   `);
+  await db.execute(sql`alter table hub.user_settings add column if not exists daily_report_workflow jsonb`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_url_unique`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_url_key`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_processing_status_check`);
@@ -225,8 +237,10 @@ async function ensureSchemaCompatibility() {
     )
   `);
   await db.execute(sql`alter table hub.sources add column if not exists auto_fetch_enabled boolean default true`);
+  await db.execute(sql`alter table hub.sources add column if not exists source_kind text not null default 'rss'`);
   await db.execute(sql`alter table hub.sources add column if not exists source_role text not null default 'normal'`);
   await db.execute(sql`alter table hub.sources add column if not exists source_tier text default 'B'`);
+  await db.execute(sql`alter table hub.sources add column if not exists authority_weight real not null default 1`);
   await db.execute(sql`alter table hub.sources add column if not exists processing_profile text default 'brief'`);
   await db.execute(sql`alter table hub.sources add column if not exists trust_score integer default 60`);
   await db.execute(sql`alter table hub.sources add column if not exists noise_score integer default 40`);
@@ -255,6 +269,21 @@ async function ensureSchemaCompatibility() {
       else 'B'
     end
     where source_tier is null or btrim(source_tier) = ''
+  `);
+  await db.execute(sql`
+    update hub.sources
+    set source_kind = case
+      when source_type = 'wechat' or category in ('公众号爆文', 'wechat') then 'wechat'
+      when collector_type = 'rsshub' and coalesce(config->>'route', '') ~* '/(twitter|x)/' then 'x'
+      when source_type in ('podcast', 'audio') or collector_type = 'youtube' then 'podcast'
+      when collector_type = 'custom' then 'api'
+      when collector_type in ('changedetection', 'webpage') then 'webpage'
+      when coalesce(config->>'url', config->>'htmlUrl', '') ~* '(openai.com|anthropic.com|claude.com|x.ai|machinelearning.apple.com|github.blog|cursor.com|nvidia.com)' then 'official'
+      when coalesce(config->>'url', config->>'htmlUrl', '') ~* '(huggingface.co|simonwillison.net|substack.com|interconnects.ai)' then 'blog'
+      when coalesce(config->>'url', config->>'htmlUrl', '') ~* '(ithome.com|the-decoder.com|buzzing.cc)' then 'media'
+      else coalesce(nullif(source_kind, ''), 'rss')
+    end
+    where source_kind is null or btrim(source_kind) = '' or source_kind = 'rss'
   `);
   await db.execute(sql`
     update hub.sources
@@ -290,6 +319,24 @@ async function ensureSchemaCompatibility() {
   `);
   await db.execute(sql`
     update hub.sources
+    set authority_weight = greatest(0.35, least(2, case
+      when source_tier in ('T1', 'S') then 1.22
+      when source_tier in ('T1.5', 'A') then 1.08
+      when source_tier in ('T2', 'B') then 0.96
+      when source_tier = 'C' then 0.82
+      else 0.72
+    end
+    + case
+      when source_kind = 'official' then 0.06
+      when source_kind = 'blog' then 0.02
+      when source_kind = 'wechat' then -0.08
+      when source_kind = 'media' then -0.03
+      else 0
+    end))
+    where authority_weight is null or authority_weight <= 0
+  `);
+  await db.execute(sql`
+    update hub.sources
     set growth_axes = '["认知升级"]'::jsonb
     where growth_axes is null or jsonb_typeof(growth_axes) <> 'array' or jsonb_array_length(growth_axes) = 0
   `);
@@ -311,6 +358,7 @@ async function ensureSchemaCompatibility() {
     where src.id = item.source_id
   `);
   await db.execute(sql`create index if not exists idx_sources_tier on hub.sources(source_tier)`);
+  await db.execute(sql`create index if not exists idx_sources_kind on hub.sources(source_kind)`);
   await db.execute(sql`create index if not exists idx_sources_processing_profile on hub.sources(processing_profile)`);
   await db.execute(sql`create index if not exists idx_items_user_tier on hub.items(user_id, source_tier)`);
   await db.execute(sql`create index if not exists idx_items_processing_profile on hub.items(user_id, processing_profile)`);

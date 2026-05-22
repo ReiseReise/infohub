@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { eq, and, desc, count, sql } from 'drizzle-orm';
+import { eq, and, desc, count, sql, gte } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { parseOpml } from '../lib/opml-parser.js';
@@ -7,15 +7,21 @@ import { requireAuth } from '../lib/auth.js';
 import { computeSourceFreshness } from '../lib/freshness.js';
 import { deriveSourceProfile, normalizeGrowthAxes } from '../lib/growth.js';
 import { buildSourceFingerprint } from '../lib/source-normalization.js';
+import { classifySourceKind, normalizeAuthorityWeight } from '../lib/aihot-governance.js';
 
 const app = new Hono();
 
 type SourceListSort = 'createdAt' | 'latest' | 'unread' | 'health' | 'name';
 
 type SourceOverview = {
+  itemCount: number;
   entryCount: number;
+  filteredCount: number;
   unreadCount: number;
   favoriteCount: number;
+  selectedCount: number;
+  selectedHitRate: number;
+  duplicateContribution: number;
   latestItemTitle: string | null;
   latestItemUrl: string | null;
   latestItemAt: string | null;
@@ -119,9 +125,12 @@ app.get('/', async (c) => {
   const itemStatsRows = await db
     .select({
       sourceId: schema.items.sourceId,
-      entryCount: sql<number>`sum(case when ${schema.items.isFiltered} = false then 1 else 0 end)`,
-      unreadCount: sql<number>`sum(case when ${schema.items.isRead} = false and ${schema.items.isFiltered} = false then 1 else 0 end)`,
-      favoriteCount: sql<number>`sum(case when ${schema.items.isFavorite} = true and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      itemCount: sql<number>`count(*)`,
+      entryCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      filteredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'filtered' or ${schema.items.isFiltered} = true then 1 else 0 end)`,
+      unreadCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isRead} = false and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      favoriteCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFavorite} = true and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      selectedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (coalesce(${schema.items.aiScore}, 0) >= 70 or coalesce(${schema.items.priorityScore}, 0) >= 0.7) then 1 else 0 end)`,
     })
     .from(schema.items)
     .where(eq(schema.items.userId, authUser.userId))
@@ -135,6 +144,7 @@ app.get('/', async (c) => {
       coalesce(published_at, fetched_at) as latest_item_at
     from hub.items
     where user_id = ${authUser.userId}::uuid
+      and filter_bucket = 'main'
       and is_filtered = false
     order by source_id, coalesce(published_at, fetched_at) desc nulls last, fetched_at desc nulls last
   `) as Array<{
@@ -144,13 +154,37 @@ app.get('/', async (c) => {
     latest_item_at: string | null;
   }>;
 
-  const statsMap = new Map<number, Pick<SourceOverview, 'entryCount' | 'unreadCount' | 'favoriteCount'>>();
+  const fetchLogRows = await db
+    .select({
+      sourceId: schema.fetchLogs.sourceId,
+      itemsFound: sql<number>`sum(coalesce(${schema.fetchLogs.itemsFound}, 0))`,
+      itemsDuplicate: sql<number>`sum(coalesce(${schema.fetchLogs.itemsDuplicate}, 0))`,
+    })
+    .from(schema.fetchLogs)
+    .where(gte(schema.fetchLogs.startedAt, new Date(Date.now() - 14 * 24 * 3600 * 1000)))
+    .groupBy(schema.fetchLogs.sourceId);
+
+  const statsMap = new Map<number, Pick<SourceOverview, 'itemCount' | 'entryCount' | 'filteredCount' | 'unreadCount' | 'favoriteCount' | 'selectedCount' | 'selectedHitRate'>>();
   for (const row of itemStatsRows) {
+    const entryCount = Number(row.entryCount || 0);
+    const selectedCount = Number(row.selectedCount || 0);
     statsMap.set(row.sourceId, {
-      entryCount: Number(row.entryCount || 0),
+      itemCount: Number(row.itemCount || 0),
+      entryCount,
+      filteredCount: Number(row.filteredCount || 0),
       unreadCount: Number(row.unreadCount || 0),
       favoriteCount: Number(row.favoriteCount || 0),
+      selectedCount,
+      selectedHitRate: entryCount > 0 ? Number((selectedCount / entryCount).toFixed(3)) : 0,
     });
+  }
+
+  const duplicateMap = new Map<number, number>();
+  for (const row of fetchLogRows) {
+    if (row.sourceId == null) continue;
+    const found = Number(row.itemsFound || 0);
+    const duplicate = Number(row.itemsDuplicate || 0);
+    duplicateMap.set(row.sourceId, found > 0 ? Number((duplicate / found).toFixed(3)) : 0);
   }
 
   const latestMap = new Map<number, Pick<SourceOverview, 'latestItemTitle' | 'latestItemUrl' | 'latestItemAt'>>();
@@ -168,9 +202,14 @@ app.get('/', async (c) => {
     const latest = latestMap.get(row.id);
     return {
       ...base,
+      itemCount: sourceStats?.itemCount || 0,
       entryCount: sourceStats?.entryCount || 0,
+      filteredCount: sourceStats?.filteredCount || 0,
       unreadCount: sourceStats?.unreadCount || 0,
       favoriteCount: sourceStats?.favoriteCount || 0,
+      selectedCount: sourceStats?.selectedCount || 0,
+      selectedHitRate: sourceStats?.selectedHitRate || 0,
+      duplicateContribution: duplicateMap.get(row.id) || 0,
       latestItemTitle: latest?.latestItemTitle || null,
       latestItemUrl: latest?.latestItemUrl || null,
       latestItemAt: latest?.latestItemAt || null,
@@ -256,6 +295,8 @@ app.post('/', async (c) => {
     trustScore,
     noiseScore,
     upgradeRules,
+    sourceKind,
+    authorityWeight,
   } = body;
 
   if (!name || !sourceType) {
@@ -279,13 +320,23 @@ app.post('/', async (c) => {
       sourceType,
       category,
     });
+    const effectiveSourceKind = sourceKind || classifySourceKind({
+      name,
+      sourceType,
+      collectorType: collectorType || 'rss',
+      category,
+      config: effectiveConfig,
+    });
+    const effectiveAuthorityWeight = normalizeAuthorityWeight(authorityWeight, derivedProfile.sourceTier, effectiveSourceKind);
     const result = await db.insert(schema.sources).values({
       userId: authUser.userId,
       name,
       sourceType,
       collectorType: collectorType || 'rss',
+      sourceKind: effectiveSourceKind,
       sourceRole: sourceRole || ((collectorType === 'webpage' || collectorType === 'changedetection') && (category === '监控' || category === 'monitor') ? 'monitor' : 'normal'),
       sourceTier: derivedProfile.sourceTier,
+      authorityWeight: effectiveAuthorityWeight,
       processingProfile: derivedProfile.processingProfile,
       trustScore: derivedProfile.trustScore,
       noiseScore: derivedProfile.noiseScore,
@@ -328,7 +379,7 @@ app.put('/:id', async (c) => {
   const current = existing[0];
 
   const updateData: Record<string, unknown> = { updatedAt: new Date() };
-  const allowedFields = ['name', 'sourceType', 'collectorType', 'sourceRole', 'config', 'category', 'priority', 'fetchInterval', 'autoFetchEnabled', 'autoTranscribe', 'status', 'tags'];
+  const allowedFields = ['name', 'sourceType', 'collectorType', 'sourceKind', 'sourceRole', 'authorityWeight', 'config', 'category', 'priority', 'fetchInterval', 'autoFetchEnabled', 'autoTranscribe', 'status', 'tags'];
   for (const field of allowedFields) {
     if (body[field] !== undefined) {
       // Map camelCase to schema field
@@ -368,6 +419,15 @@ app.put('/:id', async (c) => {
     category: nextCategory,
   });
   updateData.sourceTier = derivedProfile.sourceTier;
+  const nextSourceKind = String(body.sourceKind ?? current.sourceKind ?? '').trim() || classifySourceKind({
+    name: body.name ?? current.name,
+    sourceType: nextSourceType,
+    collectorType: nextCollectorType,
+    category: nextCategory,
+    config: updateData.config ?? current.config,
+  });
+  updateData.sourceKind = nextSourceKind;
+  updateData.authorityWeight = normalizeAuthorityWeight(body.authorityWeight ?? current.authorityWeight, derivedProfile.sourceTier, nextSourceKind);
   updateData.processingProfile = derivedProfile.processingProfile;
   updateData.trustScore = derivedProfile.trustScore;
   updateData.noiseScore = derivedProfile.noiseScore;

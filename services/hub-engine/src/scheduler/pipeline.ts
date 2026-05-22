@@ -13,6 +13,7 @@ import type { Job } from 'bullmq';
 import { isFetchJobInFlight, shouldRemoveExistingFetchJob } from './fetch-dedupe.js';
 import { buildSnippet, detectLikelyLanguage } from '../lib/content-extractor.js';
 import { maybeAutoTranscribeItem, type AutoTranscribeCandidate } from '../services/auto-transcribe.js';
+import { buildEventClusterKey } from '../lib/event-clustering.js';
 import { applyFilterRules } from '../processors/filter.js';
 
 const collectors: Record<string, Collector> = {
@@ -344,6 +345,7 @@ export async function handleFetchJob(job: Job<FetchJobData>): Promise<FetchExecu
           sourceTier: source.sourceTier || 'B',
           processingProfile: source.processingProfile || 'brief',
           growthAxes: Array.isArray(source.growthAxes) ? source.growthAxes : ['认知升级'],
+          clusterId: buildEventClusterKey(rawItem.title, rawItem.content || snippet),
           guid: rawItem.guid || rawItem.url,
           title: rawItem.title,
           url: rawItem.url,

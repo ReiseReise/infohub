@@ -18,6 +18,7 @@ import { summarizeItems, summarizeItemsDetailed, translateItemsDetailed, transla
 import { getEffectiveAiSceneAvailability } from '../lib/ai-configs.js';
 import { getItemScoreBreakdowns, getLatestItemFeedback } from '../lib/scoring-skills.js';
 import { normalizeGrowthAxes } from '../lib/growth.js';
+import { selectEventClusterLead } from '../lib/event-clustering.js';
 
 const app = new Hono();
 
@@ -133,6 +134,7 @@ app.get('/', async (c) => {
       sourceTier: schema.items.sourceTier,
       processingProfile: schema.items.processingProfile,
       growthAxes: schema.items.growthAxes,
+      clusterId: schema.items.clusterId,
       title: schema.items.title,
       url: schema.items.url,
       author: schema.items.author,
@@ -177,6 +179,8 @@ app.get('/', async (c) => {
       sourceName: schema.sources.name,
       sourceCategory: schema.sources.category,
       sourceCollectorType: schema.sources.collectorType,
+      sourceKind: schema.sources.sourceKind,
+      authorityWeight: schema.sources.authorityWeight,
       sourceConfig: schema.sources.config,
     })
     .from(schema.items)
@@ -212,17 +216,36 @@ app.get('/', async (c) => {
 app.get('/stats', async (c) => {
   const authUser = requireAuth(c);
   const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
-  const [total, unread, favorites, today] = await Promise.all([
-    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, authUser.userId), eq(schema.items.isFiltered, false))),
-    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, authUser.userId), eq(schema.items.isFiltered, false), eq(schema.items.isRead, false))),
-    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, authUser.userId), eq(schema.items.isFiltered, false), eq(schema.items.isFavorite, true))),
-    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, authUser.userId), eq(schema.items.isFiltered, false), gte(schema.items.fetchedAt, dayStart))),
+  const visibleCondition = and(
+    eq(schema.items.userId, authUser.userId),
+    eq(schema.items.filterBucket, 'main'),
+    eq(schema.items.isFiltered, false),
+  );
+  const [total, unread, favorites, today, allRows, filteredRows, mismatchedRows] = await Promise.all([
+    db.select({ count: count() }).from(schema.items).where(visibleCondition),
+    db.select({ count: count() }).from(schema.items).where(and(visibleCondition, eq(schema.items.isRead, false))),
+    db.select({ count: count() }).from(schema.items).where(and(visibleCondition, eq(schema.items.isFavorite, true))),
+    db.select({ count: count() }).from(schema.items).where(and(visibleCondition, gte(schema.items.fetchedAt, dayStart))),
+    db.select({ count: count() }).from(schema.items).where(eq(schema.items.userId, authUser.userId)),
+    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, authUser.userId), eq(schema.items.filterBucket, 'filtered'))),
+    db.select({ count: count() }).from(schema.items).where(and(
+      eq(schema.items.userId, authUser.userId),
+      eq(schema.items.isFiltered, true),
+      eq(schema.items.filterBucket, 'main'),
+    )),
   ]);
   return c.json({
     total: total[0]?.count || 0,
     unread: unread[0]?.count || 0,
     favorites: favorites[0]?.count || 0,
     today: today[0]?.count || 0,
+    funnel: {
+      allItems: allRows[0]?.count || 0,
+      visibleItems: total[0]?.count || 0,
+      filteredBucketItems: filteredRows[0]?.count || 0,
+      mismatchedFilteredMain: mismatchedRows[0]?.count || 0,
+      todayVisibleItems: today[0]?.count || 0,
+    },
   });
 });
 
@@ -793,6 +816,8 @@ app.get('/:id', async (c) => {
       sourceName: schema.sources.name,
       sourceCategory: schema.sources.category,
       sourceCollectorType: schema.sources.collectorType,
+      sourceKind: schema.sources.sourceKind,
+      authorityWeight: schema.sources.authorityWeight,
       sourceConfig: schema.sources.config,
     })
     .from(schema.sources)
@@ -800,6 +825,40 @@ app.get('/:id', async (c) => {
     .limit(1);
 
   const latestFeedback = await getLatestItemFeedback(authUser.userId, id);
+  const relatedRows = item.clusterId
+    ? await db
+      .select({
+        id: schema.items.id,
+        title: schema.items.title,
+        url: schema.items.url,
+        aiScore: schema.items.aiScore,
+        priorityScore: schema.items.priorityScore,
+        publishedAt: schema.items.publishedAt,
+        fetchedAt: schema.items.fetchedAt,
+        sourceName: schema.sources.name,
+        sourceTier: schema.items.sourceTier,
+        sourceKind: schema.sources.sourceKind,
+        authorityWeight: schema.sources.authorityWeight,
+      })
+      .from(schema.items)
+      .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+      .where(and(
+        eq(schema.items.userId, authUser.userId),
+        eq(schema.items.clusterId, item.clusterId),
+        eq(schema.items.isFiltered, false),
+      ))
+      .orderBy(desc(schema.items.priorityScore), desc(sql`coalesce(${schema.items.publishedAt}, ${schema.items.fetchedAt})`))
+      .limit(10)
+    : [];
+  const clusterLead = selectEventClusterLead(relatedRows.map((row) => ({
+    id: row.id,
+    sourceTier: row.sourceTier,
+    sourceKind: row.sourceKind,
+    authorityWeight: row.authorityWeight,
+    aiScore: row.aiScore,
+    priorityScore: row.priorityScore,
+    publishedAt: row.publishedAt || row.fetchedAt,
+  })));
 
   return c.json({
     data: {
@@ -810,9 +869,33 @@ app.get('/:id', async (c) => {
       sourceName: sourceRows[0]?.sourceName || null,
       sourceCategory: sourceRows[0]?.sourceCategory || null,
       sourceCollectorType: sourceRows[0]?.sourceCollectorType || null,
+      sourceKind: sourceRows[0]?.sourceKind || null,
+      authorityWeight: sourceRows[0]?.authorityWeight || null,
       sourceConfig: sourceRows[0]?.sourceConfig || null,
       growthAxes: normalizeGrowthAxes(item.growthAxes, []),
       latestFeedbackType: latestFeedback?.feedbackType || null,
+      eventCluster: item.clusterId ? {
+        clusterId: item.clusterId,
+        leadItemId: clusterLead?.id || item.id,
+        relatedCount: Math.max(0, relatedRows.length - 1),
+        recommendationReason: relatedRows.length > 1
+          ? '同一事件已折叠为事件簇，官方/一手信源优先作为主条，KOL、媒体与二手讨论保留为关联讨论。'
+          : '当前事件暂未发现其他关联讨论。',
+        relatedItems: relatedRows
+          .filter((row) => row.id !== item.id)
+          .map((row) => ({
+            id: row.id,
+            title: row.title,
+            url: row.url,
+            sourceName: row.sourceName,
+            sourceTier: row.sourceTier,
+            sourceKind: row.sourceKind,
+            aiScore: row.aiScore,
+            priorityScore: row.priorityScore,
+            publishedAt: row.publishedAt,
+            fetchedAt: row.fetchedAt,
+          })),
+      } : null,
     },
   });
 });

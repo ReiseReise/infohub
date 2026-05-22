@@ -19,6 +19,9 @@ import type {
   BatchSubscriptionResult,
   AiConfigMeta,
   DiscoveryCandidate,
+  DailyReportWorkflowConfig,
+  DailyReportWorkflowPayload,
+  DailyReportWorkflowPreview,
   ExportMutationResult,
   FetchSettings,
   FetchQueueDiagnosticResponse,
@@ -227,10 +230,18 @@ export const api = {
 
   insights: {
     list: (params?: Record<string, string>) => request<{ data: InsightRecord[] }>(withQuery('/insights', params)),
+    workflow: () => request<{ data: DailyReportWorkflowPayload }>('/insights/workflow'),
+    updateWorkflow: (workflow: DailyReportWorkflowConfig) =>
+      request<{ data: { workflow: DailyReportWorkflowConfig } }>('/insights/workflow', { method: 'PUT', body: { workflow } }),
+    previewWorkflow: (workflow: DailyReportWorkflowConfig) =>
+      request<{ data: { workflow: DailyReportWorkflowConfig; preview: DailyReportWorkflowPreview } }>(
+        '/insights/workflow/preview',
+        { method: 'POST', body: { workflow } },
+      ),
     dashboard: (params?: { windowDays?: number; limit?: number }) =>
       request<{ data: GrowthDashboardRecord }>(withQuery('/insights/dashboard', params)),
     get: (date: string) => request<{ data: InsightRecord }>(`/insights/${date}`),
-    generate: (opts?: { topN?: number; minScore?: number; preset?: 'full' | 'decision' | 'research' | 'reading'; compareWindowDays?: number }) =>
+    generate: (opts?: { date?: string; topN?: number; minScore?: number; preset?: 'full' | 'decision' | 'research' | 'reading'; compareWindowDays?: number }) =>
       request<{ data?: InsightGeneratePayload }>(withQuery('/insights/generate', opts), { method: 'POST' }),
   },
 
