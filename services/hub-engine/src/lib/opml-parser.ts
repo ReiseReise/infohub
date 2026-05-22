@@ -18,17 +18,26 @@ interface OutlineNode {
 }
 
 export function parseOpml(xmlContent: string): OpmlFeed[] {
+  if (/<!doctype|<!entity/i.test(xmlContent)) return [];
+
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
   });
 
-  const parsed = parser.parse(xmlContent);
+  let parsed: { opml?: { body?: { outline?: OutlineNode | OutlineNode[] } } };
+  try {
+    parsed = parser.parse(xmlContent);
+  } catch {
+    return [];
+  }
+
   const body = parsed?.opml?.body;
   if (!body) return [];
 
   const feeds: OpmlFeed[] = [];
-  const outlines = Array.isArray(body.outline) ? body.outline : [body.outline];
+  const outlines = (Array.isArray(body.outline) ? body.outline : [body.outline])
+    .filter((node): node is OutlineNode => Boolean(node));
 
   function walk(nodes: OutlineNode[], category: string) {
     for (const node of nodes) {
