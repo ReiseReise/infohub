@@ -87,7 +87,7 @@ log "--- C4: 新增页面组件 ---"
 if [ -f "$WEB_DIR/src/pages/Rules.tsx" ]; then pass "C4.1: Rules.tsx 存在"; else fail "C4.1: Rules.tsx 不存在"; fi
 
 if grep -q "rules" "$WEB_DIR/src/App.tsx"; then pass "C4.2: Rules路由已注册"; else fail "C4.2: Rules路由未注册"; fi
-if grep -q "规则过滤" "$WEB_DIR/src/components/Sidebar.tsx"; then pass "C4.3: Sidebar含规则入口"; else fail "C4.3: Sidebar缺规则入口"; fi
+if grep -q "to: '/rules'" "$WEB_DIR/src/components/Sidebar.tsx"; then pass "C4.3: Sidebar含规则入口"; else fail "C4.3: Sidebar缺规则入口"; fi
 echo ""
 
 # ---- 汇总 ----

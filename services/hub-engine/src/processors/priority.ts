@@ -1,6 +1,7 @@
 import { eq, and, gte, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
+import { resolveRuleRoutingState } from '../lib/item-routing.js';
 import { applyFilterRules } from './filter.js';
 
 export async function calculatePriority(
@@ -15,6 +16,8 @@ export async function calculatePriority(
     .select({
       priority: schema.sources.priority,
       sourceTier: schema.sources.sourceTier,
+      sourceKind: schema.sources.sourceKind,
+      authorityWeight: schema.sources.authorityWeight,
       trustScore: schema.sources.trustScore,
       noiseScore: schema.sources.noiseScore,
     })
@@ -28,9 +31,13 @@ export async function calculatePriority(
   const tierBoost = (() => {
     switch (source[0]?.sourceTier) {
       case 'S':
+      case 'T1':
         return 1.18;
       case 'A':
+      case 'T1.5':
         return 1.08;
+      case 'T2':
+        return 0.98;
       case 'C':
         return 0.84;
       case 'D':
@@ -41,7 +48,8 @@ export async function calculatePriority(
   })();
 
   const relevance = Math.min(1, ((item.aiScore ?? 50) + ruleScoreAdjust) / 100);
-  const credibility = Math.min(1, (((sourcePriority / 5) * 0.45) + ((trustScore / 100) * 0.55)) * tierBoost);
+  const authorityWeight = Math.max(0.35, Math.min(2, source[0]?.authorityWeight ?? 1));
+  const credibility = Math.min(1, (((sourcePriority / 5) * 0.4) + ((trustScore / 100) * 0.6)) * tierBoost * authorityWeight);
   const noisePenalty = Math.max(0.45, 1 - (noiseScore / 140));
 
   const hoursAgo = item.publishedAt
@@ -83,32 +91,50 @@ export async function applyRulesAndPriority(
 
   const item = rows[0];
   const ruleResult = await applyFilterRules(item, userId, { includeAiScoreRules: true });
-  if (!ruleResult.passed) {
-    if (item.contentStatus !== 'ready') {
-      const provisionalScore = item.aiScore != null ? await calculatePriority(item, 0) : null;
-      await db.update(schema.items).set({
-        isFiltered: false,
-        filterReason: `待复核：${ruleResult.reason ?? '内容未完整，暂不自动过滤'}`,
-        priorityScore: provisionalScore,
-      }).where(eq(schema.items.id, itemId));
-      return {
-        filtered: false,
-        priorityScore: provisionalScore,
-        reason: `待复核：${ruleResult.reason ?? '内容未完整，暂不自动过滤'}`,
-      };
-    }
+  const routing = resolveRuleRoutingState({
+    passed: ruleResult.passed,
+    reason: ruleResult.reason,
+    contentStatus: item.contentStatus,
+    aiScore: item.aiScore,
+  });
+
+  if (routing.priorityScoreMode === 'provisional') {
+    const provisionalScore = await calculatePriority(item, 0);
     await db.update(schema.items).set({
-      isFiltered: true,
-      filterReason: ruleResult.reason ?? null,
+      isFiltered: routing.isFiltered,
+      filterBucket: routing.filterBucket,
+      qualityDecision: routing.qualityDecision,
+      filterReason: routing.filterReason,
+      priorityScore: provisionalScore,
+    }).where(eq(schema.items.id, itemId));
+    return {
+      filtered: routing.isFiltered,
+      priorityScore: provisionalScore,
+      reason: routing.filterReason ?? undefined,
+    };
+  }
+
+  if (routing.priorityScoreMode === 'clear') {
+    await db.update(schema.items).set({
+      isFiltered: routing.isFiltered,
+      filterBucket: routing.filterBucket,
+      qualityDecision: routing.qualityDecision,
+      filterReason: routing.filterReason,
       priorityScore: null,
     }).where(eq(schema.items.id, itemId));
-    return { filtered: true, priorityScore: null, reason: ruleResult.reason };
+    return {
+      filtered: routing.isFiltered,
+      priorityScore: null,
+      reason: routing.filterReason ?? undefined,
+    };
   }
 
   const score = await calculatePriority(item, ruleResult.scoreAdjust);
   await db.update(schema.items).set({
-    isFiltered: false,
-    filterReason: null,
+    isFiltered: routing.isFiltered,
+    filterBucket: routing.filterBucket,
+    qualityDecision: routing.qualityDecision,
+    filterReason: routing.filterReason,
     priorityScore: score,
   }).where(eq(schema.items.id, itemId));
   return { filtered: false, priorityScore: score };

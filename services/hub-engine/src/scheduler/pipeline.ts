@@ -10,8 +10,10 @@ import { WebpageCollector } from '../collectors/webpage.js';
 import type { Collector, SourceConfig, RawItem } from '../collectors/base.js';
 import { fetchQueue, type FetchJobData } from './queue.js';
 import type { Job } from 'bullmq';
+import { isFetchJobInFlight, shouldRemoveExistingFetchJob } from './fetch-dedupe.js';
 import { buildSnippet, detectLikelyLanguage } from '../lib/content-extractor.js';
 import { maybeAutoTranscribeItem, type AutoTranscribeCandidate } from '../services/auto-transcribe.js';
+import { buildEventClusterKey } from '../lib/event-clustering.js';
 import { applyFilterRules } from '../processors/filter.js';
 
 const collectors: Record<string, Collector> = {
@@ -57,8 +59,12 @@ export async function enqueueSourceFetch(
     const existing = await fetchQueue.getJob(jobId);
     if (existing) {
       const state = await existing.getState();
-      if (['waiting', 'active', 'delayed', 'prioritized'].includes(state)) {
+      if (isFetchJobInFlight(state)) {
         return { jobId, enqueued: false, state };
+      }
+      if (shouldRemoveExistingFetchJob(state)) {
+        await existing.remove();
+        logger.debug({ jobId, state, sourceId: params.sourceId }, 'Removed terminal fetch job before re-enqueue');
       }
     }
   }
@@ -339,6 +345,7 @@ export async function handleFetchJob(job: Job<FetchJobData>): Promise<FetchExecu
           sourceTier: source.sourceTier || 'B',
           processingProfile: source.processingProfile || 'brief',
           growthAxes: Array.isArray(source.growthAxes) ? source.growthAxes : ['认知升级'],
+          clusterId: buildEventClusterKey(rawItem.title, rawItem.content || snippet),
           guid: rawItem.guid || rawItem.url,
           title: rawItem.title,
           url: rawItem.url,
@@ -352,6 +359,16 @@ export async function handleFetchJob(job: Job<FetchJobData>): Promise<FetchExecu
           audioDuration: rawItem.audioDuration,
           isFiltered: !filterResult.passed,
           filterReason: filterResult.reason ?? null,
+          qualityDecision: !filterResult.passed ? 'filter' : null,
+          qualitySummary: !filterResult.passed ? (snippet || rawItem.title) : null,
+          qualityReason: !filterResult.passed ? (filterResult.reason ?? '命中硬规则过滤') : null,
+          qualityTags: !filterResult.passed ? ['硬规则过滤'] : [],
+          qualityRiskFlags: [],
+          qualityScore: null,
+          qualityConfidence: !filterResult.passed ? 1 : null,
+          qualityCheckedAt: !filterResult.passed ? new Date() : null,
+          filterBucket: !filterResult.passed ? 'filtered' : 'main',
+          restoredFromFilter: false,
           contentStatus,
           contentError: contentStatus === 'missing' ? '采集阶段未获得正文缓存' : null,
           summaryStatus: 'pending',

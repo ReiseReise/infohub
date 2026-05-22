@@ -41,6 +41,62 @@ function toFrontmatter(item: {
   ].join('\n');
 }
 
+export interface KnowledgeMarkdownItem {
+  title: string;
+  url: string;
+  sourceName: string;
+  category: string;
+  publishedAt: Date | string | null;
+  aiScore: number | null;
+  aiTags: string[];
+  sourceType: string;
+  aiSummary?: string | null;
+  aiTranslation?: string | null;
+  snippet?: string | null;
+  content?: string | null;
+}
+
+function toIsoString(value: Date | string | null): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+}
+
+function isCaptureKnowledgeItem(item: KnowledgeMarkdownItem): boolean {
+  return item.category === 'capture'
+    || item.sourceName === 'Capture Inbox'
+    || Boolean(item.content && item.content.includes('## Capture Inbox'));
+}
+
+export function formatKnowledgeMarkdown(item: KnowledgeMarkdownItem): string {
+  const frontmatter = toFrontmatter({
+    title: item.title,
+    url: item.url,
+    sourceName: item.sourceName || 'Unknown',
+    category: item.category || 'uncategorized',
+    publishedAt: toIsoString(item.publishedAt),
+    aiScore: item.aiScore,
+    aiTags: item.aiTags || [],
+    sourceType: item.sourceType,
+  });
+  const isCapture = isCaptureKnowledgeItem(item);
+  const sections = [
+    frontmatter,
+    '',
+    `# ${item.title}`,
+    '',
+  ];
+
+  if (item.aiSummary) sections.push(`> ${item.aiSummary}`, '');
+  if (item.aiTranslation) sections.push(`## 翻译`, '', item.aiTranslation, '');
+  if (item.snippet) sections.push(isCapture ? `## 人工摘录` : `## 摘要`, '', item.snippet, '');
+  if (isCapture && item.content) sections.push(`## 剪藏正文`, '', item.content, '');
+  sections.push(`## 原文链接`, '', item.url);
+
+  return sections.filter((part) => part !== undefined && part !== null && part !== '').join('\n');
+}
+
 export async function exportToKnowledgeFiles(userId: string, since?: Date): Promise<number> {
   const sinceDate = since || new Date(Date.now() - 24 * 3600 * 1000);
   const dateStr = new Date().toISOString().split('T')[0];
@@ -51,6 +107,7 @@ export async function exportToKnowledgeFiles(userId: string, since?: Date): Prom
       title: schema.items.title,
       url: schema.items.url,
       snippet: schema.items.snippet,
+      content: schema.items.content,
       aiSummary: schema.items.aiSummary,
       aiTags: schema.items.aiTags,
       aiScore: schema.items.aiScore,
@@ -80,29 +137,20 @@ export async function exportToKnowledgeFiles(userId: string, since?: Date): Prom
     const slug = slugify(item.title);
     const filename = `${slug}.md`;
     const filepath = join(itemsDir, filename);
-
-    const frontmatter = toFrontmatter({
+    const body = formatKnowledgeMarkdown({
       title: item.title,
       url: item.url,
       sourceName: item.sourceName || 'Unknown',
       category: item.category || 'uncategorized',
-      publishedAt: item.publishedAt?.toISOString() || null,
+      publishedAt: item.publishedAt,
       aiScore: item.aiScore,
       aiTags: (item.aiTags as string[]) || [],
       sourceType: item.sourceType,
+      aiSummary: item.aiSummary,
+      aiTranslation: item.aiTranslation,
+      snippet: item.snippet,
+      content: item.content,
     });
-
-    const body = [
-      frontmatter,
-      '',
-      `# ${item.title}`,
-      '',
-      item.aiSummary ? `> ${item.aiSummary}` : '',
-      '',
-      item.aiTranslation ? `## 翻译\n\n${item.aiTranslation}\n` : '',
-      item.snippet ? `## 摘要\n\n${item.snippet}\n` : '',
-      `## 原文链接\n\n${item.url}`,
-    ].filter(Boolean).join('\n');
 
     await writeFile(filepath, body, 'utf-8');
     exported++;

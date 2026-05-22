@@ -19,6 +19,9 @@ import type {
   BatchSubscriptionResult,
   AiConfigMeta,
   DiscoveryCandidate,
+  DailyReportWorkflowConfig,
+  DailyReportWorkflowPayload,
+  DailyReportWorkflowPreview,
   ExportMutationResult,
   FetchSettings,
   FetchQueueDiagnosticResponse,
@@ -31,10 +34,12 @@ import type {
   ItemEnrichResult,
   InsightGeneratePayload,
   InsightRecord,
+  ItemQualityCheckPayload,
   ItemsStats,
   NetworkDiagnosticResponse,
   PreferenceProfileRecord,
   PreferenceProfileSummary,
+  QualityPolicySnapshot,
   RetentionRunRecord,
   RetentionSummary,
   ScoringSkillRecord,
@@ -45,7 +50,7 @@ import type {
   SubscriptionMutationResult,
   UserQuota,
 } from './contracts';
-import { request, withQuery } from './shared';
+import { API_BASE_URL, request, withQuery } from './shared';
 import { getStoredToken } from '../auth-storage';
 
 type AiUsageSummaryQuery = {
@@ -71,7 +76,7 @@ function uploadAudioTaskWithProgress(
 ): Promise<AudioTask> {
   return new Promise<AudioTask>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/audio/tasks/upload', true);
+    xhr.open('POST', `${API_BASE_URL}/audio/tasks/upload`, true);
 
     const token = getStoredToken();
     if (token) {
@@ -183,7 +188,7 @@ export const api = {
     startAudio: (id: string) =>
       request<{ message: string; taskId: string; status: string }>(`/items/${id}/audio-transcribe`, { method: 'POST' }),
     reprocessAi: (id: string) =>
-      request<{ message: string; scored: number; summarized: number; translated: number; data: FeedItemRecord }>(
+      request<{ message: string; filtered?: number; scored: number; summarized: number; translated: number; data: FeedItemRecord }>(
         `/items/${id}/reprocess-ai`,
         { method: 'POST' },
       ),
@@ -193,6 +198,10 @@ export const api = {
       request<{ message: string; data: ItemFeedbackRecord }>(`/items/${id}/feedback`, { method: 'POST', body: data }),
     scoreBreakdown: (id: string) =>
       request<{ data: ItemScoreBreakdownPayload }>(`/items/${id}/score-breakdown`),
+    qualityCheck: (id: string) =>
+      request<{ data: ItemQualityCheckPayload }>(`/items/${id}/quality-check`),
+    restore: (id: string) =>
+      request<{ message: string; data: FeedItemRecord | null }>(`/items/${id}/restore`, { method: 'POST' }),
   },
 
   fetch: {
@@ -221,10 +230,18 @@ export const api = {
 
   insights: {
     list: (params?: Record<string, string>) => request<{ data: InsightRecord[] }>(withQuery('/insights', params)),
+    workflow: () => request<{ data: DailyReportWorkflowPayload }>('/insights/workflow'),
+    updateWorkflow: (workflow: DailyReportWorkflowConfig) =>
+      request<{ data: { workflow: DailyReportWorkflowConfig } }>('/insights/workflow', { method: 'PUT', body: { workflow } }),
+    previewWorkflow: (workflow: DailyReportWorkflowConfig) =>
+      request<{ data: { workflow: DailyReportWorkflowConfig; preview: DailyReportWorkflowPreview } }>(
+        '/insights/workflow/preview',
+        { method: 'POST', body: { workflow } },
+      ),
     dashboard: (params?: { windowDays?: number; limit?: number }) =>
       request<{ data: GrowthDashboardRecord }>(withQuery('/insights/dashboard', params)),
     get: (date: string) => request<{ data: InsightRecord }>(`/insights/${date}`),
-    generate: (opts?: { topN?: number; minScore?: number; preset?: 'full' | 'decision' | 'research' | 'reading'; compareWindowDays?: number }) =>
+    generate: (opts?: { date?: string; topN?: number; minScore?: number; preset?: 'full' | 'decision' | 'research' | 'reading'; compareWindowDays?: number }) =>
       request<{ data?: InsightGeneratePayload }>(withQuery('/insights/generate', opts), { method: 'POST' }),
   },
 
@@ -239,6 +256,8 @@ export const api = {
     create: (data: Partial<AiConfig>) => request<{ data: AiConfig }>('/ai-configs', { method: 'POST', body: data }),
     update: (id: number, data: Partial<AiConfig>) =>
       request<{ data: AiConfig }>(`/ai-configs/${id}`, { method: 'PUT', body: data }),
+    batchModel: (data: { modelConfigId: string; types?: string[]; isActive?: boolean }) =>
+      request<{ data: AiConfig[]; updated: number }>('/ai-configs/batch-model', { method: 'POST', body: data }),
     delete: (id: number) => request<{ message: string }>(`/ai-configs/${id}`, { method: 'DELETE' }),
   },
 
@@ -249,6 +268,19 @@ export const api = {
     update: (id: number, data: Record<string, unknown>) =>
       request<{ data: Record<string, unknown> }>(`/rules/${id}`, { method: 'PUT', body: data }),
     delete: (id: number) => request<{ message: string }>(`/rules/${id}`, { method: 'DELETE' }),
+  },
+
+  qualityPolicies: {
+    list: (params?: { scope?: 'user' | 'global' | 'effective' }) =>
+      request<{ data: QualityPolicySnapshot }>(withQuery('/quality-policies', params)),
+    updateTier: (tier: string, data: { scope?: 'user' | 'global'; config: Record<string, unknown> }) =>
+      request<{ data: Record<string, unknown> }>(`/quality-policies/tier/${tier}`, { method: 'PUT', body: data }),
+    deleteTier: (tier: string, scope?: 'user' | 'global') =>
+      request<{ message: string }>(withQuery(`/quality-policies/tier/${tier}`, scope ? { scope } : undefined), { method: 'DELETE' }),
+    updateSource: (sourceId: number, data: { config: Record<string, unknown> }) =>
+      request<{ data: Record<string, unknown> }>(`/quality-policies/source/${sourceId}`, { method: 'PUT', body: data }),
+    deleteSource: (sourceId: number) =>
+      request<{ message: string }>(`/quality-policies/source/${sourceId}`, { method: 'DELETE' }),
   },
 
   scoringSkills: {

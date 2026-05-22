@@ -19,6 +19,7 @@ import exportRoutes from './routes/export.js';
 import hooksRoutes from './routes/hooks.js';
 import knowledgeRoutes from './routes/knowledge.js';
 import rulesRoutes from './routes/rules.js';
+import qualityPoliciesRoutes from './routes/quality-policies.js';
 import aiConfigRoutes from './routes/ai-config.js';
 import scoringSkillsRoutes from './routes/scoring-skills.js';
 import preferencesRoutes from './routes/preferences.js';
@@ -52,6 +53,7 @@ app.route('/api/export', exportRoutes);
 app.route('/api/hooks', hooksRoutes);
 app.route('/api/knowledge', knowledgeRoutes);
 app.route('/api/rules', rulesRoutes);
+app.route('/api/quality-policies', qualityPoliciesRoutes);
 app.route('/api/ai-configs', aiConfigRoutes);
 app.route('/api/scoring-skills', scoringSkillsRoutes);
 app.route('/api/preferences', preferencesRoutes);
@@ -78,6 +80,16 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table public.prompt_templates alter column category type text`);
   await db.execute(sql`alter table hub.ai_configs drop constraint if exists ai_configs_type_check`);
   await db.execute(sql`
+    update hub.filter_rules
+    set
+      type = 'source_priority',
+      config = '{"minScore":70,"boost":20,"description":"AI 评分达到 70 后优先展示；低于 70 不做硬过滤。"}'::jsonb
+    where scope = 'global'
+      and user_id is null
+      and name = 'AI高分优先'
+      and type = 'ai_score_filter'
+  `);
+  await db.execute(sql`
     with ranked as (
       select id,
              row_number() over (
@@ -103,10 +115,12 @@ async function ensureSchemaCompatibility() {
     create table if not exists hub.user_settings (
       user_id uuid primary key references auth.users(id) on delete cascade,
       auto_fetch_enabled boolean not null default true,
+      daily_report_workflow jsonb,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     )
   `);
+  await db.execute(sql`alter table hub.user_settings add column if not exists daily_report_workflow jsonb`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_url_unique`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_url_key`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_processing_status_check`);
@@ -125,6 +139,23 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table hub.items add column if not exists translation_status text default 'pending'`);
   await db.execute(sql`alter table hub.items add column if not exists translation_reason text`);
   await db.execute(sql`alter table hub.items add column if not exists audio_status_reason text`);
+  await db.execute(sql`alter table hub.items drop constraint if exists items_audio_status_check`);
+  await db.execute(sql`
+    alter table hub.items
+    add constraint items_audio_status_check
+    check (audio_status in ('none', 'pending', 'processing', 'done', 'error', 'skipped'))
+  `);
+  await db.execute(sql`alter table hub.items add column if not exists quality_decision text`);
+  await db.execute(sql`alter table hub.items add column if not exists quality_summary text`);
+  await db.execute(sql`alter table hub.items add column if not exists quality_reason text`);
+  await db.execute(sql`alter table hub.items add column if not exists quality_tags jsonb default '[]'::jsonb`);
+  await db.execute(sql`alter table hub.items add column if not exists quality_risk_flags jsonb default '[]'::jsonb`);
+  await db.execute(sql`alter table hub.items add column if not exists quality_score real`);
+  await db.execute(sql`alter table hub.items add column if not exists quality_confidence real`);
+  await db.execute(sql`alter table hub.items add column if not exists quality_checked_at timestamptz`);
+  await db.execute(sql`alter table hub.items add column if not exists filter_bucket text default 'main'`);
+  await db.execute(sql`alter table hub.items add column if not exists restored_at timestamptz`);
+  await db.execute(sql`alter table hub.items add column if not exists restored_from_filter boolean default false`);
   await db.execute(sql`
     update hub.items
     set content_status = case
@@ -164,6 +195,29 @@ async function ensureSchemaCompatibility() {
        or translation_status = 'pending'
   `);
   await db.execute(sql`
+    update hub.items
+    set filter_bucket = case
+      when is_filtered = true then 'filtered'
+      else 'main'
+    end
+    where filter_bucket is null or btrim(filter_bucket) = ''
+  `);
+  await db.execute(sql`
+    update hub.items
+    set quality_summary = coalesce(nullif(trim(snippet), ''), title),
+        quality_reason = coalesce(filter_reason, quality_reason, '历史过滤条目'),
+        quality_decision = coalesce(quality_decision, 'filter'),
+        quality_confidence = coalesce(quality_confidence, 1),
+        quality_checked_at = coalesce(quality_checked_at, created_at)
+    where is_filtered = true
+      and (
+        quality_summary is null
+        or quality_reason is null
+        or quality_decision is null
+        or quality_checked_at is null
+      )
+  `);
+  await db.execute(sql`
     alter table hub.items
     add constraint items_processing_status_check
     check (
@@ -183,8 +237,10 @@ async function ensureSchemaCompatibility() {
     )
   `);
   await db.execute(sql`alter table hub.sources add column if not exists auto_fetch_enabled boolean default true`);
+  await db.execute(sql`alter table hub.sources add column if not exists source_kind text not null default 'rss'`);
   await db.execute(sql`alter table hub.sources add column if not exists source_role text not null default 'normal'`);
   await db.execute(sql`alter table hub.sources add column if not exists source_tier text default 'B'`);
+  await db.execute(sql`alter table hub.sources add column if not exists authority_weight real not null default 1`);
   await db.execute(sql`alter table hub.sources add column if not exists processing_profile text default 'brief'`);
   await db.execute(sql`alter table hub.sources add column if not exists trust_score integer default 60`);
   await db.execute(sql`alter table hub.sources add column if not exists noise_score integer default 40`);
@@ -213,6 +269,21 @@ async function ensureSchemaCompatibility() {
       else 'B'
     end
     where source_tier is null or btrim(source_tier) = ''
+  `);
+  await db.execute(sql`
+    update hub.sources
+    set source_kind = case
+      when source_type = 'wechat' or category in ('公众号爆文', 'wechat') then 'wechat'
+      when collector_type = 'rsshub' and coalesce(config->>'route', '') ~* '/(twitter|x)/' then 'x'
+      when source_type in ('podcast', 'audio') or collector_type = 'youtube' then 'podcast'
+      when collector_type = 'custom' then 'api'
+      when collector_type in ('changedetection', 'webpage') then 'webpage'
+      when coalesce(config->>'url', config->>'htmlUrl', '') ~* '(openai.com|anthropic.com|claude.com|x.ai|machinelearning.apple.com|github.blog|cursor.com|nvidia.com)' then 'official'
+      when coalesce(config->>'url', config->>'htmlUrl', '') ~* '(huggingface.co|simonwillison.net|substack.com|interconnects.ai)' then 'blog'
+      when coalesce(config->>'url', config->>'htmlUrl', '') ~* '(ithome.com|the-decoder.com|buzzing.cc)' then 'media'
+      else coalesce(nullif(source_kind, ''), 'rss')
+    end
+    where source_kind is null or btrim(source_kind) = '' or source_kind = 'rss'
   `);
   await db.execute(sql`
     update hub.sources
@@ -248,6 +319,24 @@ async function ensureSchemaCompatibility() {
   `);
   await db.execute(sql`
     update hub.sources
+    set authority_weight = greatest(0.35, least(2, case
+      when source_tier in ('T1', 'S') then 1.22
+      when source_tier in ('T1.5', 'A') then 1.08
+      when source_tier in ('T2', 'B') then 0.96
+      when source_tier = 'C' then 0.82
+      else 0.72
+    end
+    + case
+      when source_kind = 'official' then 0.06
+      when source_kind = 'blog' then 0.02
+      when source_kind = 'wechat' then -0.08
+      when source_kind = 'media' then -0.03
+      else 0
+    end))
+    where authority_weight is null or authority_weight <= 0
+  `);
+  await db.execute(sql`
+    update hub.sources
     set growth_axes = '["认知升级"]'::jsonb
     where growth_axes is null or jsonb_typeof(growth_axes) <> 'array' or jsonb_array_length(growth_axes) = 0
   `);
@@ -269,9 +358,12 @@ async function ensureSchemaCompatibility() {
     where src.id = item.source_id
   `);
   await db.execute(sql`create index if not exists idx_sources_tier on hub.sources(source_tier)`);
+  await db.execute(sql`create index if not exists idx_sources_kind on hub.sources(source_kind)`);
   await db.execute(sql`create index if not exists idx_sources_processing_profile on hub.sources(processing_profile)`);
   await db.execute(sql`create index if not exists idx_items_user_tier on hub.items(user_id, source_tier)`);
   await db.execute(sql`create index if not exists idx_items_processing_profile on hub.items(user_id, processing_profile)`);
+  await db.execute(sql`create index if not exists idx_items_filter_bucket on hub.items(user_id, filter_bucket, fetched_at desc)`);
+  await db.execute(sql`create index if not exists idx_items_quality_decision on hub.items(user_id, quality_decision, fetched_at desc)`);
   await db.execute(sql`
     update hub.sources
     set next_fetch_at = coalesce(next_fetch_at, now())
@@ -282,6 +374,21 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table hub.fetch_logs add column if not exists items_duplicate integer default 0`);
   await db.execute(sql`alter table hub.fetch_logs add column if not exists items_queued_ai integer default 0`);
   await db.execute(sql`alter table hub.fetch_logs add column if not exists outcome text`);
+  await db.execute(sql`
+    create table if not exists hub.quality_policies (
+      id serial primary key,
+      user_id uuid references auth.users(id),
+      scope text not null default 'user',
+      target_type text not null,
+      target_key text not null,
+      config jsonb not null default '{}'::jsonb,
+      enabled boolean not null default true,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `);
+  await db.execute(sql`create index if not exists idx_quality_policies_user on hub.quality_policies(user_id, scope, target_type)`);
+  await db.execute(sql`create index if not exists idx_quality_policies_target on hub.quality_policies(scope, target_type, target_key)`);
   await db.execute(sql`
     create table if not exists hub.ai_usage_logs (
       id serial primary key,
@@ -382,6 +489,31 @@ async function ensureSchemaCompatibility() {
   `);
   await db.execute(sql`create index if not exists idx_item_score_breakdowns_item on hub.item_score_breakdowns(item_id, user_id)`);
   await db.execute(sql`
+    create table if not exists hub.item_quality_checks (
+      id serial primary key,
+      item_id uuid not null references hub.items(id) on delete cascade,
+      user_id uuid not null references auth.users(id) on delete cascade,
+      source_id integer references hub.sources(id) on delete set null,
+      scene_type text not null default 'quality_filter',
+      decision text,
+      summary text,
+      reason text,
+      tags jsonb not null default '[]'::jsonb,
+      risk_flags jsonb not null default '[]'::jsonb,
+      score real,
+      confidence real,
+      policy_snapshot jsonb not null default '{}'::jsonb,
+      raw_response text,
+      prompt_preview text,
+      response_preview text,
+      model_config_id text,
+      prompt_template_id text,
+      created_at timestamptz not null default now()
+    )
+  `);
+  await db.execute(sql`create index if not exists idx_item_quality_checks_item on hub.item_quality_checks(item_id, user_id, created_at desc)`);
+  await db.execute(sql`create index if not exists idx_item_quality_checks_user on hub.item_quality_checks(user_id, created_at desc)`);
+  await db.execute(sql`
     create table if not exists hub.user_preference_profiles (
       user_id uuid primary key references auth.users(id) on delete cascade,
       profile_summary text,
@@ -410,8 +542,48 @@ async function ensureSchemaCompatibility() {
   `);
 }
 
+async function reconcileRunningFetchLogs() {
+  await db.execute(sql`
+    with superseded as (
+      select running.id,
+             coalesce(min(done.finished_at), now()) as reconciled_finished_at
+      from hub.fetch_logs running
+      join hub.fetch_logs done
+        on done.source_id = running.source_id
+       and done.status in ('success', 'error')
+       and done.started_at > running.started_at
+      where running.status = 'running'
+      group by running.id
+    ),
+    stale as (
+      select id,
+             now() as reconciled_finished_at
+      from hub.fetch_logs
+      where status = 'running'
+        and started_at < now() - interval '6 hours'
+    ),
+    candidates as (
+      select * from superseded
+      union
+      select * from stale
+    )
+    update hub.fetch_logs log
+    set status = 'error',
+        outcome = coalesce(log.outcome, 'error'),
+        finished_at = coalesce(log.finished_at, candidates.reconciled_finished_at),
+        error = coalesce(nullif(log.error, ''), 'Fetch log reconciled after worker restart or superseded completion'),
+        duration_ms = coalesce(
+          log.duration_ms,
+          greatest(0, floor(extract(epoch from (candidates.reconciled_finished_at - log.started_at)) * 1000)::int)
+        )
+    from candidates
+    where log.id = candidates.id
+  `);
+}
+
 async function bootstrap() {
   await ensureSchemaCompatibility();
+  await reconcileRunningFetchLogs();
   pinoLogger.info('Fetch worker started');
   startCronJobs();
   void enqueueDueFetches(50).then((result) => {

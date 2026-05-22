@@ -21,6 +21,11 @@ export interface ExtractedArticleResult {
   blockedReason: string | null;
 }
 
+interface ExtractionPreference {
+  renderMode?: string | null;
+  browserProvider?: string | null;
+}
+
 const USER_AGENT = 'InfoHub/3.1 (+content-extractor)';
 
 const MAIN_BLOCK_PATTERNS: RegExp[] = [
@@ -386,6 +391,22 @@ function mapScraplingEngine(renderMode?: string | null): FetchEngine {
   }
 }
 
+function normalizeRequestedRenderMode(renderMode?: string | null): 'auto' | 'native' | 'dynamic' | 'stealth' | 'browser-assist' {
+  switch ((renderMode || '').trim()) {
+    case 'native':
+      return 'native';
+    case 'dynamic':
+      return 'dynamic';
+    case 'stealth':
+      return 'stealth';
+    case 'browser':
+    case 'browser-assist':
+      return 'browser-assist';
+    default:
+      return 'auto';
+  }
+}
+
 function normalizeRenderedArticle(
   rendered: Awaited<ReturnType<typeof fetchScraplingArticle>> | null,
 ): ExtractedArticleResult | null {
@@ -422,11 +443,27 @@ function normalizeBrowserAssistArticle(
   };
 }
 
-export async function fetchArticleResult(url: string, timeoutMs = 8000): Promise<ExtractedArticleResult | null> {
+export async function fetchArticleResult(
+  url: string,
+  timeoutMs = 8000,
+  options: ExtractionPreference = {},
+): Promise<ExtractedArticleResult | null> {
   if (!/^https?:\/\//i.test(url)) return null;
 
-  const preferredScraplingMode = resolvePreferredScraplingMode(url);
-  if (preferredScraplingMode !== 'auto') {
+  const requestedRenderMode = normalizeRequestedRenderMode(options.renderMode);
+  const browserProvider = (options.browserProvider || '').trim() || null;
+  const preferredScraplingMode = requestedRenderMode === 'dynamic' || requestedRenderMode === 'stealth'
+    ? requestedRenderMode
+    : resolvePreferredScraplingMode(url);
+
+  if (requestedRenderMode === 'browser-assist') {
+    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article', { provider: browserProvider }));
+    if (assisted?.content && plainTextLength(assisted.content) >= 80) {
+      return assisted;
+    }
+  }
+
+  if (preferredScraplingMode === 'dynamic' || preferredScraplingMode === 'stealth') {
     const rendered = normalizeRenderedArticle(await fetchScraplingArticle(url, preferredScraplingMode));
     if (rendered?.content && plainTextLength(rendered.content) >= 80) {
       return rendered;
@@ -498,7 +535,7 @@ export async function fetchArticleResult(url: string, timeoutMs = 8000): Promise
       return rendered;
     }
 
-    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article'));
+    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article', { provider: browserProvider }));
     if (assisted?.content && plainTextLength(assisted.content) >= 80) {
       return assisted;
     }
@@ -509,7 +546,7 @@ export async function fetchArticleResult(url: string, timeoutMs = 8000): Promise
     if (rendered?.content && plainTextLength(rendered.content) >= 80) {
       return rendered;
     }
-    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article'));
+    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article', { provider: browserProvider }));
     return assisted || rendered;
   } finally {
     clearTimeout(timeout);
@@ -524,11 +561,24 @@ export async function fetchArticleText(url: string, timeoutMs = 8000): Promise<s
 export async function fetchPageSnapshot(
   url: string,
   timeoutMs = 8000,
+  options: ExtractionPreference = {},
 ): Promise<ExtractedArticleResult | null> {
   if (!/^https?:\/\//i.test(url)) return null;
 
-  const preferredScraplingMode = resolvePreferredScraplingMode(url);
-  if (preferredScraplingMode !== 'auto') {
+  const requestedRenderMode = normalizeRequestedRenderMode(options.renderMode);
+  const browserProvider = (options.browserProvider || '').trim() || null;
+  const preferredScraplingMode = requestedRenderMode === 'dynamic' || requestedRenderMode === 'stealth'
+    ? requestedRenderMode
+    : resolvePreferredScraplingMode(url);
+
+  if (requestedRenderMode === 'browser-assist') {
+    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'snapshot', { provider: browserProvider }));
+    if (assisted?.content) {
+      return assisted;
+    }
+  }
+
+  if (preferredScraplingMode === 'dynamic' || preferredScraplingMode === 'stealth') {
     const rendered = normalizeRenderedArticle(await fetchScraplingSnapshot(url, preferredScraplingMode));
     if (rendered?.content) {
       return rendered;
@@ -594,7 +644,7 @@ export async function fetchPageSnapshot(
       };
     }
 
-    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'snapshot'));
+    const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'snapshot', { provider: browserProvider }));
     if (assisted?.content) {
       return {
         ...assisted,
@@ -611,7 +661,7 @@ export async function fetchPageSnapshot(
   } catch {
     const rendered = normalizeRenderedArticle(await fetchScraplingSnapshot(url, preferredScraplingMode));
     if (rendered?.content) return rendered;
-    return normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'snapshot'));
+    return normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'snapshot', { provider: browserProvider }));
   } finally {
     clearTimeout(timeout);
   }

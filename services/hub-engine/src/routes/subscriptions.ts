@@ -4,9 +4,14 @@ import { db, schema } from '../db/index.js';
 import { requireAuth } from '../lib/auth.js';
 import { logger } from '../lib/logger.js';
 import { buildSourceFingerprint, normalizeCollectorType } from '../lib/source-normalization.js';
-import { listSubscriptionPackages, loadSubscriptionPackage } from '../lib/subscription-packages.js';
-import type { OpmlFeed } from '../lib/opml-parser.js';
+import {
+  buildSubscriptionPackageSourcePayload,
+  isSubscriptionPackageSlug,
+  listSubscriptionPackages,
+  loadSubscriptionPackage,
+} from '../lib/subscription-packages.js';
 import { deriveSourceProfile } from '../lib/growth.js';
+import { classifySourceKind, normalizeAuthorityWeight } from '../lib/aihot-governance.js';
 
 const app = new Hono();
 
@@ -22,7 +27,9 @@ type SourcePayload = {
   status?: string;
   tags?: unknown[];
   sourceRole?: string;
+  sourceKind?: string;
   sourceTier?: string;
+  authorityWeight?: number;
   processingProfile?: string;
   growthAxes?: unknown[];
   trustScore?: number;
@@ -51,7 +58,9 @@ function normalizePayload(raw: unknown, categoryDefault?: string): SourcePayload
     status: typeof body.status === 'string' ? body.status : 'active',
     tags: Array.isArray(body.tags) ? body.tags : [],
     sourceRole: typeof body.sourceRole === 'string' ? body.sourceRole : 'normal',
+    sourceKind: typeof body.sourceKind === 'string' ? body.sourceKind : undefined,
     sourceTier: typeof body.sourceTier === 'string' ? body.sourceTier : undefined,
+    authorityWeight: typeof body.authorityWeight === 'number' ? body.authorityWeight : undefined,
     processingProfile: typeof body.processingProfile === 'string' ? body.processingProfile : undefined,
     growthAxes: Array.isArray(body.growthAxes) ? body.growthAxes : undefined,
     trustScore: typeof body.trustScore === 'number' ? body.trustScore : undefined,
@@ -117,8 +126,10 @@ async function createSource(userId: string, payload: SourcePayload) {
     name: payload.name,
     sourceType: payload.sourceType,
     collectorType: payload.collectorType,
+    sourceKind: payload.sourceKind || classifySourceKind(payload),
     sourceRole: payload.sourceRole || 'normal',
     sourceTier: derivedProfile.sourceTier,
+    authorityWeight: normalizeAuthorityWeight(payload.authorityWeight, derivedProfile.sourceTier, payload.sourceKind || classifySourceKind(payload)),
     processingProfile: derivedProfile.processingProfile,
     trustScore: derivedProfile.trustScore,
     noiseScore: derivedProfile.noiseScore,
@@ -136,49 +147,6 @@ async function createSource(userId: string, payload: SourcePayload) {
   return inserted[0]!;
 }
 
-function opmlFeedToPayload(feed: OpmlFeed, categoryDefault?: string): SourcePayload {
-  const xmlUrl = feed.xmlUrl.trim();
-  const normalizedCategory = (feed.category || categoryDefault || 'hn-popular-blogs').trim() || 'hn-popular-blogs';
-
-  try {
-    const parsed = new URL(xmlUrl);
-    const isRsshubHost = /rsshub/i.test(parsed.hostname);
-    if (isRsshubHost) {
-      return {
-        name: feed.title,
-        sourceType: 'rsshub',
-        collectorType: 'rsshub',
-        config: { route: parsed.pathname + parsed.search },
-        category: normalizedCategory,
-        priority: 3,
-        fetchInterval: 60,
-        autoTranscribe: false,
-        status: 'active',
-        tags: ['hn-popular-blogs'],
-      };
-    }
-  } catch {
-    // fall through to rss payload
-  }
-
-  return {
-    name: feed.title,
-    sourceType: 'rss',
-    collectorType: 'rss',
-    config: { url: xmlUrl, htmlUrl: feed.htmlUrl },
-    category: normalizedCategory,
-    priority: 3,
-    fetchInterval: 60,
-    autoTranscribe: false,
-    status: 'active',
-    tags: ['hn-popular-blogs'],
-    sourceRole: 'normal',
-    sourceTier: 'B',
-    processingProfile: 'brief',
-    growthAxes: ['认知升级'],
-  };
-}
-
 // GET /api/subscriptions/packages
 app.get('/packages', async (c) => {
   const authUser = requireAuth(c);
@@ -191,15 +159,20 @@ app.get('/packages', async (c) => {
 app.post('/packages/:slug/import', async (c) => {
   const authUser = requireAuth(c);
   const slug = c.req.param('slug');
-  if (slug !== 'hn-popular-blogs') {
+  if (!isSubscriptionPackageSlug(slug)) {
     return c.json({ error: 'Unknown package slug' }, 404);
   }
 
   const body = await c.req.json().catch(() => ({}));
-  const categoryDefault = typeof body.categoryDefault === 'string' ? body.categoryDefault : 'hn-popular-blogs';
-  const limit = Math.max(1, Math.min(Number(body.limit || 92), 200));
+  const packages = await listSubscriptionPackages();
+  const packageMeta = packages.find((pkg) => pkg.slug === slug);
+  const categoryDefault = typeof body.categoryDefault === 'string'
+    ? body.categoryDefault
+    : packageMeta?.categoryDefault;
+  const packageSize = packageMeta?.sourceCount || 200;
+  const limit = Math.max(1, Math.min(Number(body.limit || packageSize), 1000));
 
-  const feeds = (await loadSubscriptionPackage('hn-popular-blogs')).slice(0, limit);
+  const feeds = (await loadSubscriptionPackage(slug)).slice(0, limit);
   const existing = await getUserSources(authUser.userId);
   const existingFingerprintMap = new Map<string, (typeof existing)[number]>();
   for (const source of existing) {
@@ -212,7 +185,7 @@ app.post('/packages/:slug/import', async (c) => {
   const failed: Array<{ index: number; error: string }> = [];
 
   for (let index = 0; index < feeds.length; index += 1) {
-    const payload = opmlFeedToPayload(feeds[index], categoryDefault);
+    const payload = buildSubscriptionPackageSourcePayload(slug, feeds[index], categoryDefault);
     const validationError = validatePayload(payload);
     if (validationError) {
       failed.push({ index, error: validationError });

@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import html
+import io
 import logging
 import os
 import re
 import tempfile
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -322,6 +324,40 @@ async def _probe_http_resource(url: str) -> tuple[int | None, str | None]:
         return (int(content_length) if content_length and content_length.isdigit() else None, mime_type)
 
 
+async def _fetch_audio_prefix(url: str, max_bytes: int = 65536) -> bytes:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+        async with client.stream("GET", url, headers={"User-Agent": UA, "Range": f"bytes=0-{max_bytes - 1}"}) as resp:
+            resp.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                if not chunk:
+                    continue
+                remaining = max_bytes - total
+                chunks.append(chunk[:remaining])
+                total += min(len(chunk), remaining)
+                if total >= max_bytes:
+                    break
+            return b"".join(chunks)
+
+
+def _is_wav_resource(url: str, mime_type: str | None) -> bool:
+    path_ext = (urlparse(url).path or "").lower().rsplit(".", 1)[-1]
+    return path_ext == "wav" or mime_type in {"audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"}
+
+
+def _parse_wav_duration(prefix: bytes) -> float | None:
+    try:
+        with wave.open(io.BytesIO(prefix), "rb") as wf:
+            frame_rate = wf.getframerate()
+            frames = wf.getnframes()
+            if frame_rate > 0 and frames > 0:
+                return frames / float(frame_rate)
+    except Exception:
+        return None
+    return None
+
+
 async def _probe_youtube(url: str) -> AudioProbeResult:
     import yt_dlp
 
@@ -350,6 +386,12 @@ async def _probe_youtube(url: str) -> AudioProbeResult:
 
 async def _probe_direct_audio(url: str, source_kind: str) -> AudioProbeResult:
     content_length, mime_type = await _probe_http_resource(url)
+    duration = None
+    if _is_wav_resource(url, mime_type):
+        try:
+            duration = _parse_wav_duration(await _fetch_audio_prefix(url))
+        except Exception as err:
+            logger.debug("wav 时长探测失败: %s | %s", url, err)
     return AudioProbeResult(
         source_url=url,
         source_kind=source_kind,
@@ -357,6 +399,7 @@ async def _probe_direct_audio(url: str, source_kind: str) -> AudioProbeResult:
         resolve_strategy="direct_http_probe",
         resolved_audio_url=url,
         title=_guess_title_from_url(url),
+        duration=duration,
         content_length=content_length,
         mime_type=mime_type,
     )

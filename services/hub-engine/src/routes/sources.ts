@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { eq, and, desc, count } from 'drizzle-orm';
+import { eq, and, desc, count, sql, gte } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { parseOpml } from '../lib/opml-parser.js';
@@ -7,15 +7,91 @@ import { requireAuth } from '../lib/auth.js';
 import { computeSourceFreshness } from '../lib/freshness.js';
 import { deriveSourceProfile, normalizeGrowthAxes } from '../lib/growth.js';
 import { buildSourceFingerprint } from '../lib/source-normalization.js';
+import { classifySourceKind, normalizeAuthorityWeight } from '../lib/aihot-governance.js';
 
 const app = new Hono();
 
+type SourceListSort = 'createdAt' | 'latest' | 'unread' | 'health' | 'name';
+
+type SourceOverview = {
+  itemCount: number;
+  entryCount: number;
+  filteredCount: number;
+  unreadCount: number;
+  favoriteCount: number;
+  selectedCount: number;
+  selectedHitRate: number;
+  duplicateContribution: number;
+  latestItemTitle: string | null;
+  latestItemUrl: string | null;
+  latestItemAt: string | null;
+  sourceHost: string | null;
+  iconUrl: string | null;
+};
+
+function getConfigObject(config: unknown): Record<string, unknown> {
+  return (config && typeof config === 'object') ? config as Record<string, unknown> : {};
+}
+
+function getSourceHost(config: Record<string, unknown>): string | null {
+  const urlCandidates = [
+    typeof config.htmlUrl === 'string' ? config.htmlUrl : null,
+    typeof config.url === 'string' ? config.url : null,
+    typeof config.endpoint === 'string' ? config.endpoint : null,
+  ].filter((value): value is string => Boolean(value));
+
+  for (const value of urlCandidates) {
+    try {
+      return new URL(value).hostname.replace(/^www\./, '');
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function parseTimestampValue(value?: string | Date | null): number {
+  if (!value) return 0;
+  const parsed = value instanceof Date ? value : new Date(value);
+  const time = parsed.getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function sortSources<T extends {
+  name?: string | null;
+  createdAt?: string | Date | null;
+  latestItemAt?: string | null;
+  unreadCount?: number | null;
+  healthScore?: number | null;
+}>(rows: T[], sortBy: SourceListSort): T[] {
+  return [...rows].sort((a, b) => {
+    if (sortBy === 'name') {
+      return String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN');
+    }
+    if (sortBy === 'health') {
+      const healthDiff = Number(b.healthScore || 0) - Number(a.healthScore || 0);
+      if (healthDiff !== 0) return healthDiff;
+    }
+    if (sortBy === 'unread') {
+      const unreadDiff = Number(b.unreadCount || 0) - Number(a.unreadCount || 0);
+      if (unreadDiff !== 0) return unreadDiff;
+    }
+    if (sortBy === 'latest' || sortBy === 'unread' || sortBy === 'health') {
+      const latestDiff = parseTimestampValue(b.latestItemAt) - parseTimestampValue(a.latestItemAt);
+      if (latestDiff !== 0) return latestDiff;
+    }
+    return parseTimestampValue(b.createdAt) - parseTimestampValue(a.createdAt);
+  });
+}
+
 function mapSourceResponse<T extends { config?: unknown; lastError?: string | null }>(row: T) {
-  const config = (row.config && typeof row.config === 'object') ? row.config as Record<string, unknown> : {};
+  const config = getConfigObject(row.config);
   const freshness = computeSourceFreshness(row as Parameters<typeof computeSourceFreshness>[0]);
   return {
     ...row,
     growthAxes: normalizeGrowthAxes((row as { growthAxes?: unknown }).growthAxes, []),
+    sourceHost: getSourceHost(config),
+    iconUrl: typeof config.iconUrl === 'string' ? config.iconUrl : null,
     renderMode: typeof config.renderMode === 'string' ? config.renderMode : null,
     lastFetchEngine: typeof config.lastFetchEngine === 'string' ? config.lastFetchEngine : null,
     blockedReason: typeof config.lastBlockedReason === 'string' ? config.lastBlockedReason : (row.lastError || null),
@@ -32,6 +108,7 @@ app.get('/', async (c) => {
   const sourceType = c.req.query('sourceType');
   const sourceRole = c.req.query('sourceRole');
   const status = c.req.query('status');
+  const sortBy = (c.req.query('sortBy') || 'createdAt') as SourceListSort;
 
   const conditions = [eq(schema.sources.userId, authUser.userId)];
   if (category) conditions.push(eq(schema.sources.category, category));
@@ -45,7 +122,101 @@ app.get('/', async (c) => {
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(schema.sources.createdAt));
 
-  return c.json({ data: rows.map((row) => mapSourceResponse(row)), total: rows.length });
+  const itemStatsRows = await db
+    .select({
+      sourceId: schema.items.sourceId,
+      itemCount: sql<number>`count(*)`,
+      entryCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      filteredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'filtered' or ${schema.items.isFiltered} = true then 1 else 0 end)`,
+      unreadCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isRead} = false and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      favoriteCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFavorite} = true and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      selectedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (coalesce(${schema.items.aiScore}, 0) >= 70 or coalesce(${schema.items.priorityScore}, 0) >= 0.7) then 1 else 0 end)`,
+    })
+    .from(schema.items)
+    .where(eq(schema.items.userId, authUser.userId))
+    .groupBy(schema.items.sourceId);
+
+  const latestItemRows = await db.execute(sql`
+    select distinct on (source_id)
+      source_id,
+      title,
+      url,
+      coalesce(published_at, fetched_at) as latest_item_at
+    from hub.items
+    where user_id = ${authUser.userId}::uuid
+      and filter_bucket = 'main'
+      and is_filtered = false
+    order by source_id, coalesce(published_at, fetched_at) desc nulls last, fetched_at desc nulls last
+  `) as Array<{
+    source_id: number;
+    title: string | null;
+    url: string | null;
+    latest_item_at: string | null;
+  }>;
+
+  const fetchLogRows = await db
+    .select({
+      sourceId: schema.fetchLogs.sourceId,
+      itemsFound: sql<number>`sum(coalesce(${schema.fetchLogs.itemsFound}, 0))`,
+      itemsDuplicate: sql<number>`sum(coalesce(${schema.fetchLogs.itemsDuplicate}, 0))`,
+    })
+    .from(schema.fetchLogs)
+    .where(gte(schema.fetchLogs.startedAt, new Date(Date.now() - 14 * 24 * 3600 * 1000)))
+    .groupBy(schema.fetchLogs.sourceId);
+
+  const statsMap = new Map<number, Pick<SourceOverview, 'itemCount' | 'entryCount' | 'filteredCount' | 'unreadCount' | 'favoriteCount' | 'selectedCount' | 'selectedHitRate'>>();
+  for (const row of itemStatsRows) {
+    const entryCount = Number(row.entryCount || 0);
+    const selectedCount = Number(row.selectedCount || 0);
+    statsMap.set(row.sourceId, {
+      itemCount: Number(row.itemCount || 0),
+      entryCount,
+      filteredCount: Number(row.filteredCount || 0),
+      unreadCount: Number(row.unreadCount || 0),
+      favoriteCount: Number(row.favoriteCount || 0),
+      selectedCount,
+      selectedHitRate: entryCount > 0 ? Number((selectedCount / entryCount).toFixed(3)) : 0,
+    });
+  }
+
+  const duplicateMap = new Map<number, number>();
+  for (const row of fetchLogRows) {
+    if (row.sourceId == null) continue;
+    const found = Number(row.itemsFound || 0);
+    const duplicate = Number(row.itemsDuplicate || 0);
+    duplicateMap.set(row.sourceId, found > 0 ? Number((duplicate / found).toFixed(3)) : 0);
+  }
+
+  const latestMap = new Map<number, Pick<SourceOverview, 'latestItemTitle' | 'latestItemUrl' | 'latestItemAt'>>();
+  for (const row of latestItemRows) {
+    latestMap.set(Number(row.source_id), {
+      latestItemTitle: row.title || null,
+      latestItemUrl: row.url || null,
+      latestItemAt: row.latest_item_at || null,
+    });
+  }
+
+  const enriched = rows.map((row) => {
+    const base = mapSourceResponse(row);
+    const sourceStats = statsMap.get(row.id);
+    const latest = latestMap.get(row.id);
+    return {
+      ...base,
+      itemCount: sourceStats?.itemCount || 0,
+      entryCount: sourceStats?.entryCount || 0,
+      filteredCount: sourceStats?.filteredCount || 0,
+      unreadCount: sourceStats?.unreadCount || 0,
+      favoriteCount: sourceStats?.favoriteCount || 0,
+      selectedCount: sourceStats?.selectedCount || 0,
+      selectedHitRate: sourceStats?.selectedHitRate || 0,
+      duplicateContribution: duplicateMap.get(row.id) || 0,
+      latestItemTitle: latest?.latestItemTitle || null,
+      latestItemUrl: latest?.latestItemUrl || null,
+      latestItemAt: latest?.latestItemAt || null,
+    };
+  });
+
+  return c.json({ data: sortSources(enriched, sortBy), total: enriched.length });
 });
 
 // GET /api/sources/categories — 分类列表
@@ -65,6 +236,11 @@ app.get('/categories', async (c) => {
 app.get('/stats', async (c) => {
   const authUser = requireAuth(c);
   const total = await db.select({ count: count() }).from(schema.sources).where(eq(schema.sources.userId, authUser.userId));
+  const byStatus = await db
+    .select({ status: schema.sources.status, count: count() })
+    .from(schema.sources)
+    .where(eq(schema.sources.userId, authUser.userId))
+    .groupBy(schema.sources.status);
   const byType = await db
     .select({ sourceType: schema.sources.sourceType, count: count() })
     .from(schema.sources)
@@ -88,6 +264,9 @@ app.get('/stats', async (c) => {
 
   return c.json({
     total: total[0]?.count || 0,
+    active: byStatus.find((row) => row.status === 'active')?.count || 0,
+    paused: byStatus.find((row) => row.status === 'paused')?.count || 0,
+    error: byStatus.find((row) => row.status === 'error')?.count || 0,
     byType,
     byCategory,
     byTier,
@@ -116,6 +295,8 @@ app.post('/', async (c) => {
     trustScore,
     noiseScore,
     upgradeRules,
+    sourceKind,
+    authorityWeight,
   } = body;
 
   if (!name || !sourceType) {
@@ -139,13 +320,23 @@ app.post('/', async (c) => {
       sourceType,
       category,
     });
+    const effectiveSourceKind = sourceKind || classifySourceKind({
+      name,
+      sourceType,
+      collectorType: collectorType || 'rss',
+      category,
+      config: effectiveConfig,
+    });
+    const effectiveAuthorityWeight = normalizeAuthorityWeight(authorityWeight, derivedProfile.sourceTier, effectiveSourceKind);
     const result = await db.insert(schema.sources).values({
       userId: authUser.userId,
       name,
       sourceType,
       collectorType: collectorType || 'rss',
+      sourceKind: effectiveSourceKind,
       sourceRole: sourceRole || ((collectorType === 'webpage' || collectorType === 'changedetection') && (category === '监控' || category === 'monitor') ? 'monitor' : 'normal'),
       sourceTier: derivedProfile.sourceTier,
+      authorityWeight: effectiveAuthorityWeight,
       processingProfile: derivedProfile.processingProfile,
       trustScore: derivedProfile.trustScore,
       noiseScore: derivedProfile.noiseScore,
@@ -188,7 +379,7 @@ app.put('/:id', async (c) => {
   const current = existing[0];
 
   const updateData: Record<string, unknown> = { updatedAt: new Date() };
-  const allowedFields = ['name', 'sourceType', 'collectorType', 'sourceRole', 'config', 'category', 'priority', 'fetchInterval', 'autoFetchEnabled', 'autoTranscribe', 'status', 'tags'];
+  const allowedFields = ['name', 'sourceType', 'collectorType', 'sourceKind', 'sourceRole', 'authorityWeight', 'config', 'category', 'priority', 'fetchInterval', 'autoFetchEnabled', 'autoTranscribe', 'status', 'tags'];
   for (const field of allowedFields) {
     if (body[field] !== undefined) {
       // Map camelCase to schema field
@@ -228,6 +419,15 @@ app.put('/:id', async (c) => {
     category: nextCategory,
   });
   updateData.sourceTier = derivedProfile.sourceTier;
+  const nextSourceKind = String(body.sourceKind ?? current.sourceKind ?? '').trim() || classifySourceKind({
+    name: body.name ?? current.name,
+    sourceType: nextSourceType,
+    collectorType: nextCollectorType,
+    category: nextCategory,
+    config: updateData.config ?? current.config,
+  });
+  updateData.sourceKind = nextSourceKind;
+  updateData.authorityWeight = normalizeAuthorityWeight(body.authorityWeight ?? current.authorityWeight, derivedProfile.sourceTier, nextSourceKind);
   updateData.processingProfile = derivedProfile.processingProfile;
   updateData.trustScore = derivedProfile.trustScore;
   updateData.noiseScore = derivedProfile.noiseScore;

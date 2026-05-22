@@ -10,7 +10,7 @@
 先确认你就在项目根目录：
 
 ```bash
-cd "/Users/reise/Nutstore Files/my/数字分身/共享工作台/项目集/基建/信息中枢-v3"
+cd "<infohub-v3-root>"
 ```
 
 当前目录还不是 Git 仓库，所以第一步是初始化：
@@ -92,7 +92,7 @@ git push origin main
 如果 `.env` 已经配过，就不要再覆盖它。
 
 ```bash
-cd "/Users/reise/Nutstore Files/my/数字分身/共享工作台/项目集/基建/信息中枢-v3"
+cd "<infohub-v3-root>"
 docker compose up -d --build
 ```
 
@@ -188,7 +188,7 @@ make install-launchd-backup
 ### 如果你要先纳入 Git
 
 ```bash
-cd "/Users/reise/Nutstore Files/my/数字分身/共享工作台/项目集/基建/信息中枢-v3"
+cd "<infohub-v3-root>"
 git init -b main
 git add .
 git commit -m "chore: initialize infohub-v3"
@@ -199,7 +199,7 @@ git push -u origin main
 ### 如果你要先本地跑起来
 
 ```bash
-cd "/Users/reise/Nutstore Files/my/数字分身/共享工作台/项目集/基建/信息中枢-v3"
+cd "<infohub-v3-root>"
 docker compose up -d --build
 docker compose ps
 curl http://127.0.0.1/health

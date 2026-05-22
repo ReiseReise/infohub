@@ -138,15 +138,16 @@ async def _seed_model_configs(db):
         if candidate
     ), "")
     invalid_ark_target = bool(legacy_doubao_value) and "doubao" in legacy_doubao_value.lower() and not preferred_doubao_endpoint
-    qwen_model = preferred_doubao_endpoint if (preferred_doubao_endpoint and settings.ark_api_key) else ""
-    if not qwen_model and settings.dashscope_api_key:
-        qwen_model = "dashscope/qwen-flash"
+    default_llm_target = preferred_doubao_endpoint if (preferred_doubao_endpoint and settings.ark_api_key) else ""
+    if not default_llm_target and settings.dashscope_api_key:
+        default_llm_target = "dashscope/qwen-flash"
 
     async def ensure_model(
         provider: str,
         model_name: str,
         model_type: str,
         *,
+        alias: str | None = None,
         api_key: str = "",
         base_url: str | None = None,
         extra_config: dict | None = None,
@@ -163,6 +164,8 @@ async def _seed_model_configs(db):
         encrypted = encrypt_api_key(api_key) if api_key else None
 
         if model:
+            if alias and not model.alias:
+                model.alias = alias
             if encrypted and (force_sync_existing or not model.api_key_encrypted):
                 model.api_key_encrypted = encrypted
             if base_url is not None and (force_sync_existing or not model.base_url):
@@ -184,6 +187,7 @@ async def _seed_model_configs(db):
 
         db.add(ModelConfig(
             provider=provider,
+            alias=alias,
             model_name=model_name,
             model_type=model_type,
             api_key_encrypted=encrypted,
@@ -198,6 +202,7 @@ async def _seed_model_configs(db):
             provider="dashscope",
             model_name="paraformer-v2",
             model_type=ModelType.asr.value,
+            alias="通义听悟-语音转写",
             api_key=settings.dashscope_api_key,
             base_url="https://dashscope.aliyuncs.com",
             extra_config={"mode": "auto"},
@@ -209,6 +214,7 @@ async def _seed_model_configs(db):
             provider="dashscope",
             model_name="dashscope/qwen-flash",
             model_type=ModelType.llm.value,
+            alias="Qwen Flash 备用",
             api_key=settings.dashscope_api_key,
             base_url=None,
             extra_config={"role": "fallback"},
@@ -216,24 +222,13 @@ async def _seed_model_configs(db):
             is_active=True,
             force_sync_existing=True,
         )
-        if qwen_model != "dashscope/qwen-flash":
-            await ensure_model(
-                provider="dashscope",
-                model_name=qwen_model,
-                model_type=ModelType.llm.value,
-                api_key=settings.dashscope_api_key,
-                base_url=None,
-                extra_config={"role": "fallback"},
-                is_default=False,
-                is_active=True,
-                force_sync_existing=True,
-            )
 
     if preferred_doubao_endpoint:
         await ensure_model(
             provider="volcengine_ark",
             model_name=preferred_doubao_endpoint,
             model_type=ModelType.llm.value,
+            alias="豆包-默认主模型",
             api_key=settings.ark_api_key,
             base_url=settings.ark_base_url,
             extra_config={"role": "default", "accessMode": "endpoint", "endpointId": preferred_doubao_endpoint},
@@ -254,9 +249,17 @@ async def _seed_model_configs(db):
                 model.is_active = False
                 model.test_status = TestStatus.failed
                 model.test_message = "缺少 ARK_API_KEY，当前豆包 endpoint 未启用"
+        elif _is_endpoint_id(str(model.model_name or "").strip()):
+            model.is_active = False
+            model.test_status = TestStatus.failed
+            model.test_message = "endpoint id 只能绑定到 Volcengine Ark provider，不能绑定到 DashScope 或其他 provider"
         model.is_default = (
-            (model.provider == "volcengine_ark" and endpoint_id == qwen_model)
-            or (model.provider == "dashscope" and model.model_name == qwen_model)
+            (model.provider == "volcengine_ark" and endpoint_id == default_llm_target)
+            or (
+                model.provider == "dashscope"
+                and not _is_endpoint_id(default_llm_target)
+                and model.model_name == default_llm_target
+            )
         )
 
     asr_defaults = await db.execute(select(ModelConfig).where(ModelConfig.model_type == ModelType.asr.value))

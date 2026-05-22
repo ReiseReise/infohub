@@ -3,7 +3,6 @@ import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { writeFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { formatMarkdown } from './daily-report.js';
 
 const KNOWLEDGE_DIR = process.env.KNOWLEDGE_DIR
   || (process.cwd().endsWith('/services/hub-engine') ? '../../data/knowledge' : './knowledge');
@@ -35,6 +34,70 @@ async function saveSyncIndex(index: SyncIndex): Promise<void> {
   const metaDir = join(KNOWLEDGE_DIR, 'obsidian', '_meta');
   await mkdir(metaDir, { recursive: true });
   await writeFile(join(metaDir, 'sync-index.json'), JSON.stringify(index, null, 2), 'utf-8');
+}
+
+export interface ObsidianMarkdownItem {
+  title: string;
+  url: string;
+  sourceName: string;
+  category: string;
+  publishedAt: Date | string | null;
+  aiScore: number | null;
+  aiTags: string[];
+  sourceType: string;
+  aiSummary?: string | null;
+  aiTranslation?: string | null;
+  transcript?: string | null;
+  knowledge?: string | null;
+  snippet?: string | null;
+  content?: string | null;
+}
+
+function toIsoString(value: Date | string | null): string | null {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+}
+
+function isCaptureItem(item: ObsidianMarkdownItem): boolean {
+  return item.category === 'capture'
+    || item.sourceName === 'Capture Inbox'
+    || Boolean(item.content && item.content.includes('## Capture Inbox'));
+}
+
+export function formatObsidianMarkdown(item: ObsidianMarkdownItem): string {
+  const isPodcast = item.sourceType === 'podcast' || !!item.transcript;
+  const isCapture = isCaptureItem(item);
+  const frontmatter = [
+    '---',
+    `title: "${item.title.replace(/"/g, '\\"')}"`,
+    `source: "${item.sourceName || 'Unknown'}"`,
+    `url: "${item.url}"`,
+    `published_at: ${toIsoString(item.publishedAt) || 'null'}`,
+    `category: "${item.category || 'uncategorized'}"`,
+    `ai_score: ${item.aiScore ?? 'null'}`,
+    `tags: [${((item.aiTags as string[]) || []).map(t => `"${t}"`).join(', ')}]`,
+    `type: ${isPodcast ? 'podcast' : 'article'}`,
+    '---',
+  ].join('\n');
+
+  const sections: string[] = [
+    frontmatter,
+    '',
+    `# ${item.title}`,
+    '',
+  ];
+
+  if (item.aiSummary) sections.push(`> ${item.aiSummary}`, '');
+  if (item.aiTranslation) sections.push(`## 翻译`, '', item.aiTranslation, '');
+  if (item.transcript) sections.push(`## 转写稿`, '', item.transcript, '');
+  if (item.knowledge) sections.push(`## 知识萃取`, '', item.knowledge, '');
+  if (item.snippet) sections.push(isCapture ? `## 人工摘录` : `## 摘要`, '', item.snippet, '');
+  if (isCapture && item.content) sections.push(`## 剪藏正文`, '', item.content, '');
+  sections.push(`## 原文`, '', `[${item.title}](${item.url})`);
+
+  return sections.join('\n');
 }
 
 export async function exportToObsidian(userId: string): Promise<number> {
@@ -91,35 +154,22 @@ export async function exportToObsidian(userId: string): Promise<number> {
     const isPodcast = item.sourceType === 'podcast' || !!item.transcript;
     const dir = isPodcast ? podcastDir : inboxDir;
     const filepath = join(dir, `${slug}.md`);
-
-    const frontmatter = [
-      '---',
-      `title: "${item.title.replace(/"/g, '\\"')}"`,
-      `source: "${item.sourceName || 'Unknown'}"`,
-      `url: "${item.url}"`,
-      `published_at: ${item.publishedAt?.toISOString() || 'null'}`,
-      `category: "${item.category || 'uncategorized'}"`,
-      `ai_score: ${item.aiScore ?? 'null'}`,
-      `tags: [${((item.aiTags as string[]) || []).map(t => `"${t}"`).join(', ')}]`,
-      `type: ${isPodcast ? 'podcast' : 'article'}`,
-      '---',
-    ].join('\n');
-
-    const sections: string[] = [
-      frontmatter,
-      '',
-      `# ${item.title}`,
-      '',
-    ];
-
-    if (item.aiSummary) sections.push(`> ${item.aiSummary}`, '');
-    if (item.aiTranslation) sections.push(`## 翻译`, '', item.aiTranslation, '');
-    if (item.transcript) sections.push(`## 转写稿`, '', item.transcript, '');
-    if (item.knowledge) sections.push(`## 知识萃取`, '', item.knowledge, '');
-    if (item.snippet) sections.push(`## 摘要`, '', item.snippet, '');
-    sections.push(`## 原文`, '', `[${item.title}](${item.url})`);
-
-    await writeFile(filepath, sections.join('\n'), 'utf-8');
+    await writeFile(filepath, formatObsidianMarkdown({
+      title: item.title,
+      url: item.url,
+      sourceName: item.sourceName || 'Unknown',
+      category: item.category || 'uncategorized',
+      publishedAt: item.publishedAt,
+      aiScore: item.aiScore,
+      aiTags: (item.aiTags as string[]) || [],
+      sourceType: item.sourceType,
+      aiSummary: item.aiSummary,
+      aiTranslation: item.aiTranslation,
+      transcript: item.transcript,
+      knowledge: item.knowledge,
+      snippet: item.snippet,
+      content: item.content,
+    }), 'utf-8');
     newIds.push(item.id);
     exported++;
   }

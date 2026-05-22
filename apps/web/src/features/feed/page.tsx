@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { ExternalLink, RefreshCw, Search, Star, CheckCheck, FileText, Loader2, Headphones, ChevronDown, SkipForward } from 'lucide-react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, type FeedItemRecord, type FetchStatusResponse, type ItemScoreBreakdownPayload } from '../../lib/api';
+import { api, type FeedItemRecord, type FetchStatusResponse, type ItemScoreBreakdownPayload, type ItemsStats, type PreferenceProfileSummary, type SourceRecord } from '../../lib/api';
 import { MarkdownContent } from '../../components/MarkdownContent';
 
 type FeedItem = FeedItemRecord;
+type FeedSortMode = 'latest' | 'priority';
 
 type DetailSectionKey = 'summary' | 'original' | 'translation' | 'transcript' | 'knowledge';
 type DetailSection = {
@@ -206,6 +207,12 @@ const PROCESSING_PROFILE_LABELS: Record<string, string> = {
 
 function sourceTierBadge(item?: FeedItem | null) {
   switch (item?.sourceTier) {
+    case 'T1':
+      return { label: 'T1一手', className: 'bg-rose-100 text-rose-700' };
+    case 'T1.5':
+      return { label: 'T1.5官方社媒', className: 'bg-orange-100 text-orange-700' };
+    case 'T2':
+      return { label: 'T2讨论', className: 'bg-amber-100 text-amber-700' };
     case 'S':
       return { label: 'S级信号', className: 'bg-rose-100 text-rose-700' };
     case 'A':
@@ -219,6 +226,22 @@ function sourceTierBadge(item?: FeedItem | null) {
   }
 }
 
+function sourceKindLabel(kind?: string | null) {
+  const labels: Record<string, string> = {
+    official: '官方/一手',
+    blog: '博客/研究',
+    rss: 'RSS',
+    x: 'X/KOL',
+    wechat: '公众号',
+    media: '媒体',
+    api: 'API',
+    webpage: '网页',
+    podcast: '播客',
+    other: '其他',
+  };
+  return kind ? labels[kind] || kind : '';
+}
+
 export function Feed() {
   const navigate = useNavigate();
   const { id: selectedIdFromRoute } = useParams();
@@ -228,19 +251,24 @@ export function Feed() {
   const initialFilter = initialFilterParam === 'unread' || initialFilterParam === 'favorites'
     ? initialFilterParam
     : 'all';
+  const initialSortParam = searchParams.get('sort');
+  const initialSort = initialSortParam === 'priority' ? 'priority' : 'latest';
 
   const [items, setItems] = useState<FeedItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<FeedItem | null>(null);
   const [search, setSearch] = useState(() => searchParams.get('q') || '');
   const [filter, setFilter] = useState<'all' | 'unread' | 'favorites'>(initialFilter);
+  const [sortMode, setSortMode] = useState<FeedSortMode>(initialSort);
   const [category, setCategory] = useState(() => searchParams.get('category') || '');
   const [sourceId, setSourceId] = useState(() => searchParams.get('sourceId') || '');
+  const [sourceRail, setSourceRail] = useState<SourceRecord[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
-  const [stats, setStats] = useState<{ total: number; unread: number; today: number; favorites: number } | null>(null);
+  const [stats, setStats] = useState<ItemsStats | null>(null);
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -254,15 +282,18 @@ export function Feed() {
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [feedbackSubmittingType, setFeedbackSubmittingType] = useState<string | null>(null);
   const [selectedFeedbackTags, setSelectedFeedbackTags] = useState<string[]>([]);
+  const [preferenceSummary, setPreferenceSummary] = useState<PreferenceProfileSummary | null>(null);
   const [fetchStatus, setFetchStatus] = useState<FetchStatusResponse | null>(null);
   const [dueRefreshing, setDueRefreshing] = useState(false);
   const limit = 20;
 
   const fetchItems = useCallback(async () => {
-    setLoading(true);
+    if (offset === 0) setLoading(true);
+    else setLoadingMore(true);
     setError(null);
     try {
       const params: Record<string, string> = { limit: String(limit), offset: String(offset) };
+      params.sortBy = sortMode === 'priority' ? 'priority' : 'publishedAt';
       if (search) params.search = search;
       if (filter === 'unread') params.isRead = 'false';
       if (filter === 'favorites') params.isFavorite = 'true';
@@ -273,14 +304,19 @@ export function Feed() {
       }
       if (sourceId) params.sourceId = sourceId;
       const res = await api.items.list(params);
-      setItems(res.data);
+      setItems((prev) => {
+        if (offset === 0) return res.data;
+        const seen = new Set(prev.map((item) => item.id));
+        return [...prev, ...res.data.filter((item) => !seen.has(item.id))];
+      });
       setTotal(res.total);
     } catch (err) {
       setError((err as Error).message || '加载失败');
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  }, [offset, filter, category, search, sourceId]);
+  }, [offset, filter, category, search, sortMode, sourceId]);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -300,12 +336,30 @@ export function Feed() {
     } catch { /* non-critical */ }
   }, []);
 
+  const fetchSourceRail = useCallback(async () => {
+    try {
+      const res = await api.sources.list({ sortBy: 'unread', status: 'active' });
+      setSourceRail(res.data || []);
+    } catch {
+      setSourceRail([]);
+    }
+  }, []);
+
   const fetchFreshness = useCallback(async () => {
     try {
       const status = await api.fetch.status();
       setFetchStatus(status);
     } catch {
       // ignore
+    }
+  }, []);
+
+  const fetchPreferenceSummary = useCallback(async () => {
+    try {
+      const resp = await api.preferences.profile();
+      setPreferenceSummary(resp.summary || null);
+    } catch {
+      setPreferenceSummary(null);
     }
   }, []);
 
@@ -338,7 +392,7 @@ export function Feed() {
     }
   }, []);
 
-  const updateListQuery = useCallback((next: { q?: string; filter?: string; category?: string; sourceId?: string }) => {
+  const updateListQuery = useCallback((next: { q?: string; filter?: string; category?: string; sourceId?: string; sort?: FeedSortMode }) => {
     const params = new URLSearchParams(searchParams);
     if (next.q !== undefined) {
       if (next.q) params.set('q', next.q);
@@ -356,6 +410,10 @@ export function Feed() {
       if (next.sourceId) params.set('sourceId', next.sourceId);
       else params.delete('sourceId');
     }
+    if (next.sort !== undefined) {
+      if (next.sort && next.sort !== 'latest') params.set('sort', next.sort);
+      else params.delete('sort');
+    }
     setSearchParams(params, { replace: true });
   }, [searchParams, setSearchParams]);
 
@@ -367,7 +425,9 @@ export function Feed() {
     void fetchStats();
     void fetchCategories();
     void fetchFreshness();
-  }, [fetchCategories, fetchFreshness, fetchStats]);
+    void fetchSourceRail();
+    void fetchPreferenceSummary();
+  }, [fetchCategories, fetchFreshness, fetchPreferenceSummary, fetchSourceRail, fetchStats]);
 
   const triggerDueSources = async () => {
     setDueRefreshing(true);
@@ -386,9 +446,11 @@ export function Feed() {
   useEffect(() => {
     const nextSearch = searchParams.get('q') || '';
     const nextFilter = searchParams.get('filter');
+    const nextSort = searchParams.get('sort');
     const nextCategory = searchParams.get('category') || '';
     const nextSourceId = searchParams.get('sourceId') || '';
     const normalizedFilter = nextFilter === 'unread' || nextFilter === 'favorites' ? nextFilter : 'all';
+    const normalizedSort = nextSort === 'priority' ? 'priority' : 'latest';
 
     let changed = false;
     if (search !== nextSearch) {
@@ -397,6 +459,10 @@ export function Feed() {
     }
     if (filter !== normalizedFilter) {
       setFilter(normalizedFilter);
+      changed = true;
+    }
+    if (sortMode !== normalizedSort) {
+      setSortMode(normalizedSort);
       changed = true;
     }
     if (category !== nextCategory) {
@@ -410,7 +476,7 @@ export function Feed() {
     if (changed) {
       setOffset(0);
     }
-  }, [searchParams, search, filter, category, sourceId]);
+  }, [searchParams, search, filter, sortMode, category, sourceId]);
 
   useEffect(() => {
     if (selectedIdFromRoute) {
@@ -485,6 +551,8 @@ export function Feed() {
       const latestFeedback = resp.data;
       setSelectedItem((prev) => prev?.id === item.id ? { ...prev, latestFeedbackType: latestFeedback.feedbackType } : prev);
       setItems((prev) => prev.map((entry) => entry.id === item.id ? { ...entry, latestFeedbackType: latestFeedback.feedbackType } : entry));
+      const profileResp = await api.preferences.rebuildProfile().catch(() => null);
+      if (profileResp?.summary) setPreferenceSummary(profileResp.summary);
       await fetchScoreBreakdown(item.id);
       setSelectedFeedbackTags([]);
       const tagText = reasonTags.length > 0 ? ` · 标签：${reasonTags.join('、')}` : '';
@@ -751,6 +819,11 @@ export function Feed() {
     }
   }, [selectedItem?.url]);
 
+  const selectedSource = useMemo(
+    () => sourceRail.find((source) => String(source.id) === sourceId) || null,
+    [sourceId, sourceRail],
+  );
+
   const activeDetail = detailSections.find((section) => section.key === activeDetailTab) || detailSections[0];
 
   const getCollectorLabel = (item?: FeedItem | null) => {
@@ -765,15 +838,23 @@ export function Feed() {
       <div className="mb-5 rounded-[28px] border border-teal-100/70 bg-white/85 p-5 shadow-[0_24px_80px_-48px_rgba(15,118,110,0.5)] backdrop-blur">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div>
-          <div className="text-[11px] uppercase tracking-[0.28em] text-teal-700/70">Reading Flow</div>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight text-zinc-900">Feed</h1>
+          <div className="text-[11px] tracking-[0.28em] text-teal-700/70">阅读流</div>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight text-zinc-900">信息流</h1>
           {stats && (
             <p className="text-sm text-zinc-500 mt-2">
               <span className="font-medium text-teal-700">{stats.unread.toLocaleString()} 未读</span>
               <span className="mx-1.5 text-zinc-300">·</span>
               <span>{stats.today.toLocaleString()} 今日</span>
               <span className="mx-1.5 text-zinc-300">·</span>
-              <span>{stats.total.toLocaleString()} 总计</span>
+              <span>{stats.total.toLocaleString()} 可读</span>
+              {stats.funnel && (
+                <>
+                  <span className="mx-1.5 text-zinc-300">·</span>
+                  <span>{stats.funnel.allItems.toLocaleString()} 库存</span>
+                  <span className="mx-1.5 text-zinc-300">·</span>
+                  <span>{stats.funnel.filteredBucketItems.toLocaleString()} 过滤池</span>
+                </>
+              )}
             </p>
           )}
         </div>
@@ -817,6 +898,24 @@ export function Feed() {
             </button>
           ))}
         </div>
+        <div className="flex rounded-2xl bg-white border border-zinc-200 p-1">
+          {([
+            { value: 'latest', label: '按时间' },
+            { value: 'priority', label: '按优先级' },
+          ] as Array<{ value: FeedSortMode; label: string }>).map((option) => (
+            <button
+              key={option.value}
+              onClick={() => {
+                setSortMode(option.value);
+                setOffset(0);
+                updateListQuery({ sort: option.value });
+              }}
+              className={`px-3 py-2 text-xs rounded-xl transition-colors ${sortMode === option.value ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
         {categories.length > 0 && (
           <div className="relative">
             <select
@@ -836,6 +935,27 @@ export function Feed() {
             <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
           </div>
         )}
+        {sourceRail.length > 0 && (
+          <div className="relative">
+            <select
+              value={sourceId}
+              onChange={(e) => {
+                setSourceId(e.target.value);
+                setOffset(0);
+                updateListQuery({ sourceId: e.target.value });
+              }}
+              className="max-w-[220px] appearance-none rounded-2xl border border-zinc-200 bg-white py-3 pl-3 pr-7 text-xs text-zinc-700 cursor-pointer focus:outline-none focus:ring-2 focus:ring-teal-600/10"
+            >
+              <option value="">全部来源</option>
+              {sourceRail.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {source.name}{source.unreadCount ? ` · ${source.unreadCount} 未读` : ''}
+                </option>
+              ))}
+            </select>
+            <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+          </div>
+        )}
         {sourceId && (
           <button
             onClick={() => {
@@ -849,6 +969,52 @@ export function Feed() {
           </button>
         )}
       </div>
+
+      {selectedSource && (
+        <div className="mb-4 rounded-[24px] border border-teal-100 bg-[linear-gradient(135deg,_rgba(240,253,250,0.9),_rgba(255,255,255,0.96))] px-4 py-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-[11px] tracking-[0.24em] text-teal-700/75">当前来源</div>
+              <div className="mt-1 text-lg font-semibold text-zinc-900">{selectedSource.name}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                {selectedSource.sourceHost && <span>{selectedSource.sourceHost}</span>}
+                <span>{selectedSource.unreadCount ?? 0} 未读</span>
+                <span>{selectedSource.entryCount ?? 0} 条可读</span>
+                <span>{selectedSource.filteredCount ?? 0} 条过滤</span>
+                <span>{selectedSource.itemCount ?? 0} 条总量</span>
+                {selectedSource.latestItemAt && <span>最近更新 {timeAgo(selectedSource.latestItemAt)}</span>}
+              </div>
+              {selectedSource.latestItemTitle && (
+                <div className="mt-2 text-sm text-zinc-700">最新一条：{selectedSource.latestItemTitle}</div>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setFilter('unread');
+                  setOffset(0);
+                  updateListQuery({ filter: 'unread' });
+                }}
+                className="rounded-xl border border-teal-200 bg-white px-3 py-2 text-xs text-teal-800 hover:bg-teal-50"
+              >
+                只看未读
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSourceId('');
+                  setOffset(0);
+                  updateListQuery({ sourceId: '' });
+                }}
+                className="rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
+              >
+                退出来源聚焦
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 px-3 py-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg">
@@ -888,7 +1054,39 @@ export function Feed() {
           {loading ? (
             <div className="text-center py-20 text-zinc-400">加载中...</div>
           ) : items.length === 0 ? (
-            <div className="text-center py-20 text-zinc-400">暂无内容</div>
+            <div className="px-6 py-16 text-center">
+              <div className="text-base font-semibold text-zinc-800">当前筛选下没有可读内容</div>
+              <div className="mx-auto mt-3 max-w-md text-sm leading-6 text-zinc-500">
+                {sourceId
+                  ? '该来源可能暂无主 Feed 可读内容，或内容已进入过滤池。'
+                  : '当前账号主 Feed 暂无可读内容。请先查看数据漏斗，确认是账号无数据、内容被过滤，还是历史过滤状态尚未回补。'}
+              </div>
+              {stats?.funnel && (
+                <div className="mx-auto mt-5 grid max-w-lg grid-cols-2 gap-2 text-left sm:grid-cols-4">
+                  <div className="rounded-2xl bg-zinc-50 px-3 py-3">
+                    <div className="text-[11px] text-zinc-500">库存</div>
+                    <div className="mt-1 text-lg font-semibold text-zinc-900">{stats.funnel.allItems}</div>
+                  </div>
+                  <div className="rounded-2xl bg-zinc-50 px-3 py-3">
+                    <div className="text-[11px] text-zinc-500">可读</div>
+                    <div className="mt-1 text-lg font-semibold text-teal-700">{stats.funnel.visibleItems}</div>
+                  </div>
+                  <div className="rounded-2xl bg-zinc-50 px-3 py-3">
+                    <div className="text-[11px] text-zinc-500">过滤池</div>
+                    <div className="mt-1 text-lg font-semibold text-amber-700">{stats.funnel.filteredBucketItems}</div>
+                  </div>
+                  <div className="rounded-2xl bg-zinc-50 px-3 py-3">
+                    <div className="text-[11px] text-zinc-500">错位</div>
+                    <div className="mt-1 text-lg font-semibold text-rose-700">{stats.funnel.mismatchedFilteredMain}</div>
+                  </div>
+                </div>
+              )}
+              {stats?.funnel?.mismatchedFilteredMain ? (
+                <div className="mx-auto mt-4 max-w-md rounded-2xl border border-rose-100 bg-rose-50 px-4 py-3 text-xs leading-5 text-rose-700">
+                  仍有 {stats.funnel.mismatchedFilteredMain} 条历史内容处于过滤状态错位，需要执行过滤路由回补后再刷新。
+                </div>
+              ) : null}
+            </div>
           ) : (
             <div className="max-h-[72vh] overflow-y-auto divide-y divide-zinc-100">
               {items.map((item) => (
@@ -934,7 +1132,19 @@ export function Feed() {
                     {normalizeAiSummary(item.aiSummary) && <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-500">{normalizeAiSummary(item.aiSummary)}</p>}
                     {!normalizeAiSummary(item.aiSummary) && item.snippet && <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-400">{item.snippet}</p>}
                     <div className="mt-2.5 flex items-center gap-2 flex-wrap">
-                      <span className="max-w-[160px] truncate text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400">{item.sourceName}</span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!item.sourceId) return;
+                          setSourceId(String(item.sourceId));
+                          setOffset(0);
+                          updateListQuery({ sourceId: String(item.sourceId) });
+                        }}
+                        className="max-w-[180px] truncate text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400 hover:text-teal-700"
+                      >
+                        {item.sourceName}
+                      </button>
                       {item.sourceCategory && item.sourceCategory !== 'uncategorized' && (
                         <span className="text-[10px] bg-zinc-100 text-zinc-500 px-1.5 py-0.5 rounded-full">{item.sourceCategory}</span>
                       )}
@@ -987,6 +1197,18 @@ export function Feed() {
                   </div>
                 </div>
               ))}
+              {items.length < total && (
+                <div className="px-4 py-4">
+                  <button
+                    type="button"
+                    disabled={loadingMore}
+                    onClick={() => setOffset(items.length)}
+                    className="flex w-full items-center justify-center rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
+                  >
+                    {loadingMore ? '加载中...' : `加载更多（已显示 ${items.length} / ${total}）`}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1096,6 +1318,12 @@ export function Feed() {
                     {PROCESSING_PROFILE_LABELS[selectedItem.processingProfile] || selectedItem.processingProfile}
                   </span>
                 )}
+                {sourceKindLabel(selectedItem.sourceKind) && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-teal-50 text-teal-700">{sourceKindLabel(selectedItem.sourceKind)}</span>
+                )}
+                {selectedItem.authorityWeight != null && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-600">权威 {Number(selectedItem.authorityWeight).toFixed(2)}</span>
+                )}
                 <span className="text-[11px] px-2 py-0.5 rounded-full bg-cyan-50 text-cyan-700">{contentStatusLabel(selectedItem)}</span>
                 {fetchEngineLabel(selectedItem) ? (
                   <span className="text-[11px] px-2 py-0.5 rounded-full bg-violet-50 text-violet-700">{fetchEngineLabel(selectedItem)}</span>
@@ -1120,6 +1348,41 @@ export function Feed() {
                 ))}
               </div>
 
+              {selectedItem.eventCluster && (
+                <div className="mt-4 rounded-2xl border border-teal-100 bg-teal-50/50 px-4 py-4">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <div className="text-xs font-semibold text-teal-900">事件簇</div>
+                      <div className="mt-1 text-xs leading-5 text-teal-800">{selectedItem.eventCluster.recommendationReason}</div>
+                    </div>
+                    <div className="text-xs text-teal-800">
+                      关联讨论 {selectedItem.eventCluster.relatedCount} 条
+                      {selectedItem.eventCluster.leadItemId === selectedItem.id ? ' · 当前为主条' : ' · 当前为关联条'}
+                    </div>
+                  </div>
+                  {selectedItem.eventCluster.relatedItems.length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      {selectedItem.eventCluster.relatedItems.slice(0, 6).map((entry) => (
+                        <a
+                          key={entry.id}
+                          href={entry.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block rounded-xl border border-teal-100 bg-white/80 px-3 py-2 hover:bg-white"
+                        >
+                          <div className="line-clamp-1 text-sm font-medium text-zinc-900">{entry.title}</div>
+                          <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-zinc-500">
+                            <span>{entry.sourceName || '未知来源'}</span>
+                            {entry.sourceKind && <span>{sourceKindLabel(entry.sourceKind)}</span>}
+                            {entry.aiScore != null && <span>AI {entry.aiScore}</span>}
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50/80 px-4 py-4">
                 <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                   <div>
@@ -1134,6 +1397,16 @@ export function Feed() {
                       </span>
                     </div>
                   )}
+                </div>
+                <div className="mt-3 grid gap-2 rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-xs text-zinc-600 sm:grid-cols-3">
+                  <div>累计反馈：<span className="font-medium text-zinc-900">{preferenceSummary?.totalFeedback ?? 0}</span></div>
+                  <div>正向/负向：<span className="font-medium text-zinc-900">{preferenceSummary?.positiveCount ?? 0} / {preferenceSummary?.negativeCount ?? 0}</span></div>
+                  <div>
+                    画像状态：
+                    <span className="ml-1 font-medium text-zinc-900">
+                      {preferenceSummary?.lastFeedbackAt ? '已参与偏好画像' : '尚未形成反馈画像'}
+                    </span>
+                  </div>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {FEEDBACK_ACTIONS.map((action) => {
@@ -1311,27 +1584,6 @@ export function Feed() {
         </div>
       </div>
 
-      {total > limit && (
-        <div className="flex justify-center gap-3 mt-6">
-          <button
-            disabled={offset === 0}
-            onClick={() => setOffset(Math.max(0, offset - limit))}
-            className="px-4 py-2 text-sm border border-zinc-200 rounded-lg disabled:opacity-30 hover:bg-zinc-50"
-          >
-            上一页
-          </button>
-          <span className="px-4 py-2 text-sm text-zinc-500">
-            {Math.floor(offset / limit) + 1} / {Math.ceil(total / limit)}
-          </span>
-          <button
-            disabled={offset + limit >= total}
-            onClick={() => setOffset(offset + limit)}
-            className="px-4 py-2 text-sm border border-zinc-200 rounded-lg disabled:opacity-30 hover:bg-zinc-50"
-          >
-            下一页
-          </button>
-        </div>
-      )}
     </div>
   );
 }

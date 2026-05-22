@@ -1,6 +1,24 @@
 import { getStoredToken } from '../auth-storage';
 
-const BASE_URL = '/api';
+declare const __API_BASE_URL__: string | undefined;
+
+const API_BASE_URL_OVERRIDE_KEY = 'infohub_v3_api_base_url';
+
+function readApiBaseUrlOverride(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return window.localStorage.getItem(API_BASE_URL_OVERRIDE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export const API_BASE_URL = (
+  readApiBaseUrlOverride()
+  || __API_BASE_URL__
+  || import.meta.env.VITE_API_BASE_URL
+  || '/api'
+).replace(/\/$/, '');
 
 export type RequestBody = BodyInit | object | null | undefined;
 
@@ -72,7 +90,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     }
   }
 
-  const resp = await fetch(`${BASE_URL}${path}`, {
+  const resp = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers,
     body,

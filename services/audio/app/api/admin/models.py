@@ -140,7 +140,7 @@ async def test_model(
                 base_url=model.base_url,
                 provider=model.provider,
                 extra_config=model.extra_config,
-                max_tokens=10,
+                max_tokens=128,
             )
             model.test_status = TestStatus.success
             target = result.endpoint_id or result.model

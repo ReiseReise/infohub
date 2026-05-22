@@ -139,21 +139,21 @@ else
 fi
 
 STARTED_COUNT=0
-IDLE_COUNT=0
+BLOCKED_COUNT=0
 TASK_TOTAL=0
 for i in $(seq 1 12); do
   sleep 2
   ITEMS=$(curl -sS "$HUB_URL/api/items?limit=20" -H "Authorization: Bearer $TOKEN" 2>/dev/null || echo '{}')
-  COUNTS=$(echo "$ITEMS" | python3 -c "import sys,json; data=json.load(sys.stdin).get('data',[]); started=sum(1 for item in data if item.get('audioTaskId') and item.get('audioStatus') not in ('', None, 'none')); idle=sum(1 for item in data if item.get('audioStatus') == 'none'); total=len(data); print(f'{started}:{idle}:{total}')" 2>/dev/null || echo "0:0:0")
+  COUNTS=$(echo "$ITEMS" | python3 -c "import sys,json; data=json.load(sys.stdin).get('data',[]); started=sum(1 for item in data if item.get('audioTaskId') and item.get('audioStatus') not in ('', None, 'none')); blocked=sum(1 for item in data if not item.get('audioTaskId') and item.get('audioStatus') in ('none', 'skipped')); total=len(data); print(f'{started}:{blocked}:{total}')" 2>/dev/null || echo "0:0:0")
   STARTED_COUNT="${COUNTS%%:*}"
   REST="${COUNTS#*:}"
-  IDLE_COUNT="${REST%%:*}"
+  BLOCKED_COUNT="${REST%%:*}"
   ITEM_TOTAL="${REST#*:}"
 
   TASKS=$(curl -sS "$AUDIO_URL/api/tasks?page=1&page_size=20" -H "Authorization: Bearer $TOKEN" 2>/dev/null || echo '{}')
   TASK_TOTAL=$(echo "$TASKS" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('items',[])))" 2>/dev/null || echo "0")
 
-  log "轮询 #$i: items=$ITEM_TOTAL started=$STARTED_COUNT idle=$IDLE_COUNT tasks=$TASK_TOTAL"
+  log "轮询 #$i: items=$ITEM_TOTAL started=$STARTED_COUNT blocked=$BLOCKED_COUNT tasks=$TASK_TOTAL"
 
   if [ "$ITEM_TOTAL" -ge 2 ] 2>/dev/null && [ "$STARTED_COUNT" -eq 1 ] 2>/dev/null && [ "$TASK_TOTAL" -eq 1 ] 2>/dev/null; then
     break
@@ -166,10 +166,10 @@ else
   fail "T5: 自动转写触发数量异常 (started=$STARTED_COUNT)"
 fi
 
-if [ "$IDLE_COUNT" -ge 1 ] 2>/dev/null; then
-  pass "T6: 超过每日上限的条目保持未自动转写"
+if [ "$BLOCKED_COUNT" -ge 1 ] 2>/dev/null; then
+  pass "T6: 超过每日上限的条目未创建自动转写任务"
 else
-  fail "T6: 未观察到被上限拦住的条目 (idle=$IDLE_COUNT)"
+  fail "T6: 未观察到被上限拦住的条目 (blocked=$BLOCKED_COUNT)"
 fi
 
 if [ "$TASK_TOTAL" -eq 1 ] 2>/dev/null; then

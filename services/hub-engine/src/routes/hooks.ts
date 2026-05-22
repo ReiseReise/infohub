@@ -4,6 +4,11 @@ import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { requireAuth } from '../lib/auth.js';
 import { config } from '../config/index.js';
+import {
+  hasCaptureMetadata,
+  normalizeCaptureIngestItem,
+  resolveIngestSourceDefaults,
+} from '../lib/capture-inbox.js';
 
 const app = new Hono();
 
@@ -94,13 +99,18 @@ app.post('/ingest', async (c) => {
     return c.json({ error: 'Expected { items: [...] }' }, 400);
   }
 
-  // Find or create a 'webhook' source for ingested items
+  const rawItems = body.items as Record<string, unknown>[];
+  const isCapturePayload = rawItems.some((item) => hasCaptureMetadata(item));
+  const sourceDefaults = resolveIngestSourceDefaults(isCapturePayload);
+
+  // Find or create a source for ingested items.
   let webhookSourceId: number | undefined = body.sourceId;
   if (!webhookSourceId) {
     const existing = await db.select({ id: schema.sources.id })
       .from(schema.sources)
       .where(and(
         eq(schema.sources.collectorType, 'custom'),
+        eq(schema.sources.category, sourceDefaults.category),
         eq(schema.sources.userId, authUser.userId)
       ))
       .limit(1);
@@ -109,32 +119,37 @@ app.post('/ingest', async (c) => {
     } else {
       const created = await db.insert(schema.sources).values({
         userId: authUser.userId,
-        name: 'Webhook Ingest',
+        name: sourceDefaults.name,
         sourceType: 'custom',
         collectorType: 'custom',
-        config: {},
-        category: 'webhook',
+        sourceKind: 'other',
+        config: sourceDefaults.config,
+        category: sourceDefaults.category,
       }).returning();
       webhookSourceId = created[0].id;
     }
   }
 
   let ingested = 0;
-  for (const raw of body.items) {
-    if (!raw.title || !raw.url) continue;
+  for (const raw of rawItems) {
+    const item = normalizeCaptureIngestItem(raw);
+    if (!item.title || !item.url) continue;
+    const rawSourceId = Number(raw.sourceId);
+    const sourceId = Number.isInteger(rawSourceId) && rawSourceId > 0 ? rawSourceId : webhookSourceId;
+    if (!sourceId) continue;
 
     try {
       await db.insert(schema.items).values({
-        sourceId: raw.sourceId || webhookSourceId,
+        sourceId,
         userId: authUser.userId,
-        sourceType: raw.sourceType || 'custom',
-        guid: raw.guid || raw.url,
-        title: raw.title,
-        url: raw.url,
-        author: raw.author,
-        content: raw.content,
-        snippet: raw.snippet || (raw.content ? raw.content.slice(0, 200) : undefined),
-        publishedAt: raw.publishedAt ? new Date(raw.publishedAt) : new Date(),
+        sourceType: item.sourceType,
+        guid: item.guid,
+        title: item.title,
+        url: item.url,
+        author: item.author,
+        content: item.content,
+        snippet: item.snippet,
+        publishedAt: item.publishedAt || new Date(),
         processingStatus: 'raw',
       }).onConflictDoNothing();
       ingested++;

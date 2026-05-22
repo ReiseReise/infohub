@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>InfoHub UI E2E Feed</title>
+    <link>http://127.0.0.1:5173/ui-e2e/</link>
+    <description>Fixture feed for UI validation</description>
+    <item>
+      <title>体育热榜 AI 观察样本</title>
+      <link>http://127.0.0.1:5173/ui-e2e/articles/sports-ai-observe.html</link>
+      <description>这是一条用于验证过滤池交互的资讯，包含体育热榜等噪音词，但也带有 AI 字样。</description>
+      <pubDate>Tue, 07 Apr 2026 09:00:00 GMT</pubDate>
+      <guid>infohub-ui-e2e-1</guid>
+    </item>
+    <item>
+      <title>AI 产品交付复盘样本</title>
+      <link>http://127.0.0.1:5173/ui-e2e/articles/product-delivery.html</link>
+      <description>这是一条正常内容，用来保证同一信源里既有过滤项，也有正常项。</description>
+      <pubDate>Tue, 07 Apr 2026 08:50:00 GMT</pubDate>
+      <guid>infohub-ui-e2e-2</guid>
+    </item>
+  </channel>
+</rss>

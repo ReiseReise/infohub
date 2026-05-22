@@ -39,8 +39,10 @@ export const sources = hubSchema.table('sources', {
   name: text('name').notNull(),
   sourceType: text('source_type').notNull(),
   collectorType: text('collector_type').notNull().default('rss'),
+  sourceKind: text('source_kind').notNull().default('rss'),
   sourceRole: text('source_role').notNull().default('normal'),
   sourceTier: text('source_tier').notNull().default('B'),
+  authorityWeight: real('authority_weight').notNull().default(1),
   processingProfile: text('processing_profile').notNull().default('brief'),
   trustScore: integer('trust_score').notNull().default(60),
   noiseScore: integer('noise_score').notNull().default(40),
@@ -67,6 +69,7 @@ export const sources = hubSchema.table('sources', {
 }, (table) => [
   index('idx_sources_user').on(table.userId),
   index('idx_sources_type').on(table.sourceType),
+  index('idx_sources_kind').on(table.sourceKind),
   index('idx_sources_role').on(table.sourceRole),
   index('idx_sources_tier').on(table.sourceTier),
   index('idx_sources_processing_profile').on(table.processingProfile),
@@ -77,6 +80,7 @@ export const sources = hubSchema.table('sources', {
 export const userSettings = hubSchema.table('user_settings', {
   userId: uuid('user_id').notNull().primaryKey().references(() => users.id, { onDelete: 'cascade' }),
   autoFetchEnabled: boolean('auto_fetch_enabled').notNull().default(true),
+  dailyReportWorkflow: jsonb('daily_report_workflow'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
@@ -120,6 +124,17 @@ export const items = hubSchema.table('items', {
   isLater: boolean('is_later').default(false),
   isFiltered: boolean('is_filtered').default(false),
   filterReason: text('filter_reason'),
+  qualityDecision: text('quality_decision'),
+  qualitySummary: text('quality_summary'),
+  qualityReason: text('quality_reason'),
+  qualityTags: jsonb('quality_tags').default([]),
+  qualityRiskFlags: jsonb('quality_risk_flags').default([]),
+  qualityScore: real('quality_score'),
+  qualityConfidence: real('quality_confidence'),
+  qualityCheckedAt: timestamp('quality_checked_at', { withTimezone: true }),
+  filterBucket: text('filter_bucket').notNull().default('main'),
+  restoredAt: timestamp('restored_at', { withTimezone: true }),
+  restoredFromFilter: boolean('restored_from_filter').notNull().default(false),
   contentStatus: text('content_status').default('missing'),
   contentError: text('content_error'),
   fetchEngine: text('fetch_engine'),
@@ -135,6 +150,8 @@ export const items = hubSchema.table('items', {
   index('idx_items_user_status').on(table.userId, table.processingStatus),
   index('idx_items_user_tier').on(table.userId, table.sourceTier),
   index('idx_items_processing_profile').on(table.userId, table.processingProfile),
+  index('idx_items_filter_bucket').on(table.userId, table.filterBucket, table.fetchedAt),
+  index('idx_items_quality_decision').on(table.userId, table.qualityDecision, table.fetchedAt),
   uniqueIndex('idx_items_user_url').on(table.userId, table.url),
   index('idx_items_published').on(table.publishedAt),
   index('idx_items_priority').on(table.priorityScore),
@@ -155,6 +172,21 @@ export const filterRules = hubSchema.table('filter_rules', {
 }, (table) => [
   index('idx_rules_user').on(table.userId, table.enabled),
   index('idx_rules_scope').on(table.scope, table.enabled),
+]);
+
+export const qualityPolicies = hubSchema.table('quality_policies', {
+  id: serial('id').primaryKey(),
+  userId: uuid('user_id').references(() => users.id),
+  scope: text('scope').notNull().default('user'),
+  targetType: text('target_type').notNull(),
+  targetKey: text('target_key').notNull(),
+  config: jsonb('config').notNull().default({}),
+  enabled: boolean('enabled').notNull().default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('idx_quality_policies_user').on(table.userId, table.scope, table.targetType),
+  index('idx_quality_policies_target').on(table.scope, table.targetType, table.targetKey),
 ]);
 
 export const aiConfigs = hubSchema.table('ai_configs', {
@@ -226,6 +258,31 @@ export const itemScoreBreakdowns = hubSchema.table('item_score_breakdowns', {
 }, (table) => [
   uniqueIndex('idx_item_score_breakdowns_unique').on(table.itemId, table.userId, table.skillId),
   index('idx_item_score_breakdowns_item').on(table.itemId, table.userId),
+]);
+
+export const itemQualityChecks = hubSchema.table('item_quality_checks', {
+  id: serial('id').primaryKey(),
+  itemId: uuid('item_id').notNull().references(() => items.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  sourceId: integer('source_id').references(() => sources.id, { onDelete: 'set null' }),
+  sceneType: text('scene_type').notNull().default('quality_filter'),
+  decision: text('decision'),
+  summary: text('summary'),
+  reason: text('reason'),
+  tags: jsonb('tags').notNull().default([]),
+  riskFlags: jsonb('risk_flags').notNull().default([]),
+  score: real('score'),
+  confidence: real('confidence'),
+  policySnapshot: jsonb('policy_snapshot').notNull().default({}),
+  rawResponse: text('raw_response'),
+  promptPreview: text('prompt_preview'),
+  responsePreview: text('response_preview'),
+  modelConfigId: text('model_config_id'),
+  promptTemplateId: text('prompt_template_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index('idx_item_quality_checks_item').on(table.itemId, table.userId, table.createdAt),
+  index('idx_item_quality_checks_user').on(table.userId, table.createdAt),
 ]);
 
 export const userPreferenceProfiles = hubSchema.table('user_preference_profiles', {

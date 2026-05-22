@@ -11,6 +11,7 @@ export const DAILY_REPORT_AGENT_SCENES = [
 ] as const;
 
 export const AI_SCENE_TYPES = [
+  'quality_filter',
   'scoring',
   'summary',
   'translation',
