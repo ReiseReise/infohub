@@ -16,7 +16,7 @@ services:
     environment:
       POSTGRES_DB: infohub
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-infohub_dev_2026}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d infohub"]
@@ -122,7 +122,7 @@ services:
       redis: { condition: service_healthy }
       scrapling-service: { condition: service_started }
     environment:
-      DATABASE_URL: postgres://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      DATABASE_URL: postgres://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
       REDIS_URL: redis://redis:6379
       RSSHUB_BASE_URL: http://rsshub:1200
       CHANGEDETECTION_URL: http://changedetection:5000
@@ -172,8 +172,8 @@ services:
     container_name: infohub-audio
     ports: ["8000:8000"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
-      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
+      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: ${JWT_SECRET}
       CELERY_BROKER_URL: redis://redis:6379/1
@@ -198,7 +198,7 @@ services:
       TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
       INTERNAL_ARTICLE_URL: http://hub-engine:3001
       CORS_ORIGINS: http://localhost:5173,http://localhost
-      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:-admin@example.com}
+      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:?Set AUDIO_ADMIN_EMAIL in .env}
       ADMIN_PASSWORD: ${AUDIO_ADMIN_PASSWORD}
       FIRST_INVITE_CODE: ${FIRST_INVITE_CODE}
       APP_ENV: ${AUDIO_APP_ENV:-production}
@@ -224,8 +224,8 @@ services:
     container_name: infohub-audio-worker
     command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4 -Q celery
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
-      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
+      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: ${JWT_SECRET}
       CELERY_BROKER_URL: redis://redis:6379/1
@@ -250,7 +250,7 @@ services:
       TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
       INTERNAL_ARTICLE_URL: http://hub-engine:3001
       CORS_ORIGINS: http://localhost:5173,http://localhost
-      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:-admin@example.com}
+      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:?Set AUDIO_ADMIN_EMAIL in .env}
       ADMIN_PASSWORD: ${AUDIO_ADMIN_PASSWORD}
       FIRST_INVITE_CODE: ${FIRST_INVITE_CODE}
       APP_ENV: ${AUDIO_APP_ENV:-production}
@@ -271,8 +271,8 @@ services:
     container_name: infohub-audio-worker-asr
     command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=1 --pool=solo -Q asr
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
-      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:-infohub_dev_2026}@postgres:5432/infohub
+      DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
+      DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
       REDIS_URL: redis://redis:6379/0
       SECRET_KEY: ${JWT_SECRET}
       CELERY_BROKER_URL: redis://redis:6379/1
@@ -297,7 +297,7 @@ services:
       TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
       INTERNAL_ARTICLE_URL: http://hub-engine:3001
       CORS_ORIGINS: http://localhost:5173,http://localhost
-      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:-admin@example.com}
+      ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:?Set AUDIO_ADMIN_EMAIL in .env}
       ADMIN_PASSWORD: ${AUDIO_ADMIN_PASSWORD}
       FIRST_INVITE_CODE: ${FIRST_INVITE_CODE}
       APP_ENV: ${AUDIO_APP_ENV:-production}

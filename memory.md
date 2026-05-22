@@ -2,12 +2,52 @@
 title: 信息中枢-v3 项目记忆
 type: memory
 status: active
-version: 1.7
-updated: 2026-03-10
+version: 1.9
+updated: 2026-05-22
 tags: [memory, integration, folo]
 ---
 
 # 项目记忆
+
+## 2026-05-22（公开化清理与推送前验收）
+
+- 目标：把当前 `codex/folo-rss-parity` 分支整理成可公开审查的 GitHub 分支，保留代码、产品文档和示例资产，但不公开本机运行数据、个人 OPML、Playwright 快照或真实密钥。
+- 关键决策：
+  - `.playwright-cli/` 明确加入忽略，避免本地验收账号、页面快照、真实订阅和运行数据误入公开仓。
+  - `follow.opml` 与 `services/audio/follow.opml` 从个人长期订阅清单替换为 3 条公开样例；真实阅读源不再作为默认 fixture。
+  - `docker-compose.yml` 移除 `PG_PASSWORD` 与 `AUDIO_ADMIN_EMAIL` 的公开部署兜底值，改为要求 `.env` 显式提供。
+  - 文档与历史 QA 报告中的本机绝对路径统一脱敏为 `<infohub-v3-root>`。
+- 验证结果：
+  - `apps/web`: `npm run build` 通过。
+  - `services/hub-engine`: `npm test` 通过，43/43。
+  - `services/hub-engine`: `npm run build` 通过。
+  - `bash scripts/docs/check-docs.sh --strict` 通过。
+  - `git diff --check`、跟踪文件敏感路径检查、实际密钥模式扫描、Git 历史敏感路径检查均无命中。
+- 当前判断：
+  - 本地公开化门禁已通过，可以推送当前分支并用 PR 做最终公开前审查。
+  - `npm audit --omit=dev` 因沙箱 DNS 与审批超时未完成；公开仓库改 Public 前仍建议在可联网环境补一次依赖审计。
+
+## 2026-05-07（AIHOT 反朴借鉴：信源分层 + 事件簇 + 五桶日报）
+
+- 目标：吸收 AIHOT 的“时间线 + 分数 + 标签 + 推荐理由 + 关联讨论”强机制，但保持信息中枢 V3 作为个人/小团队信息加工台、本地优先、多源治理和知识资产化的内核。
+- 关键决策：
+  - 新增公开候选信源库，但不直接导入生产库；X 与公众号默认只进 PoC / 选题池，避免平台风控和噪声污染主 Feed。
+  - 信源治理补齐 AIHOT 风格的 `T1 / T1.5 / T2`、`source_kind`、`authority_weight`，并保留原有 `S/A/B/C/D` 体系兼容。
+  - 模型只做 AI 相关性和多维感知评分；最终优先级、权威加权、精选阈值和日报桶归类继续由可调代码公式控制。
+  - 事件聚类先从稳定 key 与详情页关联讨论做起，优先让官方源成为主条，KOL/媒体作为相关讨论而不是平铺重复信息。
+- 本轮改造：
+  - 后端：新增 `lib/aihot-governance.ts`、`lib/event-clustering.ts`，并在 Sources、Items、Priority、Pipeline、Daily Report、Scoring Skills 接入。
+  - 数据：`sources` 增加 `source_kind`、`authority_weight` 字段，启动迁移会回填历史源。
+  - 前端：Sources 页面展示并可编辑信源类型、权威权重、精选率、重复贡献度；Feed 详情页展示事件簇、主条和关联讨论。
+  - 文档：新增 `docs/08-AIHOT公开信源候选库.md`，记录公开候选源、分层、抓取建议、风险和导入前验收。
+- 验证结果：
+  - `services/hub-engine`: `npm test` ✅ 22/22
+  - `services/hub-engine`: `npm run build` ✅
+  - `apps/web`: `npm run build` ✅
+  - `bash scripts/docs/check-docs.sh --strict` ✅
+- 当前判断：
+  - 这轮完成的是“治理骨架 + 可见体验 + 候选库”，不是完整复刻 AIHOT。
+  - 下一步更应该做 7 天候选源抽样、事件簇人工抽查和公众号/X PoC，而不是继续加更多页面装饰。
 
 ## 2026-03-31（Folo 第二轮对齐：订阅资产管理 + 来源导航 + 网页 provider 编排）
 

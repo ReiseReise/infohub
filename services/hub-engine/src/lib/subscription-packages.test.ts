@@ -11,9 +11,9 @@ test('lists follow and hn popular blogs subscription packages from git-tracked f
   const packages = await listSubscriptionPackages();
   const bySlug = new Map(packages.map((pkg) => [pkg.slug, pkg]));
 
-  assert.equal(bySlug.get('follow')?.sourceCount, 452);
+  assert.equal(bySlug.get('follow')?.sourceCount, 3);
   assert.equal(bySlug.get('hn-popular-blogs')?.sourceCount, 92);
-  assert.deepEqual(bySlug.get('follow')?.tierSummary, { A: 43, B: 375, C: 34 });
+  assert.deepEqual(bySlug.get('follow')?.tierSummary, { A: 1, B: 1, C: 1 });
   assert.deepEqual(bySlug.get('hn-popular-blogs')?.tierSummary, { A: 92 });
   assert.equal(bySlug.get('follow')?.categoryDefault, 'follow');
   assert.equal(bySlug.get('hn-popular-blogs')?.categoryDefault, 'hn-popular-blogs');
@@ -22,9 +22,9 @@ test('lists follow and hn popular blogs subscription packages from git-tracked f
 test('loads the follow package and keeps OPML categories intact', async () => {
   const feeds = await loadSubscriptionPackage('follow');
 
-  assert.equal(feeds.length, 452);
-  assert.equal(feeds[0].title, 'Arlmy | 素生');
-  assert.equal(feeds[0].category, 'Blog');
+  assert.equal(feeds.length, 3);
+  assert.equal(feeds[0].title, 'OpenAI News');
+  assert.equal(feeds[0].category, 'AI');
 });
 
 test('maps bundled package feeds to conservative tiered source payloads', () => {

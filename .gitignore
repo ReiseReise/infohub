@@ -38,5 +38,8 @@ logs/
 # Reports
 qa/reports/
 
+# Local browser inspection artifacts
+.playwright-cli/
+
 # OS
 Thumbs.db
