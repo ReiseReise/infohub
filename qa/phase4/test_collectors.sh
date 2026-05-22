@@ -94,24 +94,35 @@ else
   fail "T3.3: /api/hooks/ingest 注入失败 ($INGEST)"
 fi
 
-# T3.4: 验证注入的数据可查
+# T3.4: /api/hooks/ingest 支持 Capture Inbox 剪藏载荷
+CAPTURE_INGEST=$(api_curl -X POST "$BASE_URL/api/hooks/ingest" \
+  -H "Content-Type: application/json" \
+  -d "{\"items\":[{\"title\":\"QA Capture Inbox $TS\",\"url\":\"https://example.com/qa-capture-$TS\",\"content\":\"# QA Capture\\n\\nOriginal markdown\",\"snippet\":\"Manual highlight\",\"captureTool\":\"obsidian\",\"captureKind\":\"article_capture\",\"userNotes\":\"User note for capture inbox\",\"attachmentPaths\":[\"/vault/clips/qa-capture.md\"]}]}" 2>/dev/null || echo '{}')
+CAPTURE_COUNT=$(echo "$CAPTURE_INGEST" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ingested',0))" 2>/dev/null || echo "0")
+if [ "$CAPTURE_COUNT" -ge 1 ] 2>/dev/null; then
+  pass "T3.4: /api/hooks/ingest 成功注入 Capture Inbox 条目"
+else
+  fail "T3.4: /api/hooks/ingest 注入 Capture Inbox 失败 ($CAPTURE_INGEST)"
+fi
+
+# T3.5: 验证注入的数据可查
 sleep 1
 SEARCH=$(api_curl "$BASE_URL/api/items?search=QA+Webhook+Test&limit=1" 2>/dev/null || echo '{}')
 SEARCH_COUNT=$(echo "$SEARCH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total',0))" 2>/dev/null || echo "0")
 if [ "$SEARCH_COUNT" -ge 1 ] 2>/dev/null; then
-  pass "T3.4: 注入数据可通过搜索查到"
+  pass "T3.5: 注入数据可通过搜索查到"
 else
-  skip "T3.4: 注入数据搜索未命中（可能索引延迟）"
+  skip "T3.5: 注入数据搜索未命中（可能索引延迟）"
 fi
 
-# T3.5: 格式校验
+# T3.6: 格式校验
 BAD_INGEST=$(api_curl_code -X POST "$BASE_URL/api/hooks/ingest" \
   -H "Content-Type: application/json" \
   -d '{"bad":"data"}' 2>/dev/null || echo "000")
 if [ "$BAD_INGEST" = "400" ]; then
-  pass "T3.5: 错误格式返回 400"
+  pass "T3.6: 错误格式返回 400"
 else
-  fail "T3.5: 错误格式预期 400，实际 $BAD_INGEST"
+  fail "T3.6: 错误格式预期 400，实际 $BAD_INGEST"
 fi
 echo ""
 

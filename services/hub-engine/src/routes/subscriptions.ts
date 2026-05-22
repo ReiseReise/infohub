@@ -11,6 +11,7 @@ import {
   loadSubscriptionPackage,
 } from '../lib/subscription-packages.js';
 import { deriveSourceProfile } from '../lib/growth.js';
+import { classifySourceKind, normalizeAuthorityWeight } from '../lib/aihot-governance.js';
 
 const app = new Hono();
 
@@ -26,7 +27,9 @@ type SourcePayload = {
   status?: string;
   tags?: unknown[];
   sourceRole?: string;
+  sourceKind?: string;
   sourceTier?: string;
+  authorityWeight?: number;
   processingProfile?: string;
   growthAxes?: unknown[];
   trustScore?: number;
@@ -55,7 +58,9 @@ function normalizePayload(raw: unknown, categoryDefault?: string): SourcePayload
     status: typeof body.status === 'string' ? body.status : 'active',
     tags: Array.isArray(body.tags) ? body.tags : [],
     sourceRole: typeof body.sourceRole === 'string' ? body.sourceRole : 'normal',
+    sourceKind: typeof body.sourceKind === 'string' ? body.sourceKind : undefined,
     sourceTier: typeof body.sourceTier === 'string' ? body.sourceTier : undefined,
+    authorityWeight: typeof body.authorityWeight === 'number' ? body.authorityWeight : undefined,
     processingProfile: typeof body.processingProfile === 'string' ? body.processingProfile : undefined,
     growthAxes: Array.isArray(body.growthAxes) ? body.growthAxes : undefined,
     trustScore: typeof body.trustScore === 'number' ? body.trustScore : undefined,
@@ -121,8 +126,10 @@ async function createSource(userId: string, payload: SourcePayload) {
     name: payload.name,
     sourceType: payload.sourceType,
     collectorType: payload.collectorType,
+    sourceKind: payload.sourceKind || classifySourceKind(payload),
     sourceRole: payload.sourceRole || 'normal',
     sourceTier: derivedProfile.sourceTier,
+    authorityWeight: normalizeAuthorityWeight(payload.authorityWeight, derivedProfile.sourceTier, payload.sourceKind || classifySourceKind(payload)),
     processingProfile: derivedProfile.processingProfile,
     trustScore: derivedProfile.trustScore,
     noiseScore: derivedProfile.noiseScore,
