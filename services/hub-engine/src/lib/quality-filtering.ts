@@ -30,6 +30,9 @@ export type QualityOutcome = {
 };
 
 export const DEFAULT_TIER_QUALITY_POLICIES: Record<SourceTier, QualityPolicy> = {
+  T1: { mode: 'skip', onFilter: 'review', minConfidence: 1 },
+  'T1.5': { mode: 'light', onFilter: 'review', minConfidence: 0.8 },
+  T2: { mode: 'standard', onFilter: 'filter', minConfidence: 0.7 },
   S: { mode: 'skip', onFilter: 'review', minConfidence: 1 },
   A: { mode: 'light', onFilter: 'review', minConfidence: 0.78 },
   B: { mode: 'standard', onFilter: 'filter', minConfidence: 0.72 },

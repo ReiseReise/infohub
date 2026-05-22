@@ -46,8 +46,10 @@ CREATE TABLE hub.sources (
   name             TEXT NOT NULL,
   source_type      TEXT NOT NULL CHECK (source_type IN ('rss', 'podcast', 'audio', 'rsshub', 'webpage', 'newsletter', 'custom')),
   collector_type   TEXT NOT NULL DEFAULT 'rss' CHECK (collector_type IN ('rss', 'rsshub', 'changedetection', 'newsletter', 'youtube', 'custom', 'webpage')),
+  source_kind      TEXT NOT NULL DEFAULT 'rss',
   source_role      TEXT NOT NULL DEFAULT 'normal',
   source_tier      TEXT NOT NULL DEFAULT 'B',
+  authority_weight REAL NOT NULL DEFAULT 1,
   processing_profile TEXT NOT NULL DEFAULT 'brief',
   trust_score      INT NOT NULL DEFAULT 60,
   noise_score      INT NOT NULL DEFAULT 40,
@@ -80,6 +82,7 @@ CREATE TABLE hub.sources (
 
 CREATE INDEX idx_sources_user ON hub.sources (user_id);
 CREATE INDEX idx_sources_type ON hub.sources (source_type);
+CREATE INDEX idx_sources_kind ON hub.sources (source_kind);
 CREATE INDEX idx_sources_role ON hub.sources (source_role);
 CREATE INDEX idx_sources_tier ON hub.sources (source_tier);
 CREATE INDEX idx_sources_processing_profile ON hub.sources (processing_profile);
@@ -185,6 +188,16 @@ CREATE TABLE hub.filter_rules (
 CREATE INDEX idx_rules_user ON hub.filter_rules (user_id, enabled);
 CREATE INDEX idx_rules_scope ON hub.filter_rules (scope, enabled);
 
+CREATE TABLE IF NOT EXISTS hub.user_settings (
+  user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  auto_fetch_enabled BOOLEAN NOT NULL DEFAULT true,
+  daily_report_workflow JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_settings_auto_fetch ON hub.user_settings (auto_fetch_enabled);
+
 -- AI 配置表
 CREATE TABLE hub.ai_configs (
   id               SERIAL PRIMARY KEY,
@@ -198,7 +211,11 @@ CREATE TABLE hub.ai_configs (
   prompt_template  TEXT NOT NULL,
   prompt_template_id TEXT,
   model_config_id  TEXT,
-  type             TEXT NOT NULL DEFAULT 'scoring' CHECK (type IN ('scoring', 'summary', 'translation', 'trends', 'extraction', 'daily_report')),
+  type             TEXT NOT NULL DEFAULT 'scoring' CHECK (type IN (
+    'quality_filter', 'scoring', 'summary', 'translation', 'trends', 'extraction',
+    'daily_report', 'daily_report_cleaning', 'daily_report_decision',
+    'daily_report_research', 'daily_report_reading', 'daily_report_final'
+  )),
   is_active        BOOLEAN DEFAULT false,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );

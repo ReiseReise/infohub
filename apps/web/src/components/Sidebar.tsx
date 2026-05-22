@@ -4,7 +4,7 @@ import { useAuth } from '../lib/use-auth';
 
 const navItems = [
   { to: '/insights', label: '成长仪表板', icon: BarChart3 },
-  { to: '/feed', label: 'Feed', icon: Newspaper },
+  { to: '/feed', label: '信息流', icon: Newspaper },
   { to: '/podcast', label: '播客专栏', icon: Mic },
   { to: '/audio', label: '音频工坊', icon: Upload },
   { to: '/sources', label: '信源管理', icon: Radio },

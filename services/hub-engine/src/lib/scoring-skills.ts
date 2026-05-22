@@ -128,15 +128,17 @@ export function defaultSkillPrompt(presetKey?: SkillPresetKey | null) {
   if (preset) {
     return [
       ...preset.instructionLines,
+      '你只负责感知层判断：请分别评估事实增量、行业影响、产品/工程可用性、来源可信度、选题价值五个维度；最终精选阈值和来源权重由系统代码计算。',
       '输出 JSON，不要输出解释性前缀：',
-      '{"score":0-100,"confidence":0-1,"decision":"must_read|worth_read|skip|noise","reasons":["..."],"matchedSignals":["..."],"riskFlags":["..."]}',
+      '{"score":0-100,"confidence":0-1,"decision":"must_read|worth_read|skip|noise","dimensionScores":{"fact_delta":0-100,"impact":0-100,"utility":0-100,"source_credibility":0-100,"topic_value":0-100},"reasons":["..."],"matchedSignals":["..."],"riskFlags":["..."]}',
       'reasons 控制在 2-4 条，尽量具体，优先引用正文中的真实信号。',
     ].join('\n');
   }
   return [
     '你是“个人资讯精选评分技能”。请根据标题、正文、用户偏好画像和技能 rubric，为这条资讯打分。',
+    '你只负责感知层判断：请分别评估事实增量、行业影响、产品/工程可用性、来源可信度、选题价值五个维度；最终精选阈值和来源权重由系统代码计算。',
     '输出 JSON，不要输出解释性前缀：',
-    '{"score":0-100,"confidence":0-1,"decision":"must_read|worth_read|skip|noise","reasons":["..."],"matchedSignals":["..."],"riskFlags":["..."]}',
+    '{"score":0-100,"confidence":0-1,"decision":"must_read|worth_read|skip|noise","dimensionScores":{"fact_delta":0-100,"impact":0-100,"utility":0-100,"source_credibility":0-100,"topic_value":0-100},"reasons":["..."],"matchedSignals":["..."],"riskFlags":["..."]}',
     '要求：',
     '1. 优先识别 AI 产业、模型能力、产品落地、头部舆论、资本与监管信号。',
     '2. 对泛科技噪音、标题党、重复观点和低信息密度内容降分。',
@@ -156,6 +158,7 @@ export function defaultSkillRubric(presetKey?: SkillPresetKey | null) {
         skip: '35-61',
         noise: '0-34',
       },
+      deterministicLayer: '模型只输出多维感知分；系统用 sourceTier/sourceKind/authorityWeight、规则调整和分类阈值计算最终优先级。',
     };
   }
   return {
@@ -167,6 +170,7 @@ export function defaultSkillRubric(presetKey?: SkillPresetKey | null) {
       skip: '35-59',
       noise: '0-34',
     },
+    deterministicLayer: '模型只输出多维感知分；系统用 sourceTier/sourceKind/authorityWeight、规则调整和分类阈值计算最终优先级。',
   };
 }
 
@@ -250,14 +254,29 @@ export async function getActiveScoringSkills(userId: string) {
     .from(schema.scoringSkills)
     .where(and(eq(schema.scoringSkills.userId, userId), eq(schema.scoringSkills.status, 'active')))
     .orderBy(desc(schema.scoringSkills.weight), asc(schema.scoringSkills.id));
-  if (rows.length > 0) return rows;
+  if (rows.length > 0) return dedupeActiveScoringSkills(rows).slice(0, 3);
   await ensureDefaultScoringSkills(userId);
   rows = await db
     .select()
     .from(schema.scoringSkills)
     .where(and(eq(schema.scoringSkills.userId, userId), eq(schema.scoringSkills.status, 'active')))
     .orderBy(desc(schema.scoringSkills.weight), asc(schema.scoringSkills.id));
-  return rows.slice(0, 3);
+  return dedupeActiveScoringSkills(rows).slice(0, 3);
+}
+
+export function dedupeActiveScoringSkills(rows: ScoringSkillRecord[]): ScoringSkillRecord[] {
+  const picked = new Map<string, ScoringSkillRecord>();
+  for (const row of rows) {
+    const key = row.presetKey || row.name;
+    const current = picked.get(key);
+    if (!current || row.updatedAt > current.updatedAt || (row.updatedAt.getTime() === current.updatedAt.getTime() && row.id > current.id)) {
+      picked.set(key, row);
+    }
+  }
+  return Array.from(picked.values()).sort((left, right) => {
+    if ((right.weight ?? 0) !== (left.weight ?? 0)) return (right.weight ?? 0) - (left.weight ?? 0);
+    return left.id - right.id;
+  });
 }
 
 async function getSkillById(userId: string, id: number) {
@@ -590,6 +609,9 @@ export function extractJsonPayload(text: string) {
 
 export function parseSkillResponse(text: string) {
   const raw = extractJsonPayload(text);
+  if (!raw.trim()) {
+    throw new Error('empty_scoring_skill_response');
+  }
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const score = typeof parsed.score === 'number'

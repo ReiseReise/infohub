@@ -3,7 +3,21 @@ import { AlertTriangle, ArchiveRestore, ArrowLeft, ArrowRight, Filter, Loader2, 
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, type FeedItemRecord, type ItemQualityCheckPayload } from '../lib/api';
 
-const TIER_OPTIONS = ['all', 'S', 'A', 'B', 'C', 'D'] as const;
+const TIER_OPTIONS = ['all', 'T1', 'T1.5', 'T2', 'S', 'A', 'B', 'C', 'D'] as const;
+
+function tierLabel(tier?: string | null) {
+  const labels: Record<string, string> = {
+    T1: 'T1 一手官方',
+    'T1.5': 'T1.5 官方社媒',
+    T2: 'T2 观察信源',
+    S: 'S 质量策略',
+    A: 'A 质量策略',
+    B: 'B 质量策略',
+    C: 'C 质量策略',
+    D: 'D 质量策略',
+  };
+  return tier ? labels[tier] || tier : '未分级';
+}
 
 function formatDateLabel(value?: string | null) {
   if (!value) return '未知时间';
@@ -30,6 +44,10 @@ export function Filtered() {
   const initialSourceId = searchParams.get('sourceId');
   const [items, setItems] = useState<FeedItemRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [totalItems, setTotalItems] = useState(0);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,8 +65,11 @@ export function Filtered() {
   const [qualityDetail, setQualityDetail] = useState<ItemQualityCheckPayload | null>(null);
   const deferredSearch = useDeferredValue(search);
 
-  const loadItems = useCallback(async () => {
-    setLoading(true);
+  const loadItems = useCallback(async (options: { append?: boolean; offset?: number } = {}) => {
+    const append = options.append === true;
+    const offset = options.offset ?? 0;
+    if (append) setLoadingMore(true);
+    else setLoading(true);
     setError(null);
     try {
       const params: Record<string, string> = {
@@ -56,22 +77,38 @@ export function Filtered() {
         includeFiltered: 'true',
         limit: '80',
       };
+      if (offset > 0) params.offset = String(offset);
       if (deferredSearch.trim()) params.search = deferredSearch.trim();
       if (tierFilter !== 'all') params.sourceTier = tierFilter;
       if (tagFilter !== 'all') params.qualityTag = tagFilter;
       if (sourceIdFilter) params.sourceId = sourceIdFilter;
       const res = await api.items.list(params);
-      setItems(res.data || []);
+      const rows = res.data || [];
+      setItems((current) => {
+        if (!append) return rows;
+        const seen = new Set(current.map((item) => item.id));
+        return [...current, ...rows.filter((item) => !seen.has(item.id))];
+      });
+      setTotalItems(res.total || rows.length);
+      setHasMore(Boolean(res.hasMore));
+      setNextOffset(res.nextOffset ?? null);
       setSelectedId((current) => {
-        if (current && (res.data || []).some((item) => item.id === current)) return current;
-        return res.data?.[0]?.id || null;
+        if (append) return current || rows[0]?.id || null;
+        if (current && rows.some((item) => item.id === current)) return current;
+        return rows[0]?.id || null;
       });
     } catch (err) {
       setError((err as Error).message || '过滤池加载失败');
-      setItems([]);
-      setSelectedId(null);
+      if (!append) {
+        setItems([]);
+        setTotalItems(0);
+        setHasMore(false);
+        setNextOffset(null);
+        setSelectedId(null);
+      }
     } finally {
-      setLoading(false);
+      if (append) setLoadingMore(false);
+      else setLoading(false);
     }
   }, [deferredSearch, sourceIdFilter, tagFilter, tierFilter]);
 
@@ -151,10 +188,11 @@ export function Filtered() {
   }, [items]);
 
   const stats = useMemo(() => ({
-    total: items.length,
+    total: totalItems || items.length,
+    loaded: items.length,
     byTierHighRisk: items.filter((item) => item.sourceTier === 'C' || item.sourceTier === 'D').length,
     restored: items.filter((item) => item.restoredFromFilter).length,
-  }), [items]);
+  }), [items, totalItems]);
 
   const selectedIndex = useMemo(
     () => (selectedId ? items.findIndex((item) => item.id === selectedId) : -1),
@@ -201,7 +239,7 @@ export function Filtered() {
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-teal-700">
                 <Filter size={12} />
-                Filtered Pool
+                过滤池
               </div>
               <h1 className="mt-4 max-w-3xl text-3xl font-semibold tracking-[-0.04em] text-zinc-950">把被挡掉的内容留在可复盘的地方，而不是消失在黑箱里。</h1>
               <p className="mt-3 max-w-2xl text-sm leading-7 text-zinc-600">
@@ -210,9 +248,9 @@ export function Filtered() {
             </div>
             <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
               <div className="rounded-[22px] border border-zinc-200 bg-zinc-50/90 p-4">
-                <div className="text-[10px] uppercase tracking-[0.24em] text-zinc-500">当前池内</div>
+                <div className="text-[10px] uppercase tracking-[0.24em] text-zinc-500">过滤池总量</div>
                 <div className="mt-2 text-3xl font-semibold text-zinc-950">{stats.total}</div>
-                <div className="mt-1 text-xs text-zinc-500">等待查看或人工恢复</div>
+                <div className="mt-1 text-xs text-zinc-500">已加载 {stats.loaded} 条，等待查看或人工恢复</div>
               </div>
               <div className="rounded-[22px] border border-rose-200 bg-rose-50/80 p-4">
                 <div className="text-[10px] uppercase tracking-[0.24em] text-rose-700">高噪音层级</div>
@@ -243,8 +281,8 @@ export function Filtered() {
           </div>
         )}
 
-        <section className="grid gap-5 xl:grid-cols-[380px_minmax(0,1fr)]">
-          <div className="rounded-[28px] border border-zinc-200 bg-white p-4 shadow-[0_24px_64px_-52px_rgba(15,23,42,0.48)]">
+        <section className="grid gap-5 xl:h-[calc(100vh-22rem)] xl:min-h-[620px] xl:grid-cols-[380px_minmax(0,1fr)]">
+          <div className="rounded-[28px] border border-zinc-200 bg-white p-4 shadow-[0_24px_64px_-52px_rgba(15,23,42,0.48)] xl:flex xl:min-h-0 xl:flex-col">
             <div className="flex items-center gap-2 rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3">
               <Search size={15} className="text-zinc-400" />
               <input
@@ -262,7 +300,7 @@ export function Filtered() {
                 className="rounded-2xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700"
               >
                 {TIER_OPTIONS.map((tier) => (
-                  <option key={tier} value={tier}>{tier === 'all' ? '全部分级' : `${tier} 档`}</option>
+                  <option key={tier} value={tier}>{tier === 'all' ? '全部分级' : tierLabel(tier)}</option>
                 ))}
               </select>
               <select
@@ -278,7 +316,7 @@ export function Filtered() {
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
               <div className="flex flex-wrap items-center gap-2">
-                <span>{deferredSearch !== search ? '正在更新结果...' : `当前共 ${items.length} 条`}</span>
+                <span>{deferredSearch !== search ? '正在更新结果...' : `已加载 ${items.length} / ${totalItems || items.length} 条`}</span>
                 {sourceIdFilter && (
                   <span className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] text-zinc-600">
                     已锁定单一信源
@@ -296,53 +334,67 @@ export function Filtered() {
               )}
             </div>
 
-            <div className="mt-4 space-y-2">
+            <div className="mt-4 space-y-2 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
               {loading ? (
                 <div className="flex items-center justify-center py-16 text-sm text-zinc-400"><Loader2 size={16} className="mr-2 animate-spin" />加载过滤池...</div>
               ) : items.length === 0 ? (
                 <div className="rounded-[24px] border border-dashed border-zinc-200 bg-zinc-50 px-4 py-14 text-center text-sm text-zinc-500">
                   当前筛选条件下没有过滤条目。
                 </div>
-              ) : items.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setSelectedId(item.id)}
-                  className={`w-full rounded-[22px] border px-4 py-4 text-left transition-colors ${
-                    selectedId === item.id
-                      ? 'border-zinc-900 bg-zinc-900 text-white shadow-[0_16px_44px_-28px_rgba(15,23,42,0.7)]'
-                      : 'border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50'
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.22em]">
-                    <span className={selectedId === item.id ? 'text-white/70' : 'text-zinc-500'}>{item.sourceTier || 'B'} 档</span>
-                    <span className={`rounded-full border px-2 py-0.5 text-[10px] ${selectedId === item.id ? 'border-white/20 bg-white/10 text-white' : 'border-zinc-200 bg-zinc-100 text-zinc-600'}`}>
-                      {item.sourceName || '未知来源'}
-                    </span>
-                  </div>
-                  <div className="mt-3 text-sm font-medium leading-6">{item.title}</div>
-                  <div className={`mt-2 text-xs leading-6 ${selectedId === item.id ? 'text-white/80' : 'text-zinc-600'}`}>
-                    {item.qualitySummary || item.qualityReason || item.filterReason || item.snippet || '暂无概要'}
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {(item.qualityTags || []).slice(0, 3).map((tag) => (
-                      <span
-                        key={tag}
-                        className={`rounded-full border px-2 py-0.5 text-[10px] ${selectedId === item.id ? 'border-white/15 bg-white/10 text-white' : toneForTag(tag)}`}
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                  <div className={`mt-3 text-[11px] ${selectedId === item.id ? 'text-white/60' : 'text-zinc-400'}`}>
-                    {formatDateLabel(item.qualityCheckedAt || item.fetchedAt)}
-                  </div>
-                </button>
-              ))}
+              ) : (
+                <>
+                  {items.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setSelectedId(item.id)}
+                      className={`w-full rounded-[22px] border px-4 py-4 text-left transition-colors ${
+                        selectedId === item.id
+                          ? 'border-zinc-900 bg-zinc-900 text-white shadow-[0_16px_44px_-28px_rgba(15,23,42,0.7)]'
+                          : 'border-zinc-200 bg-white hover:border-zinc-300 hover:bg-zinc-50'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.22em]">
+                        <span className={selectedId === item.id ? 'text-white/70' : 'text-zinc-500'}>{tierLabel(item.sourceTier)}</span>
+                        <span className={`rounded-full border px-2 py-0.5 text-[10px] ${selectedId === item.id ? 'border-white/20 bg-white/10 text-white' : 'border-zinc-200 bg-zinc-100 text-zinc-600'}`}>
+                          {item.sourceName || '未知来源'}
+                        </span>
+                      </div>
+                      <div className="mt-3 text-sm font-medium leading-6">{item.title}</div>
+                      <div className={`mt-2 text-xs leading-6 ${selectedId === item.id ? 'text-white/80' : 'text-zinc-600'}`}>
+                        {item.qualitySummary || item.qualityReason || item.filterReason || item.snippet || '暂无概要'}
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {(item.qualityTags || []).slice(0, 3).map((tag) => (
+                          <span
+                            key={tag}
+                            className={`rounded-full border px-2 py-0.5 text-[10px] ${selectedId === item.id ? 'border-white/15 bg-white/10 text-white' : toneForTag(tag)}`}
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                      <div className={`mt-3 text-[11px] ${selectedId === item.id ? 'text-white/60' : 'text-zinc-400'}`}>
+                        {formatDateLabel(item.qualityCheckedAt || item.fetchedAt)}
+                      </div>
+                    </button>
+                  ))}
+                  {hasMore && nextOffset !== null && (
+                    <button
+                      type="button"
+                      onClick={() => void loadItems({ append: true, offset: nextOffset })}
+                      disabled={loadingMore}
+                      className="w-full rounded-[18px] border border-dashed border-zinc-300 bg-zinc-50 px-4 py-3 text-sm text-zinc-600 hover:bg-zinc-100 disabled:opacity-60"
+                    >
+                      {loadingMore ? '加载中...' : `加载更多（已显示 ${items.length} / ${totalItems}）`}
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           </div>
 
-          <div className="rounded-[30px] border border-zinc-200 bg-white p-5 shadow-[0_28px_72px_-56px_rgba(15,23,42,0.5)] xl:sticky xl:top-6 xl:self-start">
+          <div className="rounded-[30px] border border-zinc-200 bg-white p-5 shadow-[0_28px_72px_-56px_rgba(15,23,42,0.5)] xl:min-h-0 xl:overflow-y-auto">
             {detailLoading ? (
               <div className="flex min-h-[520px] items-center justify-center text-sm text-zinc-400"><Loader2 size={18} className="mr-2 animate-spin" />加载条目详情...</div>
             ) : !selectedItem ? (
@@ -354,10 +406,10 @@ export function Filtered() {
                 <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.24em] text-zinc-500">
-                      <span>{selectedItem.sourceTier || 'B'} 档</span>
+                      <span>{tierLabel(selectedItem.sourceTier)}</span>
                       <span>{selectedItem.sourceName || '未知来源'}</span>
                       <span>{formatDateLabel(selectedItem.qualityCheckedAt || selectedItem.fetchedAt)}</span>
-                      <span>Case {selectedPositionLabel}</span>
+                      <span>条目 {selectedPositionLabel}</span>
                     </div>
                     <h2 className="mt-3 text-2xl font-semibold tracking-[-0.035em] text-zinc-950">{selectedItem.title}</h2>
                     <div className="mt-2 flex flex-wrap gap-1.5">
@@ -437,11 +489,11 @@ export function Filtered() {
                       </div>
                       <div className="mt-4 grid grid-cols-2 gap-3">
                         <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Decision</div>
-                          <div className="mt-2 text-lg font-semibold text-zinc-950">{qualityDetail?.qualityDecision || selectedItem.qualityDecision || 'unknown'}</div>
+                          <div className="text-[10px] tracking-[0.22em] text-zinc-500">处理结论</div>
+                          <div className="mt-2 text-lg font-semibold text-zinc-950">{qualityDetail?.qualityDecision || selectedItem.qualityDecision || '未知'}</div>
                         </div>
                         <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Confidence</div>
+                          <div className="text-[10px] tracking-[0.22em] text-zinc-500">置信度</div>
                           <div className="mt-2 text-lg font-semibold text-zinc-950">
                             {typeof qualityDetail?.qualityConfidence === 'number'
                               ? `${Math.round(qualityDetail.qualityConfidence * 100)}%`
@@ -453,7 +505,7 @@ export function Filtered() {
                       </div>
                       {(qualityDetail?.qualityRiskFlags || selectedItem.qualityRiskFlags || []).length > 0 && (
                         <div className="mt-4">
-                          <div className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Risk Flags</div>
+                          <div className="text-[10px] tracking-[0.22em] text-zinc-500">风险标签</div>
                           <div className="mt-2 flex flex-wrap gap-1.5">
                             {(qualityDetail?.qualityRiskFlags || selectedItem.qualityRiskFlags || []).map((tag) => (
                               <span key={tag} className={`rounded-full border px-2 py-0.5 text-[10px] ${toneForTag(tag)}`}>{tag}</span>

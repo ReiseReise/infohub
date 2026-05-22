@@ -1,7 +1,7 @@
 export const GROWTH_AXES = ['认知升级', '技术能力', '商业判断', '表达输出'] as const;
 export type GrowthAxis = typeof GROWTH_AXES[number];
 
-export const SOURCE_TIERS = ['S', 'A', 'B', 'C', 'D'] as const;
+export const SOURCE_TIERS = ['T1', 'T1.5', 'T2', 'S', 'A', 'B', 'C', 'D'] as const;
 export type SourceTier = typeof SOURCE_TIERS[number];
 
 export const PROCESSING_PROFILES = ['full', 'smart', 'brief', 'monitor'] as const;
@@ -10,6 +10,9 @@ export type ProcessingProfile = typeof PROCESSING_PROFILES[number];
 const DEFAULT_GROWTH_AXES: GrowthAxis[] = ['认知升级'];
 
 const SOURCE_TIER_DEFAULTS: Record<SourceTier, { trust: number; noise: number; processingProfile: ProcessingProfile }> = {
+  T1: { trust: 94, noise: 10, processingProfile: 'full' },
+  'T1.5': { trust: 84, noise: 22, processingProfile: 'smart' },
+  T2: { trust: 64, noise: 45, processingProfile: 'brief' },
   S: { trust: 92, noise: 12, processingProfile: 'full' },
   A: { trust: 78, noise: 24, processingProfile: 'smart' },
   B: { trust: 62, noise: 42, processingProfile: 'brief' },

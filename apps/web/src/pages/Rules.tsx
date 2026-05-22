@@ -1,7 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpRight, Bot, Filter, Loader2, Plus, Search, Shield, ToggleLeft, ToggleRight, Trash2, Workflow, RotateCcw, Sparkles } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, type AiConfig, type QualityPolicyConfig, type QualityPolicySnapshot, type QualitySourceOverrideRecord, type SourceRecord } from '../lib/api';
+import { api, type AiConfig, type PreferenceProfileSummary, type QualityPolicyConfig, type QualityPolicySnapshot, type QualitySourceOverrideRecord, type SourceRecord } from '../lib/api';
 import { useAuth } from '../lib/use-auth';
 
 const RULE_TYPES = [
@@ -13,7 +13,7 @@ const RULE_TYPES = [
   { value: 'author_filter', label: '作者过滤' },
 ];
 
-const TIER_SEQUENCE = ['S', 'A', 'B', 'C', 'D'] as const;
+const TIER_SEQUENCE = ['T1', 'T1.5', 'T2', 'S', 'A', 'B', 'C', 'D'] as const;
 type TierKey = (typeof TIER_SEQUENCE)[number];
 type RuleScope = 'user' | 'global';
 type PolicyDraft = {
@@ -78,6 +78,9 @@ const DEFAULT_FORM: RuleFormState = {
 };
 
 const DEFAULT_TIER_POLICIES: Record<TierKey, QualityPolicyConfig> = {
+  T1: { mode: 'skip', onFilter: 'review', minConfidence: 1 },
+  'T1.5': { mode: 'light', onFilter: 'review', minConfidence: 0.8 },
+  T2: { mode: 'standard', onFilter: 'filter', minConfidence: 0.7 },
   S: { mode: 'skip', onFilter: 'review', minConfidence: 1 },
   A: { mode: 'light', onFilter: 'review', minConfidence: 0.78 },
   B: { mode: 'standard', onFilter: 'filter', minConfidence: 0.72 },
@@ -111,6 +114,9 @@ const QUALITY_RISK_FLAGS = ['低信息密度', '疑似导流', '半对半错风�
 const NON_AI_NOISE_PRESET = '体育,足球,篮球,娱乐,明星,影视,汽车,房产,旅游,时尚,美食,情感,母婴,游戏,八卦';
 
 const TIER_GUIDANCE: Record<TierKey, { title: string; note: string }> = {
+  T1: { title: '一手官方层', note: '官网、官方博客等一手来源，默认直通。' },
+  'T1.5': { title: '官方社媒层', note: '官方 X/社媒来源，轻审后进入主流程。' },
+  T2: { title: '观察信源层', note: 'KOL、媒体与综合源，标准质检后再入主流程。' },
   S: { title: '直通信号层', note: '默认不做质检，适合顶级信任源。' },
   A: { title: '轻审分析层', note: '只把明显风险留在主 Feed 待复核。' },
   B: { title: '标准资讯层', note: '常规资讯源，失败可直接进入过滤池。' },
@@ -155,6 +161,12 @@ function policyEquals(left: PolicyDraft, right: QualityPolicyConfig) {
 
 function tierTone(tier: TierKey) {
   switch (tier) {
+    case 'T1':
+      return 'border-rose-200 bg-rose-50 text-rose-700';
+    case 'T1.5':
+      return 'border-orange-200 bg-orange-50 text-orange-700';
+    case 'T2':
+      return 'border-sky-200 bg-sky-50 text-sky-700';
     case 'S':
       return 'border-emerald-200 bg-emerald-50 text-emerald-700';
     case 'A':
@@ -202,6 +214,7 @@ export function Rules() {
   const [effectiveSnapshot, setEffectiveSnapshot] = useState<QualityPolicySnapshot | null>(null);
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [aiConfigs, setAiConfigs] = useState<AiConfig[]>([]);
+  const [preferenceSummary, setPreferenceSummary] = useState<PreferenceProfileSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAddRule, setShowAddRule] = useState(false);
   const [savingTier, setSavingTier] = useState<TierKey | null>(null);
@@ -235,6 +248,7 @@ export function Rules() {
         effectiveRes,
         sourcesRes,
         aiConfigRes,
+        preferenceRes,
       ] = await Promise.all([
         api.rules.list({ scope: nextScope }),
         api.qualityPolicies.list({ scope: nextScope }),
@@ -242,6 +256,7 @@ export function Rules() {
         api.qualityPolicies.list({ scope: 'effective' }),
         api.sources.list({ sortBy: 'name' }),
         api.aiConfigs.list(),
+        api.preferences.profile().catch(() => ({ summary: null })),
       ]);
 
       setRules((rulesRes.data || []) as unknown as Rule[]);
@@ -250,6 +265,7 @@ export function Rules() {
       setEffectiveSnapshot(effectiveRes.data || null);
       setSources(sourcesRes.data || []);
       setAiConfigs(aiConfigRes.data || []);
+      setPreferenceSummary(preferenceRes.summary || null);
       setTierDrafts(buildTierDrafts(nextScope === 'user' ? effectiveRes.data : scopeTierRes.data));
       setSelectedSourceId((current) => {
         const availableSources = sourcesRes.data || [];
@@ -508,7 +524,7 @@ export function Rules() {
           minConfidence: clampConfidence(draft.minConfidence),
         },
       });
-      setNotice(`${tier} 档质检策略已保存`);
+      setNotice(`${tier} 分级质检策略已保存`);
       await loadData(scope);
     } catch (err) {
       setError((err as Error).message || '分级策略保存失败');
@@ -518,13 +534,13 @@ export function Rules() {
   };
 
   const handleDeleteTier = async (tier: TierKey) => {
-    if (!window.confirm(`确定删除 ${tier} 档的${scope === 'global' ? '全局' : '个人'}覆盖，恢复默认行为？`)) return;
+    if (!window.confirm(`确定删除 ${tier} 分级的${scope === 'global' ? '全局' : '个人'}覆盖，恢复默认行为？`)) return;
     setSavingTier(tier);
     setError(null);
     setNotice(null);
     try {
       await api.qualityPolicies.deleteTier(tier, scope);
-      setNotice(`${tier} 档已恢复默认策略`);
+      setNotice(`${tier} 分级已恢复默认策略`);
       await loadData(scope);
     } catch (err) {
       setError((err as Error).message || '删除分级覆盖失败');
@@ -591,7 +607,7 @@ export function Rules() {
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-teal-700">
                 <Workflow size={12} />
-                Filtering Console
+                过滤策略台
               </div>
               <h1 className="mt-4 max-w-4xl text-3xl font-semibold tracking-[-0.04em] text-zinc-950">
                 用分级策略定义谁该直通、谁该轻审、谁该进过滤池。
@@ -649,7 +665,7 @@ export function Rules() {
                 <div>
                   <div className="text-sm font-semibold text-zinc-950">有未保存的策略草稿</div>
                   <div className="mt-1 text-sm text-zinc-600">
-                    {tierDirtyCount > 0 && `${tierDirtyCount} 个 tier 卡片已修改`}
+                    {tierDirtyCount > 0 && `${tierDirtyCount} 个分级卡片已修改`}
                     {tierDirtyCount > 0 && sourceDraftDirty && ' · '}
                     {sourceDraftDirty && `信源「${selectedSource?.name || '当前选择'}」有未保存覆盖`}
                   </div>
@@ -663,7 +679,7 @@ export function Rules() {
                     className="inline-flex items-center rounded-2xl border border-amber-200 bg-white px-4 py-2 text-sm text-zinc-700 hover:bg-amber-50"
                   >
                     <RotateCcw size={14} className="mr-2" />
-                    回退全部 tier 草稿
+                    回退全部分级草稿
                   </button>
                 )}
                 {sourceDraftDirty && (
@@ -687,11 +703,11 @@ export function Rules() {
               <div>
                 <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-zinc-600">
                   <Bot size={12} />
-                  AI Scene
+                  AI 质检场景
                 </div>
                 <h2 className="mt-4 text-xl font-semibold tracking-[-0.03em] text-zinc-950">质量质检绑定</h2>
                 <p className="mt-2 text-sm leading-7 text-zinc-600">
-                  `quality_filter` scene 负责输出结构化 decision、标签、风险和解释。深度改模型与提示词，跳转 AI 中心完成。
+                  `quality_filter` 场景负责输出结构化处理结论、标签、风险和解释。深度改模型与提示词，跳转 AI 中心完成。
                 </p>
               </div>
               <Link
@@ -715,22 +731,41 @@ export function Rules() {
                   <div className="mt-1 text-xs text-zinc-500">温度 {activeQualityConfig.temperature ?? 0}</div>
                 </div>
                 <div className="rounded-[22px] border border-teal-200 bg-teal-50/80 p-4">
-                  <div className="text-[10px] uppercase tracking-[0.22em] text-teal-700">生效状态</div>
+                  <div className="text-[10px] tracking-[0.22em] text-teal-700">生效状态</div>
                   <div className="mt-2 text-sm font-semibold text-zinc-950">已启用</div>
                   <div className="mt-1 text-xs text-zinc-600">当前 scene 已连接模型与模板</div>
                 </div>
               </div>
             ) : (
               <div className="mt-5 rounded-[24px] border border-dashed border-amber-200 bg-amber-50 px-4 py-5 text-sm leading-7 text-amber-800">
-                尚未启用 `quality_filter` AI scene。系统仍会保留硬规则过滤，但不会产出 AI 质检解释。
+                尚未启用 `quality_filter` AI 质检场景。系统仍会保留硬规则过滤，但不会产出 AI 质检解释。
               </div>
             )}
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <div className="rounded-[22px] border border-zinc-200 bg-zinc-50 p-4">
+                <div className="text-[10px] tracking-[0.22em] text-zinc-500">硬规则</div>
+                <div className="mt-2 text-sm font-semibold text-zinc-950">{rules.filter((rule) => rule.enabled).length} 条启用</div>
+                <div className="mt-1 text-xs text-zinc-500">当前层级：{activeScope === 'global' ? '全局默认' : '个人覆盖'}</div>
+              </div>
+              <div className="rounded-[22px] border border-zinc-200 bg-zinc-50 p-4">
+                <div className="text-[10px] tracking-[0.22em] text-zinc-500">AI 质检</div>
+                <div className="mt-2 text-sm font-semibold text-zinc-950">{activeQualityConfig ? '已启用' : '未启用'}</div>
+                <div className="mt-1 text-xs text-zinc-500">未启用时只保留硬规则证据</div>
+              </div>
+              <div className="rounded-[22px] border border-zinc-200 bg-zinc-50 p-4">
+                <div className="text-[10px] tracking-[0.22em] text-zinc-500">人工反馈</div>
+                <div className="mt-2 text-sm font-semibold text-zinc-950">{preferenceSummary?.totalFeedback ?? 0} 条</div>
+                <div className="mt-1 text-xs text-zinc-500">
+                  {preferenceSummary?.lastFeedbackAt ? '已进入偏好画像' : '尚未形成画像'}
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="rounded-[30px] border border-zinc-200 bg-white p-5 shadow-[0_24px_64px_-52px_rgba(15,23,42,0.42)]">
             <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-zinc-600">
               <Filter size={12} />
-              Quality Framework
+              固定质检框架
             </div>
             <h2 className="mt-4 text-xl font-semibold tracking-[-0.03em] text-zinc-950">固定质检框架</h2>
             <p className="mt-2 text-sm leading-7 text-zinc-600">
@@ -761,7 +796,7 @@ export function Rules() {
             </div>
 
             <div className="mt-4 rounded-[22px] border border-zinc-200 bg-zinc-950 px-4 py-4 text-sm text-white">
-              <div className="text-[10px] uppercase tracking-[0.24em] text-white/55">Pipeline</div>
+              <div className="text-[10px] tracking-[0.24em] text-white/55">处理链路</div>
               <div className="mt-2 text-sm text-white/85">入库 → 硬规则初判 → AI 质检 → 主 Feed / 过滤池</div>
             </div>
           </div>
@@ -772,16 +807,16 @@ export function Rules() {
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-zinc-600">
                 <Workflow size={12} />
-                Tier Matrix
+                分级质检矩阵
               </div>
               <h2 className="mt-4 text-2xl font-semibold tracking-[-0.03em] text-zinc-950">分级质检矩阵</h2>
               <p className="mt-2 text-sm leading-7 text-zinc-600">
                 {scope === 'global'
-                  ? '当前在编辑全局 tier 默认。它决定所有用户在无个人覆盖时的默认质检路由。'
-                  : '当前在编辑个人 tier 覆盖。保存后会固定当前档位策略；删除覆盖后恢复到全局 / 系统默认。'}
+                  ? '当前在编辑全局分级默认。它决定所有用户在无个人覆盖时的默认质检路由。'
+                  : '当前在编辑个人分级覆盖。保存后会固定当前档位策略；删除覆盖后恢复到全局 / 系统默认。'}
               </p>
               <div className="mt-3 inline-flex rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-[11px] text-zinc-600">
-                优先级：单源覆盖 &gt; 个人 tier &gt; 全局 tier &gt; 系统默认
+                优先级：单源覆盖 &gt; 个人分级 &gt; 全局分级 &gt; 系统默认
               </div>
             </div>
 
@@ -827,7 +862,7 @@ export function Rules() {
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <span className={`inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium ${tierTone(tier)}`}>
-                          {tier} 档
+                          {tier} 分级
                         </span>
                         <h3 className="mt-3 text-lg font-semibold text-zinc-950">{TIER_GUIDANCE[tier].title}</h3>
                         <p className="mt-2 text-xs leading-6 text-zinc-500">{TIER_GUIDANCE[tier].note}</p>
@@ -1024,13 +1059,13 @@ export function Rules() {
                   </div>
                   <h3 className="mt-3 text-lg font-semibold text-zinc-950">{selectedSource.name}</h3>
                   <p className="mt-2 text-xs leading-6 text-zinc-500">
-                    当前跟随的 tier 策略：{policySummary(selectedSourceBaseline)}
+                    当前跟随的分级策略：{policySummary(selectedSourceBaseline)}
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     {selectedSourceOverride ? (
                       <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[10px] text-amber-700">已存在单源覆盖</span>
                     ) : (
-                      <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[10px] text-zinc-600">当前仍跟随 tier 默认</span>
+                      <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[10px] text-zinc-600">当前仍跟随分级默认</span>
                     )}
                     <Link
                       to={`/filtered?sourceId=${selectedSource.id}`}
@@ -1104,7 +1139,7 @@ export function Rules() {
                   <div className="text-[10px] uppercase tracking-[0.22em] text-white/55">预览</div>
                   <div className="mt-2 text-white/90">{policySummary(sourceDraft)}</div>
                   {sourceDraftDirty && (
-                    <div className="mt-2 text-xs text-white/65">当前草稿尚未保存，会覆盖该信源对 tier 策略的跟随关系。</div>
+                    <div className="mt-2 text-xs text-white/65">当前草稿尚未保存，会覆盖该信源对分级策略的跟随关系。</div>
                   )}
                 </div>
 
@@ -1153,7 +1188,7 @@ export function Rules() {
                 </div>
                 <h2 className="mt-4 text-2xl font-semibold tracking-[-0.03em] text-zinc-950">已生效单源覆盖</h2>
                 <p className="mt-2 text-sm leading-7 text-zinc-600">
-                  用来查看哪些来源已经偏离默认 tier 策略，并快速跳转到某个源继续调整。
+                  用来查看哪些来源已经偏离默认分级策略，并快速跳转到某个源继续调整。
                 </p>
               </div>
             </div>
@@ -1161,7 +1196,7 @@ export function Rules() {
             <div className="mt-5 space-y-3">
               {sourceOverrides.length === 0 ? (
                 <div className="rounded-[24px] border border-dashed border-zinc-200 bg-zinc-50 px-4 py-12 text-center text-sm text-zinc-500">
-                  还没有单源覆盖。默认所有源都跟随 tier 矩阵。
+                  还没有单源覆盖。默认所有源都跟随分级矩阵。
                 </div>
               ) : (
                 sourceOverrides.map((override: QualitySourceOverrideRecord) => (

@@ -17,14 +17,23 @@ INSERT INTO hub.filter_rules (user_id, name, type, scope, config, enabled, prior
 SELECT
   NULL,
   'AI高分优先',
-  'ai_score_filter',
+  'source_priority',
   'global',
-  '{"minAiScore":70,"maxAiScore":100,"boost":20}'::jsonb,
+  '{"minScore":70,"boost":20,"description":"AI 评分达到 70 后优先展示；低于 70 不做硬过滤。"}'::jsonb,
   true,
   20
 WHERE NOT EXISTS (
   SELECT 1 FROM hub.filter_rules WHERE scope = 'global' AND name = 'AI高分优先'
 );
+
+UPDATE hub.filter_rules
+SET
+  type = 'source_priority',
+  config = '{"minScore":70,"boost":20,"description":"AI 评分达到 70 后优先展示；低于 70 不做硬过滤。"}'::jsonb
+WHERE scope = 'global'
+  AND user_id IS NULL
+  AND name = 'AI高分优先'
+  AND type = 'ai_score_filter';
 
 INSERT INTO hub.filter_rules (user_id, name, type, scope, config, enabled, priority)
 SELECT
