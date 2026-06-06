@@ -1080,7 +1080,7 @@ export function Feed() {
                 setOffset(0);
                 updateListQuery({ filter: f });
               }}
-              className={`px-3 py-2 text-xs rounded-xl transition-colors ${filter === f ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+              className={`min-h-9 px-3 py-2 text-xs rounded-xl transition-colors ${filter === f ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
             >
               {f === 'all' ? '全部' : f === 'unread' ? `未读${stats ? ` (${stats.unread})` : ''}` : '收藏'}
             </button>
@@ -1098,7 +1098,7 @@ export function Feed() {
                 setOffset(0);
                 updateListQuery({ sort: option.value });
               }}
-              className={`px-3 py-2 text-xs rounded-xl transition-colors ${sortMode === option.value ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+              className={`min-h-9 px-3 py-2 text-xs rounded-xl transition-colors ${sortMode === option.value ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
             >
               {option.label}
             </button>
@@ -1229,7 +1229,7 @@ export function Feed() {
             <button
               onClick={() => void triggerDueSources()}
               disabled={dueRefreshing}
-              className="rounded-lg border border-current px-3 py-2 text-xs hover:bg-white/40 disabled:opacity-50"
+              className="min-h-9 rounded-lg border border-current px-3 py-2 text-xs hover:bg-white/40 disabled:opacity-50"
             >
               {dueRefreshing ? '补抓中...' : '立即补抓到期来源'}
             </button>

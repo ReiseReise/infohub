@@ -207,6 +207,56 @@ def assert_mobile_feed_preview_copy_clean(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} feed preview exposes raw noise or model boilerplate: {noisy_previews}")
 
 
+def assert_mobile_feed_filter_controls_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/feed"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    cramped_controls = page.evaluate(
+        """() => {
+            const requiredMatchers = [
+                /^全部$/,
+                /^未读(?:\\s*\\(\\d+\\))?$/,
+                /^收藏$/,
+                /^按时间$/,
+                /^按优先级$/,
+            ];
+            const optionalMatchers = [/^立即补抓到期来源$/];
+            const buttons = Array.from(document.querySelectorAll('button')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                const text = (node.textContent || '').trim().replace(/\\s+/g, ' ');
+                return {
+                    label: text,
+                    width: rect.width,
+                    height: rect.height,
+                    x: rect.x,
+                    y: rect.y,
+                };
+            });
+            const problems = [];
+            for (const matcher of requiredMatchers) {
+                const matched = buttons.filter((button) => matcher.test(button.label));
+                if (!matched.length) {
+                    problems.push({ error: 'missing-feed-filter-control', matcher: String(matcher) });
+                    continue;
+                }
+                for (const button of matched) {
+                    if (button.width < 36 || button.height < 36) problems.push(button);
+                }
+            }
+            for (const matcher of optionalMatchers) {
+                for (const button of buttons.filter((entry) => matcher.test(entry.label))) {
+                    if (button.width < 36 || button.height < 36) problems.push(button);
+                }
+            }
+            return problems;
+        }"""
+    )
+    if cramped_controls:
+        raise AssertionError(f"{label} feed filter controls are too small or missing on mobile: {cramped_controls}")
+
+
 def assert_mobile_feed_list_actions_discoverable(page, route: str, label: str) -> None:
     if not route.startswith("/feed"):
         return
@@ -517,6 +567,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_desktop_sources_table_actions_visible(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_preview_copy_clean(page, route, f"{viewport_name} {route}")
+    assert_mobile_feed_filter_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_list_actions_discoverable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_detail_header_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_detail_has_return_to_list(page, route, f"{viewport_name} {route}")
