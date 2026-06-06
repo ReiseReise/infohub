@@ -1689,7 +1689,7 @@ export function Feed() {
                 </div>
               )}
 
-              <div className="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50/80 px-4 py-4">
+              <div data-feed-feedback className="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50/80 px-4 py-4">
                 <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                   <div>
                     <div className="text-xs font-semibold text-zinc-800">人类反馈</div>
@@ -1728,7 +1728,7 @@ export function Feed() {
                         key={action.type}
                         onClick={() => { void handleFeedback(selectedItem, action.type, selectedFeedbackTags); }}
                         disabled={Boolean(feedbackSubmittingType)}
-                        className={`rounded-full border px-3 py-1.5 text-xs transition-colors disabled:opacity-50 ${
+                        className={`min-h-9 rounded-full border px-3 py-2 text-xs transition-colors disabled:opacity-50 ${
                           active ? action.activeClassName : action.idleClassName
                         }`}
                       >
@@ -1755,7 +1755,7 @@ export function Feed() {
                                 : [...prev, tag].slice(0, 3)
                             ));
                           }}
-                          className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors disabled:opacity-40 ${
+                          className={`min-h-9 rounded-full border px-3 py-2 text-[11px] transition-colors disabled:opacity-40 ${
                             active
                               ? 'border-zinc-900 bg-zinc-900 text-white'
                               : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50'
