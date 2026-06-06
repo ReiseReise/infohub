@@ -97,6 +97,41 @@ def assert_no_body_overflow(page, label: str) -> None:
         raise AssertionError(f"{label} horizontal overflow: {metrics}")
 
 
+def assert_mobile_nav_visible(page, label: str) -> None:
+    clipped = page.evaluate(
+        """() => {
+            if (window.innerWidth >= 768) return [];
+            return Array.from(document.querySelectorAll('nav a')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                return {
+                    text: (node.textContent || '').trim(),
+                    left: rect.left,
+                    right: rect.right,
+                    top: rect.top,
+                    bottom: rect.bottom,
+                    width: rect.width,
+                };
+            }).filter((item) => (
+                item.left < -1 ||
+                item.right > window.innerWidth + 1
+            ));
+        }"""
+    )
+    if clipped:
+        raise AssertionError(f"{label} mobile nav links clipped: {clipped}")
+
+
+def assert_mobile_sources_card_budget(page, route: str, label: str) -> None:
+    if not route.startswith("/sources"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    card_actions = page.get_by_role("button", name="查看 Feed", exact=True).count()
+    if card_actions > 24:
+        raise AssertionError(f"{label} renders too many mobile source cards: {card_actions}")
+
+
 def wait_ready(page) -> None:
     page.wait_for_load_state("domcontentloaded", timeout=20000)
     try:
@@ -110,6 +145,8 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     wait_ready(page)
     assert_text(page, needles, f"{viewport_name} {route}")
     assert_no_body_overflow(page, f"{viewport_name} {route}")
+    assert_mobile_nav_visible(page, f"{viewport_name} {route}")
+    assert_mobile_sources_card_budget(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     screenshot_path = SCREENSHOT_DIR / f"infohub-front-{slug}-{viewport_name}.png"
     page.screenshot(path=str(screenshot_path), full_page=True)

@@ -25,21 +25,24 @@ export function Sidebar() {
         <p className="text-xs text-zinc-500 mt-0.5">v3.1 · 成长导向中枢</p>
       </div>
 
-      <nav className="flex gap-1 overflow-x-auto px-2 py-2 md:block md:flex-1 md:space-y-0.5 md:overflow-y-auto md:py-3">
+      <nav
+        aria-label="主导航"
+        className="grid grid-cols-3 gap-1 px-2 py-2 md:block md:flex-1 md:space-y-0.5 md:overflow-y-auto md:py-3"
+      >
         {navItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
             className={({ isActive }) =>
-              `flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors md:shrink ${
+              `flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs transition-colors md:justify-start md:gap-2.5 md:px-3 md:text-sm ${
                 isActive
                   ? 'bg-zinc-900 text-white font-medium'
                   : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
               }`
             }
           >
-            <Icon size={16} />
-            {label}
+            <Icon size={16} className="shrink-0" />
+            <span className="min-w-0 whitespace-nowrap">{label}</span>
           </NavLink>
         ))}
       </nav>

@@ -47,6 +47,7 @@ const PROCESSING_PROFILE_OPTIONS: Array<{ value: ProcessingProfile; label: strin
 ];
 
 const GROWTH_AXIS_OPTIONS: GrowthAxis[] = ['认知升级', '技术能力', '商业判断', '表达输出'];
+const SOURCE_CARD_BATCH_SIZE = 18;
 
 const WEB_CAPTURE_MODE_OPTIONS: Array<{ value: WebCaptureRenderMode; label: string }> = [
   { value: 'auto', label: '自动回退' },
@@ -320,6 +321,7 @@ export function Sources() {
   const [collectorFilter, setCollectorFilter] = useState<'all' | CollectorType>('all');
   const [tierFilter, setTierFilter] = useState<'all' | SourceTier>('all');
   const [viewMode, setViewMode] = useState<SourceViewMode>(() => resolveInitialSourcesViewMode());
+  const [visibleSourceCardCount, setVisibleSourceCardCount] = useState(SOURCE_CARD_BATCH_SIZE);
   const [selectedSourceIds, setSelectedSourceIds] = useState<number[]>([]);
   const [bulkUpdating, setBulkUpdating] = useState(false);
   const [reprocessingSourceId, setReprocessingSourceId] = useState<number | null>(null);
@@ -446,6 +448,16 @@ export function Sources() {
     () => filteredSources.filter((source) => selectedSourceIds.includes(source.id)),
     [filteredSources, selectedSourceIds],
   );
+
+  useEffect(() => {
+    setVisibleSourceCardCount(SOURCE_CARD_BATCH_SIZE);
+  }, [collectorFilter, focusMode, sourceSearch, sourceSort, tierFilter, viewMode]);
+
+  const displayedCardSources = useMemo(
+    () => filteredSources.slice(0, visibleSourceCardCount),
+    [filteredSources, visibleSourceCardCount],
+  );
+  const hiddenCardCount = Math.max(filteredSources.length - displayedCardSources.length, 0);
 
   const toggleSourceSelection = (sourceId: number) => {
     setSelectedSourceIds((current) => (
@@ -1563,7 +1575,7 @@ export function Sources() {
         </div>
       ) : (
         <div className="space-y-2">
-          {filteredSources.map((source) => {
+          {displayedCardSources.map((source) => {
             const schedule = scheduleLabel(source);
             const freshness = freshnessLabel(source);
             const feedLabel = sourceFeedLabel(source);
@@ -1872,6 +1884,23 @@ export function Sources() {
               </div>
             );
           })}
+          {hiddenCardCount > 0 && (
+            <div className="rounded-[24px] border border-dashed border-zinc-300 bg-zinc-50/80 px-4 py-5 text-center">
+              <div className="text-sm font-medium text-zinc-800">
+                已显示 {displayedCardSources.length} / {filteredSources.length} 个信源
+              </div>
+              <p className="mt-1 text-xs leading-5 text-zinc-500">
+                手机端先展示当前排序下最需要处理的信源，避免列表过长。继续展开不会改变筛选条件。
+              </p>
+              <button
+                type="button"
+                onClick={() => setVisibleSourceCardCount((count) => count + SOURCE_CARD_BATCH_SIZE)}
+                className="mt-3 rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+              >
+                再显示 {Math.min(SOURCE_CARD_BATCH_SIZE, hiddenCardCount)} 个
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
