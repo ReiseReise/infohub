@@ -145,6 +145,26 @@ def assert_mobile_sources_action_labels(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} missing visible mobile source action labels: {missing}")
 
 
+def assert_desktop_sources_table_actions_visible(page, route: str, label: str) -> None:
+    if not route.startswith("/sources"):
+        return
+    is_desktop = page.evaluate("() => window.innerWidth >= 1024")
+    if not is_desktop:
+        return
+    action_names = ["看未读", "策略", "修复"]
+    viewport_width = page.evaluate("() => document.documentElement.clientWidth")
+    cramped: list[dict] = []
+    for action_name in action_names:
+        button = page.get_by_role("button", name=action_name, exact=True).first
+        box = button.bounding_box()
+        if not box:
+            raise AssertionError(f"{label} source table action is not visible: {action_name}")
+        if box["x"] < 0 or box["x"] + box["width"] > viewport_width:
+            cramped.append({"action": action_name, "box": box, "viewportWidth": viewport_width})
+    if cramped:
+        raise AssertionError(f"{label} source table actions are hidden behind horizontal scroll: {cramped}")
+
+
 def assert_mobile_filtered_item_budget(page, route: str, label: str) -> None:
     if not route.startswith("/filtered"):
         return
@@ -191,6 +211,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_nav_visible(page, f"{viewport_name} {route}")
     assert_mobile_sources_card_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_sources_action_labels(page, route, f"{viewport_name} {route}")
+    assert_desktop_sources_table_actions_visible(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)

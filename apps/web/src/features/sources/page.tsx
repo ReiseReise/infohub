@@ -1499,7 +1499,7 @@ export function Sources() {
       ) : viewMode === 'table' ? (
         <div className="overflow-hidden rounded-[24px] border border-zinc-200 bg-white shadow-[0_20px_56px_-48px_rgba(15,23,42,0.45)]">
           <div className="max-h-[70vh] overflow-auto">
-            <table className="min-w-[1380px] w-full text-left text-sm">
+            <table className="min-w-[1120px] w-full text-left text-sm 2xl:min-w-[1380px]">
               <thead className="sticky top-0 z-10 bg-zinc-50 text-xs text-zinc-500">
                 <tr>
                   <th className="w-10 px-3 py-3">
@@ -1512,22 +1512,25 @@ export function Sources() {
                   <th className="px-3 py-3">信源</th>
                   <th className="px-3 py-3">类型</th>
                   <th className="px-3 py-3">等级</th>
-                  <th className="px-3 py-3">权威</th>
+                  <th className="hidden px-3 py-3 2xl:table-cell">权威</th>
                   <th className="px-3 py-3">未读</th>
                   <th className="px-3 py-3">质量</th>
                   <th className="px-3 py-3">正文率</th>
                   <th className="px-3 py-3">AI完成率</th>
                   <th className="px-3 py-3">噪声率</th>
-                  <th className="px-3 py-3">日报入选率</th>
-                  <th className="px-3 py-3">重复率</th>
-                  <th className="px-3 py-3">健康</th>
-                  <th className="px-3 py-3">最近抓取</th>
-                  <th className="px-3 py-3">操作</th>
+                  <th className="px-3 py-3">
+                    <span aria-hidden="true">入报率</span>
+                    <span className="sr-only">日报入选率</span>
+                  </th>
+                  <th className="hidden px-3 py-3 2xl:table-cell">重复率</th>
+                  <th className="hidden px-3 py-3 2xl:table-cell">健康</th>
+                  <th className="hidden px-3 py-3 2xl:table-cell">最近抓取</th>
+                  <th className="sticky right-0 z-20 w-[190px] border-l border-zinc-100 bg-zinc-50 px-3 py-3 shadow-[-14px_0_24px_-20px_rgba(15,23,42,0.55)]">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100">
                 {filteredSources.map((source) => (
-                  <tr key={source.id} className="hover:bg-zinc-50/70">
+                  <tr key={source.id} className="group hover:bg-zinc-50/70">
                     <td className="px-3 py-3">
                       <input
                         type="checkbox"
@@ -1541,7 +1544,7 @@ export function Sources() {
                     </td>
                     <td className="px-3 py-3 text-zinc-600">{sourceKindLabel(source.sourceKind)}</td>
                     <td className="px-3 py-3 text-zinc-600">{SOURCE_TIER_OPTIONS.find((option) => option.value === source.sourceTier)?.label || source.sourceTier || '未分级'}</td>
-                    <td className="px-3 py-3 text-zinc-600">{Number(source.authorityWeight ?? 1).toFixed(2)}</td>
+                    <td className="hidden px-3 py-3 text-zinc-600 2xl:table-cell">{Number(source.authorityWeight ?? 1).toFixed(2)}</td>
                     <td className="px-3 py-3 font-medium text-zinc-900">{source.unreadCount ?? 0}</td>
                     <td className="px-3 py-3 text-zinc-600">
                       <div className="font-medium text-zinc-900">{source.sourceQuality?.qualityScore ?? 0}</div>
@@ -1551,11 +1554,11 @@ export function Sources() {
                     <td className="px-3 py-3 text-zinc-600">{percentLabel(source.sourceQuality?.aiReadyRate)}</td>
                     <td className="px-3 py-3 text-zinc-600">{percentLabel(source.sourceQuality?.noiseRate)}</td>
                     <td className="px-3 py-3 text-zinc-600">{percentLabel(source.sourceQuality?.reportSelectedRate)}</td>
-                    <td className="px-3 py-3 text-zinc-600">{percentLabel(source.duplicateContribution)}</td>
-                    <td className="px-3 py-3 text-zinc-600">{source.healthScore ?? 0}%</td>
-                    <td className="px-3 py-3 text-zinc-600">{formatTimeLabel(source.latestItemAt || source.lastFetchedAt)}</td>
-                    <td className="px-3 py-3">
-                      <div className="flex gap-2">
+                    <td className="hidden px-3 py-3 text-zinc-600 2xl:table-cell">{percentLabel(source.duplicateContribution)}</td>
+                    <td className="hidden px-3 py-3 text-zinc-600 2xl:table-cell">{source.healthScore ?? 0}%</td>
+                    <td className="hidden px-3 py-3 text-zinc-600 2xl:table-cell">{formatTimeLabel(source.latestItemAt || source.lastFetchedAt)}</td>
+                    <td className="sticky right-0 z-10 border-l border-zinc-100 bg-white px-3 py-3 shadow-[-14px_0_24px_-20px_rgba(15,23,42,0.45)] transition-colors group-hover:bg-zinc-50/70">
+                      <div className="flex min-w-[166px] gap-2 whitespace-nowrap">
                         <button onClick={() => openSourceFeed(source, true)} className="rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-100">看未读</button>
                         <button onClick={() => navigate(`/rules?source=${source.id}`)} className="rounded-full border border-zinc-200 px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-100">策略</button>
                         <button
