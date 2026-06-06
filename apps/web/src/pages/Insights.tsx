@@ -1190,7 +1190,7 @@ export function Insights() {
                   <FileText size={16} />
                   {selectedInsight ? `${selectedInsight.date} 日报` : '暂无日报'}
                 </div>
-                <div className="mb-4 rounded-2xl border border-zinc-200 bg-white px-3 py-3">
+                <div id="report-local-navigation" className="scroll-mt-4 mb-4 rounded-2xl border border-zinc-200 bg-white px-3 py-3">
                   <div className="text-xs font-semibold text-zinc-900">日报导航</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {[
@@ -1351,6 +1351,16 @@ export function Insights() {
                   </div>
                 )}
                 <div id="report-markdown-section" className="scroll-mt-4">
+                  <div className="mb-3 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => handleJumpToReportAnchor('report-local-navigation')}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm hover:bg-zinc-50"
+                    >
+                      <ArrowUpRight size={12} className="-rotate-45" />
+                      返回日报导航
+                    </button>
+                  </div>
                   <MarkdownContent content={reportMarkdown} empty="还没有日报内容。" className="min-w-0" mode="markdown" variant="report" />
                 </div>
               </div>

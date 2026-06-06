@@ -231,6 +231,19 @@ def assert_mobile_insights_report_shortcut(page, route: str, label: str) -> None
         raise AssertionError(f"{label} report markdown target is not visible after clicking the navigation")
     if markdown_box["y"] > 220:
         raise AssertionError(f"{label} markdown navigation did not scroll near the report body: {markdown_box}")
+    back_button = page.get_by_role("button", name="返回日报导航", exact=True).first
+    if back_button.count() == 0:
+        raise AssertionError(f"{label} report body is missing the return-to-navigation control")
+    back_box = back_button.bounding_box()
+    if not back_box or back_box["y"] < 0 or back_box["y"] > viewport_height:
+        raise AssertionError(f"{label} return-to-navigation control is not visible near the report body: {back_box}")
+    back_button.click()
+    page.wait_for_timeout(200)
+    nav_box = page.locator("#report-local-navigation").first.bounding_box()
+    if not nav_box:
+        raise AssertionError(f"{label} report local navigation target is missing after clicking return")
+    if nav_box["y"] > 220:
+        raise AssertionError(f"{label} return-to-navigation control did not scroll near the report navigation: {nav_box}")
     page.evaluate("() => window.scrollTo({ top: 0, behavior: 'instant' })")
     page.wait_for_timeout(100)
 
