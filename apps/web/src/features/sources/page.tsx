@@ -1850,20 +1850,23 @@ export function Sources() {
                     </button>
                     <button
                       onClick={() => void handleToggleAutoFetch(source)}
-                      className={`inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-100 ${(source.autoFetchEnabled ?? true) ? 'text-emerald-600' : 'text-zinc-400'}`}
+                      className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-xl px-2.5 text-xs hover:bg-zinc-100 xl:w-9 xl:px-0 ${(source.autoFetchEnabled ?? true) ? 'text-emerald-600' : 'text-zinc-400'}`}
                       title={(source.autoFetchEnabled ?? true) ? '关闭自动抓取' : '开启自动抓取'}
                     >
                       {(source.autoFetchEnabled ?? true) ? <Pause size={14} /> : <Play size={14} />}
+                      <span className="xl:sr-only">自动抓取</span>
                     </button>
                     <button
                       onClick={() => void handleToggleAutoTranscribe(source)}
-                      className={`inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-100 ${source.autoTranscribe ? 'text-sky-600' : 'text-zinc-400'}`}
+                      className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-xl px-2.5 text-xs hover:bg-zinc-100 xl:w-9 xl:px-0 ${source.autoTranscribe ? 'text-sky-600' : 'text-zinc-400'}`}
                       title={source.autoTranscribe ? '关闭自动转写' : '开启自动转写'}
                     >
                       <Headphones size={14} />
+                      <span className="xl:sr-only">自动转写</span>
                     </button>
-                    <button onClick={() => void handleFetch(source.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-100" title="立即采集">
+                    <button onClick={() => void handleFetch(source.id)} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-xl px-2.5 text-xs text-zinc-500 hover:bg-zinc-100 xl:w-9 xl:px-0" title="立即采集">
                       <RefreshCw size={14} className="text-zinc-400" />
+                      <span className="xl:sr-only">立即采集</span>
                     </button>
                     <button
                       onClick={() => void handleSourceReprocess(source)}
@@ -1873,11 +1876,13 @@ export function Sources() {
                     >
                       {reprocessingSourceId === source.id ? '修复中' : '批量修复'}
                     </button>
-                    <button onClick={() => void handleToggleStatus(source.id, source.status)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-100" title={source.status === 'active' ? '暂停信源' : '恢复信源'}>
+                    <button onClick={() => void handleToggleStatus(source.id, source.status)} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-xl px-2.5 text-xs text-zinc-500 hover:bg-zinc-100 xl:w-9 xl:px-0" title={source.status === 'active' ? '暂停信源' : '恢复信源'}>
                       {source.status === 'active' ? <Pause size={14} className="text-zinc-400" /> : <Play size={14} className="text-zinc-400" />}
+                      <span className="xl:sr-only">{source.status === 'active' ? '暂停信源' : '恢复信源'}</span>
                     </button>
-                    <button onClick={() => void handleDelete(source.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-red-50" title="删除">
+                    <button onClick={() => void handleDelete(source.id)} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-xl px-2.5 text-xs text-zinc-500 hover:bg-red-50 xl:w-9 xl:px-0" title="删除信源">
                       <Trash2 size={14} className="text-zinc-300 hover:text-red-500" />
+                      <span className="xl:sr-only">删除信源</span>
                     </button>
                   </div>
                 </div>

@@ -132,6 +132,19 @@ def assert_mobile_sources_card_budget(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} renders too many mobile source cards: {card_actions}")
 
 
+def assert_mobile_sources_action_labels(page, route: str, label: str) -> None:
+    if not route.startswith("/sources"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    text = page.locator("body").inner_text(timeout=15000)
+    required = ["自动抓取", "自动转写", "立即采集", "删除信源"]
+    missing = [item for item in required if item not in text]
+    if missing:
+        raise AssertionError(f"{label} missing visible mobile source action labels: {missing}")
+
+
 def assert_mobile_filtered_item_budget(page, route: str, label: str) -> None:
     if not route.startswith("/filtered"):
         return
@@ -163,6 +176,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_no_body_overflow(page, f"{viewport_name} {route}")
     assert_mobile_nav_visible(page, f"{viewport_name} {route}")
     assert_mobile_sources_card_budget(page, route, f"{viewport_name} {route}")
+    assert_mobile_sources_action_labels(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     screenshot_path = SCREENSHOT_DIR / f"infohub-front-{slug}-{viewport_name}.png"
