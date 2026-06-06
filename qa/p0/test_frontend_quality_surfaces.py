@@ -98,27 +98,33 @@ def assert_no_body_overflow(page, label: str) -> None:
 
 
 def assert_mobile_nav_visible(page, label: str) -> None:
-    clipped = page.evaluate(
+    problems = page.evaluate(
         """() => {
             if (window.innerWidth >= 768) return [];
             return Array.from(document.querySelectorAll('nav a')).map((node) => {
                 const rect = node.getBoundingClientRect();
+                const text = (node.textContent || '').trim().replace(/\\s+/g, ' ');
                 return {
-                    text: (node.textContent || '').trim(),
+                    text,
                     left: rect.left,
                     right: rect.right,
                     top: rect.top,
                     bottom: rect.bottom,
                     width: rect.width,
+                    height: rect.height,
+                    missingLabel: !text,
+                    clippedX: rect.left < -1 || rect.right > window.innerWidth + 1,
+                    tooSmall: rect.width < 36 || rect.height < 36,
                 };
             }).filter((item) => (
-                item.left < -1 ||
-                item.right > window.innerWidth + 1
+                item.missingLabel ||
+                item.clippedX ||
+                item.tooSmall
             ));
         }"""
     )
-    if clipped:
-        raise AssertionError(f"{label} mobile nav links clipped: {clipped}")
+    if problems:
+        raise AssertionError(f"{label} mobile nav links are clipped, unlabeled, or too small: {problems}")
 
 
 def assert_mobile_sources_card_budget(page, route: str, label: str) -> None:

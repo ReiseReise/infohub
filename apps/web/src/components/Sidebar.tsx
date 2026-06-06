@@ -34,7 +34,7 @@ export function Sidebar() {
             key={to}
             to={to}
             className={({ isActive }) =>
-              `flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs transition-colors md:justify-start md:gap-2.5 md:px-3 md:text-sm ${
+              `flex min-h-9 min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs transition-colors md:justify-start md:gap-2.5 md:px-3 md:text-sm ${
                 isActive
                   ? 'bg-zinc-900 text-white font-medium'
                   : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
