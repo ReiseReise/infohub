@@ -195,6 +195,42 @@ def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} refresh button is cramped: {box}")
 
 
+def assert_report_heading_date_not_split(page, label: str) -> None:
+    date_layout = page.evaluate(
+        """() => {
+            const h1 = document.querySelector('#report-markdown-section h1');
+            if (!h1) return { error: 'missing-heading' };
+            const text = h1.textContent || '';
+            const match = text.match(/\\d{4}-\\d{2}-\\d{2}/);
+            if (!match) return { error: 'missing-date', text };
+
+            const walker = document.createTreeWalker(h1, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+                const local = (node.textContent || '').indexOf(match[0]);
+                if (local >= 0) {
+                    const range = document.createRange();
+                    range.setStart(node, local);
+                    range.setEnd(node, local + match[0].length);
+                    const rects = Array.from(range.getClientRects()).map((rect) => ({
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    }));
+                    return { text, date: match[0], rects };
+                }
+            }
+            return { error: 'date-node-missing', text, date: match[0] };
+        }"""
+    )
+    if date_layout.get("error"):
+        raise AssertionError(f"{label} report title date probe failed: {date_layout}")
+    rects = date_layout.get("rects") or []
+    if len(rects) != 1:
+        raise AssertionError(f"{label} report title date is split across lines: {date_layout}")
+
+
 def assert_mobile_insights_report_shortcut(page, route: str, label: str) -> None:
     if not route.startswith("/insights"):
         return
@@ -237,6 +273,7 @@ def assert_mobile_insights_report_shortcut(page, route: str, label: str) -> None
     back_box = back_button.bounding_box()
     if not back_box or back_box["y"] < 0 or back_box["y"] > viewport_height:
         raise AssertionError(f"{label} return-to-navigation control is not visible near the report body: {back_box}")
+    assert_report_heading_date_not_split(page, label)
     back_button.click()
     page.wait_for_timeout(200)
     nav_box = page.locator("#report-local-navigation").first.bounding_box()

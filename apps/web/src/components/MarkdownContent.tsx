@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { isValidElement, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -13,6 +13,32 @@ type MarkdownContentProps = {
 
 function joinClasses(...parts: Array<string | undefined | false>) {
   return parts.filter(Boolean).join(' ');
+}
+
+function getTextFromReactNode(node: ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(getTextFromReactNode).join('');
+  if (isValidElement<{ children?: ReactNode }>(node)) return getTextFromReactNode(node.props.children);
+  return '';
+}
+
+function renderReportHeadingChildren(children: ReactNode): ReactNode {
+  const text = getTextFromReactNode(children);
+  const match = text.match(/\d{4}-\d{2}-\d{2}/);
+  if (!match || match.index === undefined) return children;
+
+  const before = text.slice(0, match.index);
+  const date = match[0];
+  const after = text.slice(match.index + date.length);
+
+  return (
+    <>
+      {before}
+      <span className="whitespace-nowrap">{date}</span>
+      {after}
+    </>
+  );
 }
 
 const proseClassName = [
@@ -101,6 +127,9 @@ export function MarkdownContent({ content, empty, className, mode = 'auto', vari
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeSanitize]}
         components={{
+          h1: ({ node: _node, children, ...props }) => (
+            <h1 {...props}>{variant === 'report' ? renderReportHeadingChildren(children) : children}</h1>
+          ),
           a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
           code: ({ className: codeClassName, children, ...props }) => {
             const text = String(children ?? '').replace(/\n$/, '');
