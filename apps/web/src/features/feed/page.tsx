@@ -391,6 +391,7 @@ export function Feed() {
   const [fetchStatus, setFetchStatus] = useState<FetchStatusResponse | null>(null);
   const [dueRefreshing, setDueRefreshing] = useState(false);
   const detailPanelRef = useRef<HTMLDivElement | null>(null);
+  const listPanelRef = useRef<HTMLDivElement | null>(null);
   const limit = 20;
 
   const fetchItems = useCallback(async () => {
@@ -1009,6 +1010,10 @@ export function Feed() {
   const feedbackNoticeMessage = typeof feedbackNotice === 'string' ? feedbackNotice : feedbackNotice?.message;
   const feedbackNoticeTone: NoticeTone = typeof feedbackNotice === 'string' || !feedbackNotice ? 'success' : feedbackNotice.tone;
 
+  const handleReturnToList = () => {
+    listPanelRef.current?.scrollIntoView({ behavior: 'auto', block: 'start' });
+  };
+
   const getCollectorLabel = (item?: FeedItem | null) => {
     if (item?.sourceCollectorType === 'changedetection') return '网页变更';
     if (item?.sourceCollectorType === 'webpage') return '网页快照';
@@ -1233,7 +1238,11 @@ export function Feed() {
       )}
 
       <div className="grid min-h-[520px] grid-cols-1 gap-4 xl:grid-cols-[minmax(320px,0.9fr)_minmax(0,1.3fr)]">
-        <div className="overflow-hidden rounded-[28px] border border-zinc-200/80 bg-white shadow-[0_24px_60px_-48px_rgba(15,23,42,0.5)]">
+        <div
+          id="feed-list-panel"
+          ref={listPanelRef}
+          className="overflow-hidden rounded-[28px] border border-zinc-200/80 bg-white shadow-[0_24px_60px_-48px_rgba(15,23,42,0.5)]"
+        >
           {loading ? (
             <div className="text-center py-20 text-zinc-400">加载中...</div>
           ) : items.length === 0 ? (
@@ -1414,6 +1423,13 @@ export function Feed() {
                 </div>
               )}
               <div className="sticky top-0 z-10 -mx-5 -mt-5 mb-5 border-b border-zinc-100 bg-white/92 px-5 py-4 backdrop-blur">
+                <button
+                  type="button"
+                  onClick={handleReturnToList}
+                  className="mb-3 inline-flex min-h-9 items-center rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-sm md:hidden"
+                >
+                  返回列表
+                </button>
               <div className={feedDetailHeaderClassName}>
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">

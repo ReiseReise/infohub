@@ -243,6 +243,28 @@ def assert_mobile_feed_list_actions_discoverable(page, route: str, label: str) -
         raise AssertionError(f"{label} feed list actions are hidden, unlabeled, or too small on mobile: {hidden_or_unlabeled_actions}")
 
 
+def assert_mobile_feed_detail_has_return_to_list(page, route: str, label: str) -> None:
+    if not route.startswith("/feed/"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    button = page.get_by_role("button", name="返回列表", exact=True).first
+    if button.count() == 0:
+        raise AssertionError(f"{label} feed detail is missing a return-to-list action")
+    box = button.bounding_box()
+    viewport_height = page.evaluate("() => window.innerHeight")
+    if not box or box["y"] < 0 or box["y"] > viewport_height:
+        raise AssertionError(f"{label} return-to-list action is not visible near the detail header: {box}")
+    button.click()
+    page.wait_for_timeout(200)
+    list_box = page.locator("#feed-list-panel").first.bounding_box()
+    if not list_box:
+        raise AssertionError(f"{label} return-to-list target is missing")
+    if list_box["y"] > 220:
+        raise AssertionError(f"{label} return-to-list action did not scroll near the list panel: {list_box}")
+
+
 def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
     if not route.startswith("/settings"):
         return
@@ -367,6 +389,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_preview_copy_clean(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_list_actions_discoverable(page, route, f"{viewport_name} {route}")
+    assert_mobile_feed_detail_has_return_to_list(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
