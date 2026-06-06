@@ -735,7 +735,7 @@ export function Insights() {
                     type="button"
                     onClick={() => setGenerationMode(mode)}
                     title={GENERATION_MODE_DESCRIPTIONS[mode]}
-                    className={`px-3 py-1.5 transition-colors ${
+                    className={`min-h-9 px-3 py-2 transition-colors ${
                       generationMode === mode
                         ? 'rounded-lg bg-zinc-900 text-white'
                         : 'text-zinc-600 hover:bg-zinc-50'
