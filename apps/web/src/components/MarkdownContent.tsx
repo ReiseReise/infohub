@@ -8,6 +8,7 @@ type MarkdownContentProps = {
   empty?: ReactNode;
   className?: string;
   mode?: 'auto' | 'markdown' | 'plain';
+  variant?: 'default' | 'report';
 };
 
 function joinClasses(...parts: Array<string | undefined | false>) {
@@ -27,6 +28,16 @@ const proseClassName = [
   'prose-table:block prose-table:w-full prose-table:overflow-x-auto prose-table:rounded-2xl prose-table:border prose-table:border-zinc-200',
   'prose-thead:bg-zinc-50 prose-th:px-3 prose-th:py-2 prose-th:text-left prose-th:text-xs prose-th:uppercase prose-th:tracking-[0.18em] prose-th:text-zinc-500',
   'prose-td:px-3 prose-td:py-2 prose-td:text-sm prose-td:text-zinc-700',
+].join(' ');
+
+const reportProseClassName = [
+  proseClassName,
+  'prose-h1:mb-5 prose-h1:text-2xl prose-h1:leading-tight',
+  'prose-h2:mt-8 prose-h2:border-t prose-h2:border-zinc-200 prose-h2:pt-5 prose-h2:text-lg prose-h2:leading-7',
+  'prose-h3:mt-5 prose-h3:text-base prose-h3:leading-6 prose-h3:text-zinc-900',
+  'prose-ul:my-3 prose-ul:space-y-2 prose-ol:my-3 prose-ol:space-y-2',
+  'prose-li:pl-1 marker:prose-li:text-teal-600',
+  'prose-hr:border-zinc-200',
 ].join(' ');
 
 const plainTextClassName = [
@@ -60,7 +71,7 @@ function looksLikeMarkdown(input: string): boolean {
   return false;
 }
 
-export function MarkdownContent({ content, empty, className, mode = 'auto' }: MarkdownContentProps) {
+export function MarkdownContent({ content, empty, className, mode = 'auto', variant = 'default' }: MarkdownContentProps) {
   const value = (content || '').trim();
   if (!value) {
     return (
@@ -82,7 +93,7 @@ export function MarkdownContent({ content, empty, className, mode = 'auto' }: Ma
   }
 
   return (
-    <div className={joinClasses(proseClassName, className)}>
+    <div className={joinClasses(variant === 'report' ? reportProseClassName : proseClassName, className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeSanitize]}

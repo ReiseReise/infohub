@@ -1,18 +1,33 @@
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { ExternalLink, RefreshCw, Search, Star, CheckCheck, FileText, Loader2, Headphones, ChevronDown, SkipForward } from 'lucide-react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, type FeedItemRecord, type FetchStatusResponse, type ItemScoreBreakdownPayload, type ItemsStats, type PreferenceProfileSummary, type SourceRecord } from '../../lib/api';
+import {
+  buildReprocessStageNotice,
+  getDetailEmptyState,
+  getReprocessStageActionState,
+  getScoreBreakdownDiagnostic,
+  qualityDecisionLabel,
+  shouldRefreshScoreBreakdownAfterEnrich,
+  shouldRefreshScoreBreakdownAfterReprocess,
+  type FeedDetailEmptyState,
+  type FeedReprocessStage,
+  type NoticeTone,
+} from '../../lib/feed-diagnostics';
+import { feedDetailHeaderClassName, resolveFeedDetailOrderClassName, shouldAutoScrollFeedDetailIntoView } from '../../lib/feed-layout';
 import { MarkdownContent } from '../../components/MarkdownContent';
 
 type FeedItem = FeedItemRecord;
 type FeedSortMode = 'latest' | 'priority';
+type ReprocessStage = FeedReprocessStage;
+type NoticeState = string | { message: string; tone: NoticeTone };
 
 type DetailSectionKey = 'summary' | 'original' | 'translation' | 'transcript' | 'knowledge';
 type DetailSection = {
   key: DetailSectionKey;
   label: string;
   content?: string | null;
-  emptyMessage: string;
+  emptyState: FeedDetailEmptyState;
   isEmpty?: boolean;
   renderMode?: 'auto' | 'markdown' | 'plain';
 };
@@ -42,13 +57,15 @@ function hasReadableText(value?: string | null): boolean {
 }
 
 function contentStatusLabel(item?: FeedItem | null) {
+  if (item?.contentBasis === 'snippet') return '仅有摘要片段';
+  if (item?.contentBasis === 'title') return '仅有标题信息';
   switch (item?.contentStatus) {
     case 'fetching':
       return '正文补抓中';
     case 'ready':
       return hasReadableText(item?.content) ? '正文已缓存' : '仅有片段';
     case 'degraded':
-      return item?.contentBasis === 'snippet' ? '仅有摘要片段' : '仅有标题信息';
+      return '仅有片段';
     case 'failed':
       return '正文抓取失败';
     case 'unavailable':
@@ -83,9 +100,9 @@ function summaryStatusLabel(item?: FeedItem | null) {
     case 'ready':
       return basisLabel ? `摘要已生成 · 基于${basisLabel}` : '摘要已生成';
     case 'failed':
-      return '摘要失败';
+      return item?.summaryReason || '摘要失败';
     case 'skipped':
-      return '摘要已跳过';
+      return item?.summaryReason || '摘要已跳过';
     default:
       return '等待摘要';
   }
@@ -205,6 +222,49 @@ const PROCESSING_PROFILE_LABELS: Record<string, string> = {
   monitor: '仅监控',
 };
 
+const REPROCESS_STAGE_LABELS: Record<ReprocessStage, string> = {
+  content: '正文',
+  quality: '质检',
+  scoring: '评分',
+  summary: '摘要',
+  translation: '翻译',
+  all: '全链路',
+};
+
+const DETAIL_REPROCESS_ACTIONS: Array<{ stage: ReprocessStage; label: string; hint: string }> = [
+  { stage: 'content', label: '补正文', hint: '重新抓取正文，不自动重写摘要' },
+  { stage: 'quality', label: '重跑质检', hint: '重新判断噪声/可读性' },
+  { stage: 'scoring', label: '重跑评分', hint: '只刷新 AI 评分' },
+  { stage: 'summary', label: '重跑摘要', hint: '用当前内容依据重写摘要' },
+  { stage: 'translation', label: '重跑翻译', hint: '重译摘要/正文' },
+];
+
+const SCORE_DIAGNOSTIC_CLASS_NAMES = {
+  ok: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+  warning: 'border-amber-200 bg-amber-50 text-amber-800',
+  danger: 'border-rose-200 bg-rose-50 text-rose-800',
+  neutral: 'border-zinc-200 bg-zinc-50 text-zinc-700',
+} as const;
+
+const DETAIL_EMPTY_STATE_CLASS_NAMES = {
+  neutral: 'border-zinc-200 bg-zinc-50 text-zinc-700',
+  warning: 'border-amber-200 bg-amber-50 text-amber-800',
+  danger: 'border-rose-200 bg-rose-50 text-rose-800',
+} as const;
+
+const DAILY_REPORT_DIAGNOSTIC_CLASS_NAMES = {
+  ok: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+  warning: 'border-amber-200 bg-amber-50 text-amber-800',
+  danger: 'border-rose-200 bg-rose-50 text-rose-800',
+  neutral: 'border-zinc-200 bg-zinc-50 text-zinc-700',
+} as const;
+
+const NOTICE_CLASS_NAMES: Record<NoticeTone, string> = {
+  success: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  warning: 'border-amber-200 bg-amber-50 text-amber-800',
+  danger: 'border-rose-200 bg-rose-50 text-rose-700',
+};
+
 function sourceTierBadge(item?: FeedItem | null) {
   switch (item?.sourceTier) {
     case 'T1':
@@ -271,20 +331,25 @@ export function Feed() {
   const [stats, setStats] = useState<ItemsStats | null>(null);
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<NoticeState | null>(null);
+  const [detailActionNotice, setDetailActionNotice] = useState<NoticeState | null>(null);
+  const [stageNotice, setStageNotice] = useState<NoticeState | null>(null);
   const [fetching, setFetching] = useState(false);
   const [audioSubmittingId, setAudioSubmittingId] = useState<string | null>(null);
   const [aiReprocessingId, setAiReprocessingId] = useState<string | null>(null);
   const [enrichingId, setEnrichingId] = useState<string | null>(null);
+  const [stageReprocessing, setStageReprocessing] = useState<{ itemId: string; stage: ReprocessStage } | null>(null);
   const [autoEnrichedIds, setAutoEnrichedIds] = useState<Record<string, boolean>>({});
   const [activeDetailTab, setActiveDetailTab] = useState<DetailSectionKey>('summary');
   const [scoreBreakdown, setScoreBreakdown] = useState<ItemScoreBreakdownPayload | null>(null);
   const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [feedbackSubmittingType, setFeedbackSubmittingType] = useState<string | null>(null);
+  const [feedbackNotice, setFeedbackNotice] = useState<NoticeState | null>(null);
   const [selectedFeedbackTags, setSelectedFeedbackTags] = useState<string[]>([]);
   const [preferenceSummary, setPreferenceSummary] = useState<PreferenceProfileSummary | null>(null);
   const [fetchStatus, setFetchStatus] = useState<FetchStatusResponse | null>(null);
   const [dueRefreshing, setDueRefreshing] = useState(false);
+  const detailPanelRef = useRef<HTMLDivElement | null>(null);
   const limit = 20;
 
   const fetchItems = useCallback(async () => {
@@ -531,6 +596,9 @@ export function Feed() {
 
   const handleOpenDetail = async (item: FeedItem) => {
     setSelectedItem(item);
+    setDetailActionNotice(null);
+    setStageNotice(null);
+    setFeedbackNotice(null);
     const queryString = searchParams.toString();
     navigate(`/feed/${item.id}${queryString ? `?${queryString}` : ''}`);
     void fetchDetail(item.id, true);
@@ -546,6 +614,7 @@ export function Feed() {
     setFeedbackSubmittingType(feedbackType);
     setError(null);
     setNotice(null);
+    setFeedbackNotice(null);
     try {
       const resp = await api.items.feedback(item.id, { feedbackType, reasonTags });
       const latestFeedback = resp.data;
@@ -556,9 +625,12 @@ export function Feed() {
       await fetchScoreBreakdown(item.id);
       setSelectedFeedbackTags([]);
       const tagText = reasonTags.length > 0 ? ` · 标签：${reasonTags.join('、')}` : '';
-      setNotice(`已记录反馈：${FEEDBACK_ACTIONS.find((action) => action.type === latestFeedback.feedbackType)?.label || latestFeedback.feedbackType}${tagText}`);
+      setFeedbackNotice(`已记录反馈：${FEEDBACK_ACTIONS.find((action) => action.type === latestFeedback.feedbackType)?.label || latestFeedback.feedbackType}${tagText}`);
     } catch (err) {
-      setError((err as Error).message || '记录反馈失败');
+      setFeedbackNotice({
+        message: (err as Error).message || '记录反馈失败',
+        tone: 'danger',
+      });
     } finally {
       setFeedbackSubmittingType(null);
     }
@@ -634,15 +706,45 @@ export function Feed() {
     setAiReprocessingId(item.id);
     setError(null);
     setNotice(null);
+    setDetailActionNotice(null);
     try {
       const resp = await api.items.reprocessAi(item.id);
-      setNotice(`AI 重处理完成：评分 ${resp.scored}，摘要 ${resp.summarized}，翻译 ${resp.translated}`);
+      setDetailActionNotice(`AI 重处理完成：评分 ${resp.scored}，摘要 ${resp.summarized}，翻译 ${resp.translated}`);
       await fetchItems();
       await fetchDetail(item.id);
+      if (shouldRefreshScoreBreakdownAfterReprocess('full-ai')) {
+        await fetchScoreBreakdown(item.id);
+      }
     } catch (err) {
-      setError((err as Error).message || '重处理失败');
+      setDetailActionNotice({
+        message: (err as Error).message || '重处理失败',
+        tone: 'danger',
+      });
     } finally {
       setAiReprocessingId(null);
+    }
+  };
+
+  const handleReprocessStage = async (item: FeedItem, stage: ReprocessStage) => {
+    setStageReprocessing({ itemId: item.id, stage });
+    setError(null);
+    setNotice(null);
+    setStageNotice(null);
+    try {
+      const resp = await api.items.reprocessBatch({ itemId: item.id, stage, limit: 1 });
+      setStageNotice(buildReprocessStageNotice(stage, resp));
+      await fetchItems();
+      await fetchDetail(item.id, true);
+      if (shouldRefreshScoreBreakdownAfterReprocess(stage)) {
+        await fetchScoreBreakdown(item.id);
+      }
+    } catch (err) {
+      setStageNotice({
+        message: (err as Error).message || `${REPROCESS_STAGE_LABELS[stage]}修复失败`,
+        tone: 'danger',
+      });
+    } finally {
+      setStageReprocessing((prev) => (prev?.itemId === item.id && prev.stage === stage ? null : prev));
     }
   };
 
@@ -655,6 +757,7 @@ export function Feed() {
     if (!options.silent) {
       setNotice(null);
       setError(null);
+      setDetailActionNotice(null);
     }
     try {
       const resp = await api.items.enrich(item.id);
@@ -665,16 +768,24 @@ export function Feed() {
       if (!options.silent) {
         const warningText = resp.warnings?.filter(Boolean).join('；');
         const basisText = resp.contentBasis === 'content' ? '正文' : resp.contentBasis === 'snippet' ? '片段' : '标题';
-        setNotice(warningText || `补全完成：正文 ${resp.contentFetched ? '已补抓' : '未变化'}（当前基于${basisText}），评分 ${resp.scored}，摘要 ${resp.summarized}，翻译 ${resp.translated}`);
+        setDetailActionNotice(warningText
+          ? { message: warningText, tone: 'warning' }
+          : `补全完成：正文 ${resp.contentFetched ? '已补抓' : '未变化'}（当前基于${basisText}），评分 ${resp.scored}，摘要 ${resp.summarized}，翻译 ${resp.translated}`);
+      }
+      if (shouldRefreshScoreBreakdownAfterEnrich(resp) && selectedId === item.id) {
+        await fetchScoreBreakdown(item.id);
       }
     } catch (err) {
       if (!options.silent) {
-        setError((err as Error).message || '补全失败');
+        setDetailActionNotice({
+          message: (err as Error).message || '补全失败',
+          tone: 'danger',
+        });
       }
     } finally {
       setEnrichingId((prev) => (prev === item.id ? null : prev));
     }
-  }, []);
+  }, [fetchScoreBreakdown, selectedId]);
 
   useEffect(() => {
     if (!selectedItem || enrichingId === selectedItem.id || detailLoading) return;
@@ -751,6 +862,19 @@ export function Feed() {
     return { label: '待处理', className: 'bg-zinc-100 text-zinc-600' };
   };
 
+  const scoreDiagnostic = useMemo(() => getScoreBreakdownDiagnostic({
+    aiScore: scoreBreakdown?.aiScore ?? selectedItem?.aiScore,
+    breakdowns: scoreBreakdown?.breakdowns,
+  }), [scoreBreakdown, selectedItem?.aiScore]);
+
+  const skippedReprocessActions = useMemo(() => {
+    if (!selectedItem) return [];
+    return DETAIL_REPROCESS_ACTIONS.map((action) => ({
+      action,
+      state: getReprocessStageActionState(action.stage, selectedItem),
+    })).filter((entry) => entry.state.disabled && entry.state.reason);
+  }, [selectedItem]);
+
   const detailSections = useMemo(() => {
     if (!selectedItem) return [];
     const summaryText = normalizeAiSummary(selectedItem.aiSummary);
@@ -759,7 +883,7 @@ export function Feed() {
         key: 'summary',
         label: '摘要',
         content: summaryText,
-        emptyMessage: `当前还没有摘要结果。${summaryStatusLabel(selectedItem)}${selectedItem.filterReason ? `；${selectedItem.filterReason}` : ''}`,
+        emptyState: getDetailEmptyState('summary', selectedItem),
         isEmpty: !summaryText,
         renderMode: 'auto',
       },
@@ -767,7 +891,7 @@ export function Feed() {
         key: 'original',
         label: '原文',
         content: selectedItem.content || selectedItem.snippet,
-        emptyMessage: selectedItem.contentError || `当前没有缓存正文。${contentStatusLabel(selectedItem)}`,
+        emptyState: getDetailEmptyState('original', selectedItem),
         isEmpty: !(hasReadableText(selectedItem.content) || hasReadableText(selectedItem.snippet)),
         renderMode: 'plain',
       },
@@ -775,7 +899,7 @@ export function Feed() {
         key: 'translation',
         label: '翻译',
         content: selectedItem.aiTranslation,
-        emptyMessage: translationStatusLabel(selectedItem),
+        emptyState: getDetailEmptyState('translation', selectedItem),
         isEmpty: !hasReadableText(selectedItem.aiTranslation),
         renderMode: 'plain',
       },
@@ -783,7 +907,7 @@ export function Feed() {
         key: 'transcript',
         label: '转写',
         content: selectedItem.transcript,
-        emptyMessage: '当前还没有音频转写结果。',
+        emptyState: getDetailEmptyState('transcript', selectedItem),
         isEmpty: !hasReadableText(selectedItem.transcript),
         renderMode: 'plain',
       },
@@ -791,7 +915,7 @@ export function Feed() {
         key: 'knowledge',
         label: '知识',
         content: selectedItem.knowledge,
-        emptyMessage: '当前还没有知识提炼结果。',
+        emptyState: getDetailEmptyState('knowledge', selectedItem),
         isEmpty: !hasReadableText(selectedItem.knowledge),
         renderMode: 'markdown',
       },
@@ -808,6 +932,16 @@ export function Feed() {
 
   useEffect(() => {
     setSelectedFeedbackTags([]);
+    setDetailActionNotice(null);
+    setStageNotice(null);
+    setFeedbackNotice(null);
+  }, [selectedItem?.id]);
+
+  useEffect(() => {
+    if (!shouldAutoScrollFeedDetailIntoView(Boolean(selectedItem))) return;
+    window.requestAnimationFrame(() => {
+      detailPanelRef.current?.scrollIntoView({ block: 'start' });
+    });
   }, [selectedItem?.id]);
 
   const selectedHost = useMemo(() => {
@@ -825,6 +959,14 @@ export function Feed() {
   );
 
   const activeDetail = detailSections.find((section) => section.key === activeDetailTab) || detailSections[0];
+  const noticeMessage = typeof notice === 'string' ? notice : notice?.message;
+  const noticeTone: NoticeTone = typeof notice === 'string' || !notice ? 'success' : notice.tone;
+  const detailActionNoticeMessage = typeof detailActionNotice === 'string' ? detailActionNotice : detailActionNotice?.message;
+  const detailActionNoticeTone: NoticeTone = typeof detailActionNotice === 'string' || !detailActionNotice ? 'success' : detailActionNotice.tone;
+  const stageNoticeMessage = typeof stageNotice === 'string' ? stageNotice : stageNotice?.message;
+  const stageNoticeTone: NoticeTone = typeof stageNotice === 'string' || !stageNotice ? 'success' : stageNotice.tone;
+  const feedbackNoticeMessage = typeof feedbackNotice === 'string' ? feedbackNotice : feedbackNotice?.message;
+  const feedbackNoticeTone: NoticeTone = typeof feedbackNotice === 'string' || !feedbackNotice ? 'success' : feedbackNotice.tone;
 
   const getCollectorLabel = (item?: FeedItem | null) => {
     if (item?.sourceCollectorType === 'changedetection') return '网页变更';
@@ -1021,9 +1163,9 @@ export function Feed() {
           {error}
         </div>
       )}
-      {notice && (
-        <div className="mb-4 px-3 py-2 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg">
-          {notice}
+      {noticeMessage && (
+        <div className={`mb-4 rounded-lg border px-3 py-2 text-sm ${NOTICE_CLASS_NAMES[noticeTone]}`}>
+          {noticeMessage}
         </div>
       )}
       {fetchStatus?.freshnessStatus && fetchStatus.freshnessStatus !== 'fresh' && (
@@ -1213,7 +1355,7 @@ export function Feed() {
           )}
         </div>
 
-        <div className="max-h-[72vh] overflow-y-auto rounded-[32px] border border-zinc-200/80 bg-white p-5 shadow-[0_24px_80px_-52px_rgba(15,23,42,0.45)]">
+        <div ref={detailPanelRef} className={`max-h-[72vh] overflow-y-auto rounded-[32px] border border-zinc-200/80 bg-white p-5 shadow-[0_24px_80px_-52px_rgba(15,23,42,0.45)] ${resolveFeedDetailOrderClassName(Boolean(selectedItem))}`}>
           {detailLoading ? (
             <div className="text-center py-20 text-zinc-400">加载详情...</div>
           ) : selectedItem ? (
@@ -1224,7 +1366,7 @@ export function Feed() {
                 </div>
               )}
               <div className="sticky top-0 z-10 -mx-5 -mt-5 mb-5 border-b border-zinc-100 bg-white/92 px-5 py-4 backdrop-blur">
-              <div className="flex items-start justify-between gap-3">
+              <div className={feedDetailHeaderClassName}>
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[10px] uppercase tracking-[0.24em] text-teal-700/70">{getCollectorLabel(selectedItem)}</span>
@@ -1306,6 +1448,12 @@ export function Feed() {
               </div>
               </div>
 
+              {detailActionNoticeMessage && (
+                <div className={`mb-3 rounded-xl border px-3 py-2 text-xs leading-5 ${NOTICE_CLASS_NAMES[detailActionNoticeTone]}`}>
+                  {detailActionNoticeMessage}
+                </div>
+              )}
+
               <div className="mt-3 flex items-center gap-2 flex-wrap">
                 {selectedItem.aiScore != null && (
                   <span className="text-[11px] px-2 py-0.5 rounded-full bg-zinc-100 text-zinc-700">AI评分 {selectedItem.aiScore}</span>
@@ -1346,6 +1494,100 @@ export function Feed() {
                     {axis}
                   </span>
                 ))}
+              </div>
+
+              <div className="mt-3 grid gap-2 rounded-2xl border border-zinc-200 bg-zinc-50/80 px-3 py-3 text-xs text-zinc-600 sm:grid-cols-4">
+                <div>
+                  内容依据：
+                  <span className="ml-1 font-medium text-zinc-900">{contentBasisLabel(selectedItem) || contentStatusLabel(selectedItem)}</span>
+                </div>
+                <div>
+                  质检：
+                  <span className="ml-1 font-medium text-zinc-900">
+                    {qualityDecisionLabel(selectedItem)}
+                    {selectedItem.qualityScore != null ? ` ${Number(selectedItem.qualityScore).toFixed(0)}分` : ''}
+                  </span>
+                </div>
+                <div>
+                  摘要：
+                  <span className="ml-1 font-medium text-zinc-900">{summaryStatusLabel(selectedItem)}</span>
+                </div>
+                <div>
+                  翻译：
+                  <span className="ml-1 font-medium text-zinc-900">{translationStatusLabel(selectedItem)}</span>
+                </div>
+              </div>
+
+              {selectedItem.dailyReportDiagnostic && (
+                <div className={`mt-3 rounded-2xl border px-4 py-3 text-sm ${DAILY_REPORT_DIAGNOSTIC_CLASS_NAMES[selectedItem.dailyReportDiagnostic.tone] || DAILY_REPORT_DIAGNOSTIC_CLASS_NAMES.neutral}`}>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] opacity-75">日报解释</div>
+                    <div className="rounded-full bg-white/65 px-2.5 py-1 text-xs font-medium">{selectedItem.dailyReportDiagnostic.label}</div>
+                  </div>
+                  <div className="mt-2 text-sm leading-6 font-medium">{selectedItem.dailyReportDiagnostic.reason}</div>
+                  {selectedItem.dailyReportDiagnostic.detail && selectedItem.dailyReportDiagnostic.detail !== selectedItem.dailyReportDiagnostic.reason && (
+                    <div className="mt-1 text-xs leading-5 opacity-90">{selectedItem.dailyReportDiagnostic.detail}</div>
+                  )}
+                  <div className="mt-2 text-xs leading-5 opacity-90">
+                    下一步：{selectedItem.dailyReportDiagnostic.action}
+                  </div>
+                  {(selectedItem.dailyReportDiagnostic.diagnosticBasisLabel || selectedItem.dailyReportDiagnostic.snapshotGeneratedAt) && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] leading-5 opacity-75">
+                      {selectedItem.dailyReportDiagnostic.diagnosticBasisLabel && (
+                        <span>{selectedItem.dailyReportDiagnostic.diagnosticBasisLabel}</span>
+                      )}
+                      {selectedItem.dailyReportDiagnostic.snapshotGeneratedAt && (
+                        <span>{new Date(selectedItem.dailyReportDiagnostic.snapshotGeneratedAt).toLocaleString('zh-CN')}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-3 rounded-2xl border border-zinc-200 bg-white px-4 py-3">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <div className="text-xs font-semibold text-zinc-800">阶段修复</div>
+                    <div className="mt-1 text-[11px] leading-5 text-zinc-500">
+                      对当前条目单独重跑一个阶段，结果会回写到详情和列表。
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {DETAIL_REPROCESS_ACTIONS.map((action) => {
+                      const busy = stageReprocessing?.itemId === selectedItem.id && stageReprocessing.stage === action.stage;
+                      const actionState = getReprocessStageActionState(action.stage, selectedItem);
+                      return (
+                        <button
+                          key={action.stage}
+                          type="button"
+                          title={actionState.reason ? `${action.hint}；${actionState.reason}` : action.hint}
+                          onClick={() => {
+                            void handleReprocessStage(selectedItem, action.stage);
+                          }}
+                          disabled={Boolean(stageReprocessing) || actionState.disabled}
+                          className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+                        >
+                          {busy ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                          {action.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                {skippedReprocessActions.length > 0 && (
+                  <div className="mt-3 space-y-1 text-[11px] leading-5 text-zinc-500">
+                    {skippedReprocessActions.map((entry) => (
+                      <div key={entry.action.stage}>
+                        {entry.action.label}已按策略跳过：{entry.state.reason}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {stageNoticeMessage && (
+                  <div className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-5 ${NOTICE_CLASS_NAMES[stageNoticeTone]}`}>
+                    {stageNoticeMessage}
+                  </div>
+                )}
               </div>
 
               {selectedItem.eventCluster && (
@@ -1408,6 +1650,11 @@ export function Feed() {
                     </span>
                   </div>
                 </div>
+                {feedbackNoticeMessage && (
+                  <div className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-5 ${NOTICE_CLASS_NAMES[feedbackNoticeTone]}`}>
+                    {feedbackNoticeMessage}
+                  </div>
+                )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   {FEEDBACK_ACTIONS.map((action) => {
                     const active = selectedItem.latestFeedbackType === action.type;
@@ -1482,37 +1729,49 @@ export function Feed() {
                 </div>
                 {breakdownLoading ? (
                   <div className="mt-3 text-sm text-zinc-400">评分拆解加载中...</div>
-                ) : scoreBreakdown?.breakdowns?.length ? (
-                  <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
-                    {scoreBreakdown.breakdowns.map((entry) => (
-                      <div key={entry.id} className="rounded-xl border border-zinc-100 bg-zinc-50 px-3 py-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-sm font-medium text-zinc-800">{entry.skillName || '默认评分'}</div>
-                          <div className="text-xs text-zinc-500">分数 {entry.score ?? '—'} · 置信 {entry.confidence != null ? Number(entry.confidence).toFixed(2) : '—'}</div>
-                        </div>
-                        <div className="mt-1 text-xs text-zinc-500">决策：{entry.decision || '—'}{entry.skillWeight != null ? ` · 权重 ${entry.skillWeight}` : ''}</div>
-                        {entry.reasons.length > 0 && (
-                          <ul className="mt-2 space-y-1 text-xs text-zinc-600">
-                            {entry.reasons.slice(0, 4).map((reason) => (
-                              <li key={reason} className="leading-5">• {reason}</li>
-                            ))}
-                          </ul>
-                        )}
-                        {(entry.matchedSignals.length > 0 || entry.riskFlags.length > 0) && (
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {entry.matchedSignals.slice(0, 4).map((tag) => (
-                              <span key={tag} className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700">{tag}</span>
-                            ))}
-                            {entry.riskFlags.slice(0, 3).map((tag) => (
-                              <span key={tag} className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] text-rose-700">{tag}</span>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
                 ) : (
-                  <div className="mt-3 text-sm text-zinc-500">当前还没有评分技能拆解结果；旧数据可能仍是单一评分，重跑 AI 后会逐步补齐。</div>
+                  <>
+                    <div className={`mt-3 rounded-xl border px-3 py-2 text-xs leading-5 ${SCORE_DIAGNOSTIC_CLASS_NAMES[scoreDiagnostic.tone]}`}>
+                      <span className="font-semibold">{scoreDiagnostic.title}</span>
+                      <span> · {scoreDiagnostic.description}</span>
+                    </div>
+                    {scoreBreakdown?.breakdowns?.length ? (
+                      <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-2">
+                        {scoreBreakdown.breakdowns.map((entry) => (
+                          <div key={entry.id} className="rounded-xl border border-zinc-100 bg-zinc-50 px-3 py-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-sm font-medium text-zinc-800">{entry.skillName || '默认评分'}</div>
+                              <div className="text-xs text-zinc-500">分数 {entry.score ?? '—'} · 置信 {entry.confidence != null ? Number(entry.confidence).toFixed(2) : '—'}</div>
+                            </div>
+                            <div className="mt-1 text-xs text-zinc-500">决策：{entry.decision || '—'}{entry.skillWeight != null ? ` · 权重 ${entry.skillWeight}` : ''}</div>
+                            {entry.reasons.length > 0 && (
+                              <ul className="mt-2 space-y-1 text-xs text-zinc-600">
+                                {entry.reasons.slice(0, 4).map((reason) => (
+                                  <li key={reason} className="leading-5">• {reason}</li>
+                                ))}
+                              </ul>
+                            )}
+                            {(entry.matchedSignals.length > 0 || entry.riskFlags.length > 0) && (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {entry.matchedSignals.slice(0, 4).map((tag) => (
+                                  <span key={tag} className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700">{tag}</span>
+                                ))}
+                                {entry.riskFlags.slice(0, 3).map((tag) => (
+                                  <span key={tag} className="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] text-rose-700">{tag}</span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-3 rounded-xl border border-zinc-100 bg-zinc-50 px-3 py-3 text-sm text-zinc-600">
+                        {scoreDiagnostic.kind === 'legacy_single_score'
+                          ? '当前只有总分，没有 Skill 级理由。点击“重跑评分”可以补齐拆解。'
+                          : '评分完成前，这里不会显示 Skill 拆解。'}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -1528,12 +1787,14 @@ export function Feed() {
                 </div>
               )}
 
-              {(selectedItem.contentError || selectedItem.translationReason || selectedItem.blockedReason) && (
+              {(selectedItem.contentError || selectedItem.summaryReason || selectedItem.translationReason || selectedItem.blockedReason) && (
                 <div className="mt-3 rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-700">
                   {selectedItem.contentError ? `正文诊断：${selectedItem.contentError}` : ''}
-                  {selectedItem.contentError && (selectedItem.translationReason || selectedItem.blockedReason) ? '；' : ''}
+                  {selectedItem.contentError && (selectedItem.summaryReason || selectedItem.translationReason || selectedItem.blockedReason) ? '；' : ''}
+                  {selectedItem.summaryReason ? `摘要诊断：${selectedItem.summaryReason}` : ''}
+                  {(selectedItem.contentError || selectedItem.summaryReason) && (selectedItem.translationReason || selectedItem.blockedReason) ? '；' : ''}
                   {selectedItem.translationReason ? `翻译诊断：${selectedItem.translationReason}` : ''}
-                  {(selectedItem.contentError || selectedItem.translationReason) && selectedItem.blockedReason ? '；' : ''}
+                  {(selectedItem.contentError || selectedItem.summaryReason || selectedItem.translationReason) && selectedItem.blockedReason ? '；' : ''}
                   {selectedItem.blockedReason ? `抓取阻断：${selectedItem.blockedReason}` : ''}
                 </div>
               )}
@@ -1558,7 +1819,13 @@ export function Feed() {
                 <div className="mb-4 text-xs uppercase tracking-[0.24em] text-zinc-400">{activeDetail?.label || '内容'}</div>
                 <MarkdownContent
                   content={activeDetail?.content}
-                  empty={activeDetail?.emptyMessage || '暂无内容'}
+                  empty={activeDetail?.emptyState ? (
+                    <div className={`rounded-2xl border px-4 py-4 text-sm leading-6 ${DETAIL_EMPTY_STATE_CLASS_NAMES[activeDetail.emptyState.tone]}`}>
+                      <div className="font-semibold">{activeDetail.emptyState.title}</div>
+                      <div className="mt-1">{activeDetail.emptyState.reason}</div>
+                      <div className="mt-2 text-xs opacity-90">建议动作：{activeDetail.emptyState.action}</div>
+                    </div>
+                  ) : '暂无内容'}
                   mode={activeDetail?.renderMode || 'auto'}
                   className="min-w-0"
                 />

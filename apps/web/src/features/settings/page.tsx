@@ -18,12 +18,16 @@ import {
   type AudioQuotaSnapshot,
   type FetchQueueDiagnosticResponse,
   type FetchStatusResponse,
+  type FallbackScoringRecoverySummary,
   type ItemsStats,
   type NetworkDiagnosticResponse,
   type QueueJobDiagnostic,
   type PreferenceProfileRecord,
   type PreferenceProfileSummary,
   type RetentionRunRecord,
+  type ScoringModelProbeSummary,
+  type ScoringModelRemediationApplyResult,
+  type ScoringSkillHealthSummary,
   type ScoringSkillRecord,
   type ServiceDiagnostic,
   type UserQuota,
@@ -376,6 +380,11 @@ export function Settings() {
   const [retentionStatus, setRetentionStatus] = useState<RetentionRunRecord | null>(null);
   const [storageStatus, setStorageStatus] = useState<AdminStorageStatus | null>(null);
   const [scoringSkills, setScoringSkills] = useState<ScoringSkillRecord[]>([]);
+  const [scoringSkillHealth, setScoringSkillHealth] = useState<ScoringSkillHealthSummary | null>(null);
+  const [scoringModelProbe, setScoringModelProbe] = useState<ScoringModelProbeSummary | null>(null);
+  const [scoringModelRepair, setScoringModelRepair] = useState<ScoringModelRemediationApplyResult | null>(null);
+  const [fallbackScoringRecovery, setFallbackScoringRecovery] = useState<FallbackScoringRecoverySummary | null>(null);
+  const [scoringProbeLoading, setScoringProbeLoading] = useState(false);
   const [preferenceProfile, setPreferenceProfile] = useState<PreferenceProfileRecord | null>(null);
   const [preferenceSummary, setPreferenceSummary] = useState<PreferenceProfileSummary | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
@@ -648,7 +657,7 @@ export function Settings() {
         api.audio.getTaskModels().catch(() => ({ llm_models: [], asr_models: [] })),
         isAdmin ? api.admin.listPromptTemplates().catch(() => []) : Promise.resolve([]),
         isAdmin ? api.admin.listModelConfigs().catch(() => []) : Promise.resolve([]),
-        api.scoringSkills.list().catch(() => ({ data: [] as ScoringSkillRecord[] })),
+        api.scoringSkills.list().catch(() => ({ data: [] as ScoringSkillRecord[], health: null as ScoringSkillHealthSummary | null })),
         api.preferences.profile().catch(() => ({ data: null as PreferenceProfileRecord | null, summary: null as PreferenceProfileSummary | null })),
       ]);
 
@@ -665,6 +674,9 @@ export function Settings() {
       setAdminPromptTemplates(promptResp || []);
       setAdminModelConfigs(adminModelResp || []);
       setScoringSkills(skillResp.data || []);
+      setScoringSkillHealth(skillResp.health || null);
+      setScoringModelProbe(null);
+      setScoringModelRepair(null);
       setPreferenceProfile(profileResp.data || null);
       setPreferenceSummary(profileResp.summary || null);
     } catch (err) {
@@ -751,6 +763,7 @@ export function Settings() {
       await api.scoringSkills.create({ createDefault: true });
       const skillsResp = await api.scoringSkills.list();
       setScoringSkills(skillsResp.data || []);
+      setScoringSkillHealth(skillsResp.health || null);
       setNotice('三个默认评分 Skills 已创建');
     } catch (err) {
       setError((err as Error).message || '创建默认评分技能失败');
@@ -766,6 +779,7 @@ export function Settings() {
       await api.scoringSkills.create({ name: '新的评分技能', status: 'draft', weight: 1 });
       const skillsResp = await api.scoringSkills.list();
       setScoringSkills(skillsResp.data || []);
+      setScoringSkillHealth(skillsResp.health || null);
       setNotice('已新增评分技能草稿');
     } catch (err) {
       setError((err as Error).message || '创建评分技能失败');
@@ -781,6 +795,7 @@ export function Settings() {
       await api.scoringSkills.toggle(skillId);
       const skillsResp = await api.scoringSkills.list();
       setScoringSkills(skillsResp.data || []);
+      setScoringSkillHealth(skillsResp.health || null);
       setNotice('评分技能状态已更新');
     } catch (err) {
       setError((err as Error).message || '更新评分技能失败');
@@ -796,6 +811,7 @@ export function Settings() {
       await api.scoringSkills.update(skill.id, patch);
       const skillsResp = await api.scoringSkills.list();
       setScoringSkills(skillsResp.data || []);
+      setScoringSkillHealth(skillsResp.health || null);
       setNotice(`已保存技能：${patch.name || skill.name}`);
     } catch (err) {
       setError((err as Error).message || '保存评分技能失败');
@@ -811,6 +827,7 @@ export function Settings() {
       await api.scoringSkills.delete(skillId);
       const skillsResp = await api.scoringSkills.list();
       setScoringSkills(skillsResp.data || []);
+      setScoringSkillHealth(skillsResp.health || null);
       setNotice('评分技能已删除');
     } catch (err) {
       setError((err as Error).message || '删除评分技能失败');
@@ -983,9 +1000,9 @@ export function Settings() {
     }
   };
 
-  const applyModelToScenes = async (types: AiConfigType[], label: string) => {
+  const applyModelToScenes = async (types: AiConfigType[], label: string, modelConfigIdOverride?: string | null) => {
     if (!isAdmin) return;
-    const modelConfigId = bulkModelConfigId || defaultLlmModel?.id || '';
+    const modelConfigId = modelConfigIdOverride || bulkModelConfigId || defaultLlmModel?.id || '';
     if (!modelConfigId) {
       setError('请先在模型仓库创建并启用一个 LLM 模型');
       return;
@@ -1000,6 +1017,57 @@ export function Settings() {
       setNotice(`${label} 已切换到 ${modelDisplayName(selectedModel)}`);
     } catch (err) {
       setError((err as Error).message || '批量应用模型失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const probeRecommendedScoringModel = async () => {
+    const modelConfigId = scoringSkillHealth?.remediation?.recommendedModelConfigId || '';
+    if (!isAdmin || !modelConfigId) return;
+    setScoringProbeLoading(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.scoringSkills.probeModel({ modelConfigId, limit: 2 });
+      setScoringModelProbe(result.data);
+      setNotice(result.data.message);
+    } catch (err) {
+      setError((err as Error).message || '验证备用评分模型失败');
+    } finally {
+      setScoringProbeLoading(false);
+    }
+  };
+
+  const applyRecommendedScoringModelAndRepair = async () => {
+    const modelConfigId = scoringSkillHealth?.remediation?.recommendedModelConfigId || '';
+    if (!isAdmin || !modelConfigId || scoringModelProbe?.canSwitch !== true) return;
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.scoringSkills.applyModelRemediation({ modelConfigId, limit: 2 });
+      await refreshBase();
+      setScoringModelRepair(result.data);
+      setNotice(result.data.repair.message);
+    } catch (err) {
+      setError((err as Error).message || '切换并修复评分失败项失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const recoverFallbackScoringItems = async () => {
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.scoringSkills.recoverFallbackScoring({ limit: 5 });
+      await refreshBase();
+      setFallbackScoringRecovery(result.data);
+      setNotice(result.data.message);
+    } catch (err) {
+      setError((err as Error).message || '回收历史兜底评分失败');
     } finally {
       setSaving(false);
     }
@@ -2063,6 +2131,178 @@ export function Settings() {
                   <div className="grid grid-cols-1 xl:grid-cols-[1.05fr_0.95fr] gap-4">
                     <div className="rounded-xl border border-zinc-200 bg-white p-4">
                       {sectionTitle('评分 Skills', '每个 Skill 都是一种精选视角。系统默认提供 3 个预设 Skills，你也可以继续扩展自己的个性化评分视角。')}
+                      {scoringSkillHealth && (
+                        <div className={`mb-4 rounded-xl border px-3 py-3 ${
+                          scoringSkillHealth.status === 'healthy'
+                            ? 'border-emerald-100 bg-emerald-50'
+                            : scoringSkillHealth.status === 'error'
+                              ? 'border-rose-100 bg-rose-50'
+                              : 'border-amber-100 bg-amber-50'
+                        }`}>
+                          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                            <div className="space-y-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-sm font-semibold text-zinc-900">评分健康</span>
+                                <span className={`rounded-full px-2 py-0.5 text-[11px] ${
+                                  scoringSkillHealth.status === 'healthy'
+                                    ? 'bg-emerald-100 text-emerald-700'
+                                    : scoringSkillHealth.status === 'error'
+                                      ? 'bg-rose-100 text-rose-700'
+                                      : 'bg-amber-100 text-amber-700'
+                                }`}>
+                                  {scoringSkillHealth.status === 'healthy' ? '健康' : scoringSkillHealth.status === 'error' ? '异常' : '需复核'}
+                                </span>
+                                <span className="text-xs text-zinc-600">
+                                  启用 {scoringSkillHealth.activeSkillCount}/{scoringSkillHealth.totalSkillCount} · 近期错误 {scoringSkillHealth.recentErrorCount} · 空响应 {scoringSkillHealth.emptyResponseCount} · 重试恢复 {scoringSkillHealth.retryRecoveredCount} · 兜底 {scoringSkillHealth.deterministicFallbackCount} · 熔断观察 {scoringSkillHealth.unstableModelCount}
+                                  {scoringSkillHealth.lastErrorAt ? ` · 最近 ${new Date(scoringSkillHealth.lastErrorAt).toLocaleString('zh-CN')}` : ''}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {scoringSkillHealth.activeSkills.length > 0 ? scoringSkillHealth.activeSkills.map((skill) => (
+                                  <span key={skill.id} className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-zinc-700">
+                                    {skill.name} · 权重 {skill.weight} · {skill.modelConfigId || '场景默认模型'}
+                                  </span>
+                                )) : (
+                                  <span className="text-xs text-rose-700">没有启用中的评分 Skill</span>
+                                )}
+                              </div>
+                              <div className="space-y-1 text-xs leading-5 text-zinc-700">
+                                {scoringSkillHealth.recommendations.map((item) => (
+                                  <div key={item}>{item}</div>
+                                ))}
+                              </div>
+                              {scoringSkillHealth.unstableModels.length > 0 && (
+                                <div className="space-y-1 rounded-lg border border-amber-200 bg-white/75 px-2 py-2">
+                                  {scoringSkillHealth.unstableModels.slice(0, 2).map((model) => (
+                                    <div key={model.modelKey} className="text-[11px] leading-5 text-zinc-700">
+                                      <span className="font-medium text-zinc-900">模型熔断观察</span>
+                                      <span> · {model.modelName || model.modelConfigId || model.modelKey}</span>
+                                      <span> · 可重试失败 {model.retryableFailureCount}</span>
+                                      <span> · 重试恢复 {model.retryRecoveredCount}</span>
+                                      <span> · 兜底 {model.deterministicFallbackCount}</span>
+                                      {model.lastFailureAt ? <span> · 最近失败 {new Date(model.lastFailureAt).toLocaleString('zh-CN')}</span> : null}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {scoringSkillHealth.remediation && scoringSkillHealth.remediation.action !== 'none' && (
+                                <div className="space-y-2 rounded-lg border border-amber-200 bg-white/80 px-2 py-2">
+                                  <div className="text-[11px] leading-5 text-zinc-700">
+                                    <span className="font-medium text-zinc-900">治理建议</span>
+                                    <span> · {scoringSkillHealth.remediation.message}</span>
+                                  </div>
+                                  {scoringSkillHealth.remediation.candidateModels.length > 0 && (
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      {scoringSkillHealth.remediation.candidateModels.slice(0, 2).map((model) => (
+                                        <span key={model.id} className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[11px] text-zinc-700">
+                                          {model.label}
+                                          {model.testStatus ? ` · ${model.testStatus}` : ''}
+                                        </span>
+                                      ))}
+                                      {isAdmin && scoringSkillHealth.remediation.recommendedModelConfigId && (
+                                        <>
+                                          <button
+                                            onClick={() => void probeRecommendedScoringModel()}
+                                            disabled={scoringProbeLoading}
+                                            className="rounded-lg border border-zinc-200 bg-white px-2 py-1 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                                          >
+                                            {scoringProbeLoading ? '验证中...' : '验证备用模型'}
+                                          </button>
+                                          <button
+                                            onClick={() => void applyRecommendedScoringModelAndRepair()}
+                                            disabled={
+                                              saving
+                                              || scoringModelProbe?.modelConfigId !== scoringSkillHealth.remediation.recommendedModelConfigId
+                                              || scoringModelProbe?.canSwitch !== true
+                                            }
+                                            className="rounded-lg border border-amber-300 bg-amber-100 px-2 py-1 text-[11px] font-medium text-amber-900 hover:bg-amber-200 disabled:opacity-50"
+                                          >
+                                            切换并修复样本
+                                          </button>
+                                        </>
+                                      )}
+                                    </div>
+                                  )}
+                                  {scoringModelProbe && scoringModelProbe.modelConfigId === scoringSkillHealth.remediation.recommendedModelConfigId && (
+                                    <div className={`rounded-md border px-2 py-1 text-[11px] leading-5 ${
+                                      scoringModelProbe.canSwitch
+                                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                        : 'border-rose-200 bg-rose-50 text-rose-800'
+                                    }`}>
+                                      <span className="font-medium">验证结果</span>
+                                      <span> · {scoringModelProbe.message}</span>
+                                      <span> · 通过 {scoringModelProbe.passed}/{scoringModelProbe.probed}</span>
+                                      {scoringModelProbe.firstError ? <span> · 首个错误 {scoringModelProbe.firstError}</span> : null}
+                                    </div>
+                                  )}
+                                  {scoringModelRepair && scoringModelRepair.modelConfigId === scoringSkillHealth.remediation.recommendedModelConfigId && (
+                                    <div className={`rounded-md border px-2 py-1 text-[11px] leading-5 ${
+                                      scoringModelRepair.repair.status === 'recovered'
+                                        ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                        : 'border-rose-200 bg-rose-50 text-rose-800'
+                                    }`}>
+                                      <span className="font-medium">修复结果</span>
+                                      <span> · {scoringModelRepair.repair.message}</span>
+                                      <span> · 恢复率 {Math.round(scoringModelRepair.repair.recoveryRate * 100)}%</span>
+                                      {scoringModelRepair.repair.firstError ? <span> · 首个错误 {scoringModelRepair.repair.firstError}</span> : null}
+                                    </div>
+                                  )}
+                                  {scoringSkillHealth.remediation.action === 'repair_config' && (
+                                    <div className="text-[11px] text-amber-800">先到模型仓库新增或测试通过一个 LLM 模型，再回到这里刷新诊断。</div>
+                                  )}
+                                </div>
+                              )}
+                              {fallbackScoringRecovery && (
+                                <div className={`rounded-md border px-2 py-1 text-[11px] leading-5 ${
+                                  fallbackScoringRecovery.status === 'recovered'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                    : fallbackScoringRecovery.status === 'partial' || fallbackScoringRecovery.status === 'blocked'
+                                      ? 'border-amber-200 bg-amber-50 text-amber-800'
+                                      : fallbackScoringRecovery.status === 'empty'
+                                        ? 'border-zinc-200 bg-white text-zinc-600'
+                                        : 'border-rose-200 bg-rose-50 text-rose-800'
+                                }`}>
+                                  <span className="font-medium">历史兜底回收</span>
+                                  <span> · {fallbackScoringRecovery.message}</span>
+                                  <span> · 候选 {fallbackScoringRecovery.candidateCount}</span>
+                                  <span> · 恢复 {fallbackScoringRecovery.recovered}/{fallbackScoringRecovery.attempted}</span>
+                                  <span> · 剩余 {fallbackScoringRecovery.remainingCandidateCount}</span>
+                                  {fallbackScoringRecovery.firstError ? <span> · 首个错误 {fallbackScoringRecovery.firstError}</span> : null}
+                                </div>
+                              )}
+                              {scoringSkillHealth.recentErrors.length > 0 && (
+                                <div className="space-y-1 rounded-lg border border-white/80 bg-white/70 px-2 py-2">
+                                  {scoringSkillHealth.recentErrors.slice(0, 3).map((event, index) => (
+                                    <div key={`${event.skillName}-${event.targetId || index}-${event.createdAt || index}`} className="text-[11px] leading-5 text-zinc-600">
+                                      <span className="font-medium text-zinc-800">{event.skillName}</span>
+                                      <span> · {event.message}</span>
+                                      {event.modelName ? <span> · {event.modelName}</span> : null}
+                                      {event.targetId ? <span> · 条目 {event.targetId.slice(0, 8)}</span> : null}
+                                      {event.createdAt ? <span> · {new Date(event.createdAt).toLocaleString('zh-CN')}</span> : null}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex shrink-0 flex-col gap-2">
+                              <button
+                                onClick={() => void recoverFallbackScoringItems()}
+                                disabled={saving}
+                                className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                              >
+                                回收历史兜底评分
+                              </button>
+                              <button
+                                onClick={() => void refreshBase()}
+                                disabled={loading}
+                                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+                              >
+                                刷新诊断
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                       <div className="mb-4 rounded-xl border border-sky-100 bg-sky-50 px-3 py-3 text-xs leading-6 text-sky-800">
                         <div><span className="font-semibold">Skills</span> 负责智能评分与个性化判断，<span className="font-semibold">Rules</span> 负责硬过滤和加权。</div>
                         <div>系统始终保证至少保留 1 个启用中的评分技能；如果还没配置，评分链会自动补齐 3 个默认预设 Skills。</div>

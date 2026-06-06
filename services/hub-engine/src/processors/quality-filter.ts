@@ -36,6 +36,7 @@ function buildStageResult(processed: number, attempted: number, errors: string[]
   return {
     processed,
     attempted,
+    skipped: 0,
     failed: Math.max(attempted - processed, 0),
     errors: [...new Set(errors)].slice(0, 3),
   };

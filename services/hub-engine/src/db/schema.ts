@@ -142,6 +142,7 @@ export const items = hubSchema.table('items', {
   blockedReason: text('blocked_reason'),
   summaryStatus: text('summary_status').default('pending'),
   summaryBasis: text('summary_basis'),
+  summaryReason: text('summary_reason'),
   translationStatus: text('translation_status').default('pending'),
   translationReason: text('translation_reason'),
   processingStatus: text('processing_status').default('raw'),

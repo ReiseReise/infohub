@@ -12,6 +12,7 @@ import { fetchQueue, type FetchJobData } from './queue.js';
 import type { Job } from 'bullmq';
 import { isFetchJobInFlight, shouldRemoveExistingFetchJob } from './fetch-dedupe.js';
 import { buildSnippet, detectLikelyLanguage } from '../lib/content-extractor.js';
+import { classifyCollectedContentStatus, contentStatusMessage } from '../lib/content-status.js';
 import { maybeAutoTranscribeItem, type AutoTranscribeCandidate } from '../services/auto-transcribe.js';
 import { buildEventClusterKey } from '../lib/event-clustering.js';
 import { applyFilterRules } from '../processors/filter.js';
@@ -324,11 +325,10 @@ export async function handleFetchJob(job: Job<FetchJobData>): Promise<FetchExecu
       try {
         const snippet = buildSnippet(rawItem.content, 220);
         const inferredLanguage = detectLikelyLanguage(`${rawItem.title}\n${rawItem.content || snippet || ''}`);
-        const contentStatus = rawItem.content
-          ? 'ready'
-          : snippet
-            ? 'ready'
-            : 'missing';
+        const contentStatus = classifyCollectedContentStatus({
+          content: rawItem.content,
+          snippet,
+        });
         const filterResult = await applyFilterRules({
           title: rawItem.title,
           content: rawItem.content,
@@ -370,9 +370,10 @@ export async function handleFetchJob(job: Job<FetchJobData>): Promise<FetchExecu
           filterBucket: !filterResult.passed ? 'filtered' : 'main',
           restoredFromFilter: false,
           contentStatus,
-          contentError: contentStatus === 'missing' ? '采集阶段未获得正文缓存' : null,
+          contentError: contentStatusMessage(contentStatus),
           summaryStatus: 'pending',
           summaryBasis: null,
+          summaryReason: null,
           translationStatus: 'pending',
           translationReason: null,
           processingStatus: 'raw',

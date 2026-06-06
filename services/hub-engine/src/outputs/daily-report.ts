@@ -1,25 +1,30 @@
-import { eq, and, or, gte, lt, desc, count, sql } from 'drizzle-orm';
+import { eq, and, or, gte, lt, desc, count, inArray, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logAiUsage } from '../lib/ai-usage.js';
 import { logger } from '../lib/logger.js';
 import { getEffectiveAiConfig, type ResolvedAiConfig } from '../lib/ai-configs.js';
 import { callLLM } from '../processors/ai-scorer.js';
+import { AI_TOKEN_BUDGETS } from '../lib/ai-token-budgets.js';
 import { AIHOT_DAILY_BUCKET_LABELS, classifyAihotDailyBucket, type AihotDailyBucket } from '../lib/aihot-governance.js';
 import { buildEmptyDailyReportDiagnosis, type EmptyDailyReportDiagnosis } from './daily-report-diagnostics.js';
+import { resolveDailyReportWindow } from './daily-report-window.js';
 import { translateItemsDetailed } from '../processors/ai-summarizer.js';
 import {
   DEFAULT_DAILY_REPORT_WORKFLOW,
   normalizeDailyReportWorkflowConfig,
   prepareDailyReportCandidates,
+  summarizeDailyReportExcludedCandidates,
   type DailyReportCandidateInput,
   type DailyReportCandidateFunnel,
   type DailyReportCandidatePreparation,
+  type DailyReportExcludedCandidateSummary,
   type DailyReportPreparedCandidate,
   type DailyReportWorkflowConfig,
   type DailyReportSelectionMode,
 } from './daily-report-workflow.js';
 
 export type InsightPreset = 'full' | 'decision' | 'research' | 'reading';
+export type DailyReportGenerationMode = 'fast' | 'full';
 
 export interface DailyReportOptions {
   topN?: number;
@@ -28,6 +33,7 @@ export interface DailyReportOptions {
   includeCategoryTop?: boolean;
   preset?: InsightPreset;
   compareWindowDays?: number;
+  generationMode?: DailyReportGenerationMode;
   workflow?: Partial<DailyReportWorkflowConfig>;
 }
 
@@ -38,6 +44,7 @@ export interface TopItem {
   url: string;
   aiScore: number | null;
   aiSummary: string | null;
+  snippet?: string | null;
   reportSummary?: string | null;
   aiTranslation?: string | null;
   language?: string | null;
@@ -54,11 +61,13 @@ export interface TopItem {
   sourceType?: string | null;
   sourceTier?: string | null;
   sourceKind?: string | null;
+  clusterId?: string | null;
   isFiltered?: boolean | null;
   filterBucket?: string | null;
   filterReason?: string | null;
   qualityDecision?: string | null;
   processingStatus?: string | null;
+  scoreRiskFlags?: string[];
 }
 
 export interface DailyReportModuleMeta {
@@ -73,6 +82,8 @@ export interface DailyReportModuleMeta {
   estimatedCost?: number | null;
   status: 'ai' | 'fallback';
   error?: string;
+  repaired?: boolean;
+  repairReason?: string;
 }
 
 export interface DailyReportModule {
@@ -108,10 +119,12 @@ export interface DailyReportSnapshot {
   date: string;
   totalItems: number;
   newItems: number;
+  generationMode?: DailyReportGenerationMode;
   reportFunnel?: EmptyDailyReportDiagnosis['funnel'];
   workflowConfig?: DailyReportWorkflowConfig;
   candidateFunnel?: DailyReportCandidateFunnel;
   excludedCandidates?: DailyReportCandidatePreparation['excluded'];
+  excludedCandidateSummary?: DailyReportExcludedCandidateSummary;
   selectionMode?: DailyReportSelectionMode;
   compareWindowDays: number;
   topItems: TopItem[];
@@ -129,6 +142,7 @@ export interface DailyReportPayload {
   modules: Partial<Record<'decision' | 'research' | 'reading', DailyReportModule>>;
   final?: DailyReportFinal;
   preset: InsightPreset;
+  generationMode: DailyReportGenerationMode;
 }
 
 export interface DailyReportData {
@@ -183,11 +197,11 @@ const DAILY_AGENT_SCENES = {
 } as const;
 const LEGACY_DAILY_SCENE = 'daily_report';
 const DAILY_SCENE_MAX_TOKENS: Record<keyof typeof DAILY_AGENT_SCENES, number> = {
-  cleaning: 500,
-  decision: 900,
-  research: 1200,
-  reading: 900,
-  final: 1800,
+  cleaning: AI_TOKEN_BUDGETS.dailyCleaning,
+  decision: AI_TOKEN_BUDGETS.dailyDecision,
+  research: AI_TOKEN_BUDGETS.dailyResearch,
+  reading: AI_TOKEN_BUDGETS.dailyReading,
+  final: AI_TOKEN_BUDGETS.dailyFinal,
 };
 const DAILY_SCENE_MIN_LENGTH: Record<keyof typeof DAILY_AGENT_SCENES, number> = {
   cleaning: 80,
@@ -196,6 +210,26 @@ const DAILY_SCENE_MIN_LENGTH: Record<keyof typeof DAILY_AGENT_SCENES, number> = 
   reading: 220,
   final: 520,
 };
+
+const DAILY_SCENE_REQUIRED_SECTIONS: Partial<Record<keyof typeof DAILY_AGENT_SCENES, string[]>> = {
+  decision: ['## 总体判断', '## 关键变化', '## 风险与机会', '## 下一步动作'],
+  research: ['## 主题脉络', '## 代表性证据', '## 分歧与空白', '## 值得追踪的问题'],
+  reading: ['## 必读', '## 速览', '## 可跳过'],
+  final: ['## 今日结论', '## 关键进展', '## 头部舆论/新闻焦点', '## AI 产业与产品信号', '## 阅读建议', '## 下一步动作'],
+};
+
+export function shouldRunDailyReportAiStage(
+  generationMode: DailyReportGenerationMode,
+  stage: keyof typeof DAILY_AGENT_SCENES,
+  moduleEnabled: boolean,
+  preset: InsightPreset,
+): boolean {
+  if (!moduleEnabled) return false;
+  if (stage === 'final') return true;
+  if (generationMode === 'fast') return false;
+  if (stage === 'cleaning') return true;
+  return preset === 'full' || preset === stage;
+}
 
 const DEFAULT_SCENE_PROMPTS: Record<keyof typeof DAILY_AGENT_SCENES, string> = {
   cleaning: [
@@ -252,6 +286,8 @@ const DEFAULT_SCENE_PROMPTS: Record<keyof typeof DAILY_AGENT_SCENES, string> = {
     '- 这是一份最终交付，不要解释代理过程',
     '- 统一语言风格，不要简单拼接子模块原文',
     '- 聚焦 AI 相关与头部舆论新闻，不要跑到医疗专题',
+    '- 同一具体事件只详细展开一次；后续章节只用“见上文第 N 条/见阅读建议第 N 条”交叉引用，不要重复摘要、融资额、模型名和参数细节',
+    '- 阅读建议只说明阅读顺序和理由，不要再次复述新闻正文',
     '',
     '{context}',
   ].join('\n'),
@@ -337,22 +373,59 @@ function deriveThemeClusters(items: TopItem[]) {
     .slice(0, 8);
 }
 
-function buildInsightContext(snapshot: DailyReportSnapshot): string {
+function truncateContextText(value: string | null | undefined, limit: number) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit).trimEnd()}...`;
+}
+
+function compactStringArray(values: string[] | undefined, limit: number, textLimit: number) {
+  return (values || [])
+    .slice(0, limit)
+    .map((value) => truncateContextText(value, textLimit))
+    .filter(Boolean);
+}
+
+function compactCleaningOutput(cleaning: DailyCleaningOutput): DailyCleaningOutput {
+  const domainBuckets = Object.fromEntries(
+    Object.entries(cleaning.domainBuckets || {}).map(([key, values]) => [
+      key,
+      compactStringArray(values, 5, 140),
+    ]),
+  );
+  return {
+    summary: truncateContextText(cleaning.summary, 360),
+    prioritySignals: compactStringArray(cleaning.prioritySignals, 6, 180),
+    themeLabels: compactStringArray(cleaning.themeLabels, 8, 100),
+    watchlist: compactStringArray(cleaning.watchlist, 6, 160),
+    ...(Object.keys(domainBuckets).length > 0 ? { domainBuckets } : {}),
+  };
+}
+
+function buildInsightContext(
+  snapshot: DailyReportSnapshot,
+  options: { topItems?: number; summaryChars?: number; categories?: number; themes?: number } = {},
+): string {
+  const topItems = options.topItems ?? 16;
+  const summaryChars = options.summaryChars ?? 520;
+  const categories = options.categories ?? 12;
+  const themes = options.themes ?? 8;
   const categoryLines = snapshot.byCategory
-    .slice(0, 12)
+    .slice(0, categories)
     .map((entry) => `- ${entry.category}: 今日 ${entry.count}，近${snapshot.compareWindowDays}日均值 ${entry.baselineAvg.toFixed(1)}，变化 ${entry.delta >= 0 ? '+' : ''}${entry.delta.toFixed(1)}`)
     .join('\n');
 
   const themeLines = snapshot.themeClusters
-    .slice(0, 8)
+    .slice(0, themes)
     .map((cluster) => `- ${cluster.label}: ${cluster.count} 条；样例：${cluster.sampleTitles.join(' / ')}`)
     .join('\n');
 
   const topItemLines = snapshot.topItems
-    .slice(0, 16)
+    .slice(0, topItems)
     .map((item, index) => {
       const score = item.aiScore != null ? `AI ${item.aiScore}` : 'AI -';
-      return `${index + 1}. ${item.displayTitle || item.title}\n来源: ${item.sourceName} / ${item.category}\n评分: ${score}\n入报原因: ${item.selectionReason || '按默认日报规则入选'}\n摘要: ${item.reportSummary || item.aiSummary || '暂无摘要'}\n链接: ${item.url}`;
+      const summary = truncateContextText(item.reportSummary || item.aiSummary || '暂无摘要', summaryChars);
+      return `${index + 1}. ${item.displayTitle || item.title}\n来源: ${item.sourceName} / ${item.category}\n评分: ${score}\n入报原因: ${item.selectionReason || '按默认日报规则入选'}\n摘要: ${summary}\n链接: ${item.url}`;
     })
     .join('\n\n');
 
@@ -403,19 +476,136 @@ function validateSceneMarkdown(
     return { ok: false, reason: 'truncated' };
   }
 
-  const requiredSections: Partial<Record<keyof typeof DAILY_AGENT_SCENES, string[]>> = {
-    decision: ['## 总体判断', '## 关键变化', '## 风险与机会', '## 下一步动作'],
-    research: ['## 主题脉络', '## 代表性证据', '## 分歧与空白', '## 值得追踪的问题'],
-    reading: ['## 必读', '## 速览', '## 可跳过'],
-    final: ['## 今日结论', '## 关键进展', '## 头部舆论/新闻焦点', '## AI 产业与产品信号', '## 阅读建议', '## 下一步动作'],
-  };
-
-  const required = requiredSections[sceneKey];
+  const required = DAILY_SCENE_REQUIRED_SECTIONS[sceneKey];
   if (required && !hasAllSections(normalized, required)) {
     return { ok: false, reason: 'missing_sections' };
   }
 
   return { ok: true };
+}
+
+export function shouldTryDeterministicSceneRepairFirst(reason?: string): boolean {
+  return reason === 'missing_sections' || reason === 'too_short' || reason === 'truncated';
+}
+
+export function appendSceneMarkdownContract(
+  sceneKey: keyof typeof DAILY_AGENT_SCENES,
+  prompt: string,
+): string {
+  const required = DAILY_SCENE_REQUIRED_SECTIONS[sceneKey];
+  if (!required) return prompt;
+  return [
+    prompt.trim(),
+    '',
+    '输出格式硬约束：',
+    ...required.map((section) => `- 必须包含精确标题：${section}`),
+    '- 不要省略标题，不要把标题改成同义词，不要只输出项目符号。',
+    `- 全文至少 ${DAILY_SCENE_MIN_LENGTH[sceneKey]} 个字符，每个标题下至少写 2 条具体内容；如果素材不足，明确写“暂无明确证据”。`,
+  ].join('\n');
+}
+
+function truncateForRepairPrompt(value: string, limit = 6000) {
+  const normalized = normalizeMarkdownForQuality(value);
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit).trimEnd()}\n\n[已截断，以上为原输出前 ${limit} 字符]`;
+}
+
+export function buildSceneRepairPrompt(
+  sceneKey: keyof typeof DAILY_AGENT_SCENES,
+  invalidMarkdown: string,
+  fallbackMarkdown: string,
+  context: string,
+  reason = 'unknown',
+): string {
+  const required = DAILY_SCENE_REQUIRED_SECTIONS[sceneKey] || [];
+  return appendSceneMarkdownContract(sceneKey, [
+    '请修复并补全上一次不合格的日报模块输出。',
+    `不合格原因：${reason}`,
+    '要求：',
+    '- 不要删除已有有效内容；只补足缺失标题、证据、解释和行动价值。',
+    '- 不要编造输入素材之外的事实；证据不足时明确写“暂无明确证据”。',
+    '- 输出最终 Markdown 正文，不要解释你如何修复。',
+    ...(required.length > 0 ? ['- 必须保留这些精确标题：', ...required.map((section) => `  - ${section}`)] : []),
+    '',
+    '上一次不合格输出：',
+    truncateForRepairPrompt(invalidMarkdown),
+    '',
+    '可参考的确定性草稿：',
+    truncateForRepairPrompt(fallbackMarkdown, 3000),
+    '',
+    '原始上下文：',
+    truncateForRepairPrompt(context, 8000),
+  ].join('\n'));
+}
+
+function extractMarkdownSection(markdown: string, section: string) {
+  const normalized = normalizeMarkdownForQuality(markdown);
+  const start = normalized.indexOf(section);
+  if (start < 0) return null;
+  const next = normalized.indexOf('\n## ', start + section.length);
+  return normalized.slice(start, next >= 0 ? next : undefined).trim();
+}
+
+function replaceMarkdownSection(markdown: string, section: string, replacement: string) {
+  const normalized = normalizeMarkdownForQuality(markdown);
+  const start = normalized.indexOf(section);
+  if (start < 0) return [normalized, replacement.trim()].filter(Boolean).join('\n\n');
+  const next = normalized.indexOf('\n## ', start + section.length);
+  const before = normalized.slice(0, start).trimEnd();
+  const after = next >= 0 ? normalized.slice(next).trimStart() : '';
+  return [before, replacement.trim(), after].filter(Boolean).join('\n\n');
+}
+
+function cleanDanglingLatinFragment(value: string): string {
+  return value.replace(/([。！？.!?])\s*[A-Za-z][A-Za-z0-9+#./-]{0,16}$/u, '$1').trimEnd();
+}
+
+function cleanMarkdownSectionTail(markdown: string, section: string): string {
+  const currentSection = extractMarkdownSection(markdown, section);
+  if (!currentSection) return markdown;
+  const body = currentSection.slice(section.length).trim();
+  if (!body) return markdown;
+  const cleanedBody = cleanDanglingLatinFragment(body);
+  if (cleanedBody === body) return markdown;
+  return replaceMarkdownSection(markdown, section, [section, '', cleanedBody].join('\n'));
+}
+
+function normalizeConclusionSection(markdown: string): string {
+  const section = '## 今日结论';
+  const currentSection = extractMarkdownSection(markdown, section);
+  if (!currentSection) return markdown;
+  const body = currentSection.slice(section.length).trim();
+  if (!body) return markdown;
+  let cleanedBody = cleanDanglingLatinFragment(body);
+  if (cleanedBody && !/[。！？.!?]$/u.test(cleanedBody)) {
+    cleanedBody = `${cleanedBody}。`;
+  }
+  if (cleanedBody === body) return markdown;
+  return replaceMarkdownSection(markdown, section, [section, '', cleanedBody].join('\n'));
+}
+
+export function repairSceneMarkdownWithFallback(
+  sceneKey: keyof typeof DAILY_AGENT_SCENES,
+  primaryMarkdown: string,
+  fallbackMarkdown: string,
+): string {
+  const required = DAILY_SCENE_REQUIRED_SECTIONS[sceneKey];
+  const primary = normalizeMarkdownForQuality(primaryMarkdown);
+  const fallback = normalizeMarkdownForQuality(fallbackMarkdown);
+  if (!required || required.length === 0) return primary || fallback;
+
+  const primaryHasRequiredSection = required.some((section) => primary.includes(section));
+  const repaired = required.map((section, index) => {
+    const primarySection = extractMarkdownSection(primary, section);
+    const fallbackSection = extractMarkdownSection(fallback, section);
+    const selected = primarySection || fallbackSection || `${section}\n\n- 暂无明确证据。`;
+    if (index === 0 && !primaryHasRequiredSection && primary) {
+      return `${selected}\n\n### AI 原始补充\n\n${primary}`;
+    }
+    return selected;
+  });
+
+  return repaired.join('\n\n').trim();
 }
 
 function parseStructuredJson<T>(value: string): T | null {
@@ -472,29 +662,46 @@ function buildCleaningContext(snapshot: DailyReportSnapshot, fallback: DailyClea
   ].join('\n');
 }
 
-function buildFinalContext(
+function compactModuleForFinalContext(module?: DailyReportModule) {
+  if (!module) return '暂无';
+  const bullets = module.bullets.length > 0
+    ? module.bullets.slice(0, 6).map((bullet) => `- ${truncateContextText(bullet, 180)}`).join('\n')
+    : `- ${truncateContextText(module.markdown, 900)}`;
+  const citations = module.citations.slice(0, 5)
+    .map((item) => `- ${item.title} · ${item.sourceName} · ${item.category} · ${item.url}`)
+    .join('\n');
+  return [
+    `标题：${module.title}`,
+    `状态：${module.meta.status}${module.meta.repairReason ? ` / ${module.meta.repairReason}` : ''}${module.meta.error ? ` / ${module.meta.error}` : ''}`,
+    '要点：',
+    bullets || '- 暂无',
+    ...(citations ? ['', '引用：', citations] : []),
+  ].join('\n');
+}
+
+export function buildFinalContext(
   snapshot: DailyReportSnapshot,
   cleaning: DailyCleaningOutput,
   modules: Partial<Record<'decision' | 'research' | 'reading', DailyReportModule>>,
 ) {
   return [
-    buildInsightContext(snapshot),
+    buildInsightContext(snapshot, { topItems: 8, summaryChars: 220, categories: 8, themes: 6 }),
     '',
     '清洗结果：',
-    JSON.stringify(cleaning, null, 2),
+    JSON.stringify(compactCleaningOutput(cleaning), null, 2),
     '',
     '决策简报：',
-    modules.decision?.markdown || '暂无',
+    compactModuleForFinalContext(modules.decision),
     '',
     '研究汇总：',
-    modules.research?.markdown || '暂无',
+    compactModuleForFinalContext(modules.research),
     '',
     '阅读导航：',
-    modules.reading?.markdown || '暂无',
+    compactModuleForFinalContext(modules.reading),
   ].join('\n');
 }
 
-function buildModuleContext(
+export function buildModuleContext(
   snapshot: DailyReportSnapshot,
   cleaning: DailyCleaningOutput,
   sceneKey: 'decision' | 'research' | 'reading',
@@ -505,10 +712,10 @@ function buildModuleContext(
     reading: '请更偏向阅读路径、必读/速览/可跳过分层与原因。',
   };
   return [
-    buildInsightContext(snapshot),
+    buildInsightContext(snapshot, { topItems: 10, summaryChars: 180, categories: 8, themes: 6 }),
     '',
     '结构化清洗结果：',
-    JSON.stringify(cleaning, null, 2),
+    JSON.stringify(compactCleaningOutput(cleaning), null, 2),
     '',
     `当前模块要求：${focusMap[sceneKey]}`,
   ].join('\n');
@@ -520,6 +727,25 @@ async function resolveDailyConfig(userId: string, sceneType: string): Promise<{ 
   const fallback = await getEffectiveAiConfig(userId, LEGACY_DAILY_SCENE);
   if (fallback) return { config: fallback, resolvedConfigType: LEGACY_DAILY_SCENE };
   return null;
+}
+
+export function resolveScenePromptTemplate(
+  sceneKey: keyof typeof DAILY_AGENT_SCENES,
+  configuredTemplate: string,
+  resolvedConfigType: string,
+): string {
+  if (sceneKey === 'cleaning') return configuredTemplate;
+  const defaultTemplate = DEFAULT_SCENE_PROMPTS[sceneKey];
+  if (resolvedConfigType !== DAILY_AGENT_SCENES[sceneKey]) return defaultTemplate;
+  const template = String(configuredTemplate || '').trim();
+  const tooTerse = template.length < 260;
+  if (!tooTerse) return template;
+  return [
+    defaultTemplate,
+    '',
+    '用户补充要求：',
+    template,
+  ].join('\n');
 }
 
 async function runScene(
@@ -540,27 +766,80 @@ async function runScene(
     };
   }
 
-  const template = resolved.resolvedConfigType === sceneType
-    ? resolved.config.promptTemplate
-    : DEFAULT_SCENE_PROMPTS[sceneKey];
+  const template = resolveScenePromptTemplate(sceneKey, resolved.config.promptTemplate, resolved.resolvedConfigType);
 
-  const prompt = interpolatePrompt(template, {
+  const sceneContext = contextOverride || buildInsightContext(snapshot);
+  const prompt = appendSceneMarkdownContract(sceneKey, interpolatePrompt(template, {
     date: snapshot.date,
     newItems: String(snapshot.newItems),
     totalItems: String(snapshot.totalItems),
     compareWindowDays: String(snapshot.compareWindowDays),
-    context: contextOverride || buildInsightContext(snapshot),
+    context: sceneContext,
     highlights: snapshot.topItems.map((item, index) => `${index + 1}. ${item.title}`).join('\n'),
     categories: snapshot.byCategory.map((item) => `${item.category}: ${item.count}`).join('\n'),
-  });
+  }));
 
   try {
-    const result = await callLLM(resolved.config, prompt, {
+    let result = await callLLM(resolved.config, prompt, {
       maxTokens: DAILY_SCENE_MAX_TOKENS[sceneKey],
     });
     const quality = validateSceneMarkdown(sceneKey, result.text);
+    let promptForLog = prompt;
+    let repaired = false;
+    let repairReason: string | undefined;
     if (!quality.ok) {
-      throw new Error(`invalid_daily_scene_output:${quality.reason}`);
+      repairReason = quality.reason || 'unknown';
+      if (shouldTryDeterministicSceneRepairFirst(repairReason)) {
+        const deterministicRepair = repairSceneMarkdownWithFallback(sceneKey, result.text, fallbackMarkdown);
+        const deterministicQuality = validateSceneMarkdown(sceneKey, deterministicRepair);
+        if (deterministicQuality.ok) {
+          result = {
+            ...result,
+            text: deterministicRepair,
+          };
+          repaired = true;
+          repairReason = `${repairReason}; deterministic_repair_first`;
+        }
+      }
+    }
+    if (!quality.ok && !repaired) {
+      const repairPrompt = buildSceneRepairPrompt(sceneKey, result.text, fallbackMarkdown, sceneContext, repairReason);
+      const repairResult = await callLLM(resolved.config, repairPrompt, {
+        maxTokens: DAILY_SCENE_MAX_TOKENS[sceneKey],
+      });
+      const repairQuality = validateSceneMarkdown(sceneKey, repairResult.text);
+      const combinedTokens = {
+        inputTokens: (result.inputTokens || 0) + (repairResult.inputTokens || 0),
+        outputTokens: (result.outputTokens || 0) + (repairResult.outputTokens || 0),
+        totalTokens: (result.totalTokens || 0) + (repairResult.totalTokens || 0),
+        estimatedCost: (result.estimatedCost || 0) + (repairResult.estimatedCost || 0),
+      };
+      if (!repairQuality.ok) {
+        const deterministicRepair = repairSceneMarkdownWithFallback(
+          sceneKey,
+          [result.text, repairResult.text].filter(Boolean).join('\n\n'),
+          fallbackMarkdown,
+        );
+        const deterministicQuality = validateSceneMarkdown(sceneKey, deterministicRepair);
+        if (!deterministicQuality.ok) {
+          throw new Error(`invalid_daily_scene_output:${repairReason}; repair_failed:${repairQuality.reason}; deterministic_repair_failed:${deterministicQuality.reason}`);
+        }
+        result = {
+          ...repairResult,
+          text: deterministicRepair,
+          ...combinedTokens,
+        };
+        promptForLog = repairPrompt;
+        repaired = true;
+        repairReason = `${repairReason}; deterministic_repair_after:${repairQuality.reason || 'unknown'}`;
+      } else {
+        result = {
+          ...repairResult,
+          ...combinedTokens,
+        };
+        promptForLog = repairPrompt;
+        repaired = true;
+      }
     }
     await logAiUsage({
       userId,
@@ -580,7 +859,7 @@ async function runScene(
       latencyMs: result.latencyMs,
       providerRequestId: result.providerRequestId,
       apiKind: result.apiKind,
-      promptPreview: prompt,
+      promptPreview: promptForLog,
       responsePreview: result.text,
       label: `${snapshot.date}:${sceneKey}`,
     });
@@ -597,6 +876,7 @@ async function runScene(
         outputTokens: result.outputTokens,
         estimatedCost: result.estimatedCost,
         status: 'ai' as const,
+        ...(repaired ? { repaired, repairReason } : {}),
       },
     };
   } catch (error) {
@@ -734,7 +1014,151 @@ async function runCleaningScene(userId: string, snapshot: DailyReportSnapshot, f
   }
 }
 
-function buildFinalFallback(
+function normalizeDailyReportTitleKey(value?: string | null) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+    .trim();
+}
+
+function itemDisplayTitle(item: Pick<TopItem, 'displayTitle' | 'title'>) {
+  return item.displayTitle || item.title;
+}
+
+function buildTopNewsReferenceMap(items: TopItem[]) {
+  const map = new Map<string, number>();
+  items.forEach((item, index) => {
+    const title = itemDisplayTitle(item);
+    const key = normalizeDailyReportTitleKey(title);
+    if (key && !map.has(key)) map.set(key, index + 1);
+  });
+  return map;
+}
+
+function summarizePrioritySignal(signal: string, newsReferences: Map<string, number>) {
+  const ref = newsReferences.get(normalizeDailyReportTitleKey(signal));
+  return ref ? '头部新闻焦点已覆盖同一事件，关键进展只保留一次展开。' : signal;
+}
+
+function compactReadingRecommendation(item: TopItem, _newsReferences: Map<string, number>) {
+  return `- [${itemDisplayTitle(item)}](${item.url}) · ${item.sourceName} · ${item.category}`;
+}
+
+function compactWatchlistRecommendation(title: string, newsReferences: Map<string, number>) {
+  const ref = newsReferences.get(normalizeDailyReportTitleKey(title));
+  return ref ? `- ${title} · 已在头部新闻焦点覆盖，阅读时只核对原始出处。` : `- ${title}`;
+}
+
+function buildReadingAdviceLine(item: TopItem, newsReferences: Map<string, number>, reason: string) {
+  const ref = newsReferences.get(normalizeDailyReportTitleKey(itemDisplayTitle(item)));
+  if (ref) {
+    return `- 先读上方“头部舆论/新闻焦点”中的对应高分精选，原文链接见上节 · ${reason}`;
+  }
+  return `- [${itemDisplayTitle(item)}](${item.url}) · ${reason}`;
+}
+
+function buildTieredReadingAdvice(snapshot: DailyReportSnapshot, newsReferences: Map<string, number>) {
+  const priorityPool = snapshot.highScoreItems.length > 0 ? snapshot.highScoreItems : snapshot.topItems;
+  const mustRead = priorityPool
+    .filter((item) => (item.aiScore ?? 0) >= 70 || item.selectionMode === 'scored')
+    .slice(0, 2);
+  const mustIds = new Set(mustRead.map((item) => item.id));
+  const skim = snapshot.topItems
+    .filter((item) => !mustIds.has(item.id) && (item.aiScore ?? 0) >= 55 && item.selectionMode !== 'latest_visible')
+    .slice(0, 3);
+  const skimIds = new Set([...mustIds, ...skim.map((item) => item.id)]);
+  const defer = snapshot.topItems
+    .filter((item) => !skimIds.has(item.id) && ((item.aiScore ?? 0) < 55 || item.selectionMode === 'latest_visible'))
+    .slice(0, 3);
+
+  return [
+    '### 先读',
+    '',
+    ...(mustRead.length > 0
+      ? mustRead.map((item) => buildReadingAdviceLine(item, newsReferences, '会影响今日主线判断，先核对原文事实与增量。'))
+      : ['- 暂无明确先读条目。']),
+    '',
+    '### 扫读',
+    '',
+    ...(skim.length > 0
+      ? skim.map((item) => buildReadingAdviceLine(item, newsReferences, '用于补齐产品、产业或技术侧背景，快速扫摘要即可。'))
+      : ['- 暂无明确扫读条目。']),
+    '',
+    '### 暂缓',
+    '',
+    ...(defer.length > 0
+      ? defer.map((item) => buildReadingAdviceLine(item, newsReferences, item.selectionMode === 'latest_visible' ? '来自最新兜底或低分内容，等后续信号验证后再读。' : '当前信号强度较低，暂不占用深读时间。'))
+      : ['- 暂无需要暂缓的条目。']),
+  ];
+}
+
+function buildKeyProgressLines(snapshot: DailyReportSnapshot) {
+  const items = snapshot.topItems.slice(0, 4);
+  if (items.length === 0) return ['- 暂无可入报关键进展。'];
+  return items.map((item) => {
+    const score = item.aiScore != null ? `AI ${item.aiScore}` : 'AI 未评分';
+    const summary = truncateContextText(item.reportSummary || item.aiSummary || item.snippet || '暂无摘要', 120);
+    const reason = item.selectionReason || '按日报规则入选。';
+    return `- [${itemDisplayTitle(item)}](${item.url}) · ${item.sourceName} · ${item.category} · ${score}。入报原因：${reason} 摘要：${summary}`;
+  });
+}
+
+function buildAiIndustrySignalLines(snapshot: DailyReportSnapshot) {
+  const items = snapshot.topItems.slice(0, 6);
+  if (items.length === 0) return ['- 暂无明确 AI 产业与产品信号。'];
+  return items.map((item) => {
+    const bucket = AIHOT_DAILY_BUCKET_LABELS[classifyAiNewsBucket(item)] || item.category || '信号';
+    const tags = normalizeTags(item.aiTags).slice(0, 2).join('/');
+    const summary = truncateContextText(item.reportSummary || item.aiSummary || item.snippet || '', 72);
+    return [
+      `- ${bucket}：[${itemDisplayTitle(item)}](${item.url}) · ${item.sourceName}`,
+      tags ? ` · ${tags}` : '',
+      summary ? `。${summary}` : '',
+    ].join('');
+  });
+}
+
+export function enforceFinalReadingAdvice(markdown: string, snapshot: DailyReportSnapshot) {
+  const cleanedMarkdown = normalizeConclusionSection(cleanMarkdownSectionTail(markdown, '## 今日结论'));
+  const keyProgressReplacement = [
+    '## 关键进展',
+    '',
+    ...buildKeyProgressLines(snapshot),
+  ].join('\n');
+  const industrySignalReplacement = [
+    '## AI 产业与产品信号',
+    '',
+    ...buildAiIndustrySignalLines(snapshot),
+  ].join('\n');
+  const readingReplacement = [
+    '## 阅读建议',
+    '',
+    ...buildTieredReadingAdvice(snapshot, new Map()),
+  ].join('\n');
+  const funnel = snapshot.candidateFunnel;
+  const hasRepairableQualityDebt = Boolean(funnel && (
+    (funnel.fallbackScoredCandidates || 0) > 0
+    || (funnel.scoreFailedCandidates || 0) > 0
+    || (funnel.translationFailed || 0) > 0
+  ));
+  const actionReplacement = [
+    '## 下一步动作',
+    '',
+    '- 按“阅读建议”完成原文核对，先确认先读条目的事实增量，再决定是否展开专题复盘。',
+    ...(hasRepairableQualityDebt
+      ? ['- 先处理低置信兜底/评分失败/翻译失败候选，再重新预览候选池，避免把质量债带进下一版日报。']
+      : []),
+    ...(snapshot.topItems.length > 0
+      ? ['- 从 TOP 入报条目里挑出仍有行动价值的信号，沉淀到知识库或后续专题追踪。']
+    : ['- 当前没有可入报条目，先回到 Sources/Feed 检查采集、正文和评分链路。']),
+  ].join('\n');
+  const withKeyProgress = replaceMarkdownSection(cleanedMarkdown, '## 关键进展', keyProgressReplacement);
+  const withIndustrySignals = replaceMarkdownSection(withKeyProgress, '## AI 产业与产品信号', industrySignalReplacement);
+  const withReadingAdvice = replaceMarkdownSection(withIndustrySignals, '## 阅读建议', readingReplacement);
+  return replaceMarkdownSection(withReadingAdvice, '## 下一步动作', actionReplacement);
+}
+
+export function buildFinalFallback(
   snapshot: DailyReportSnapshot,
   cleaning: DailyCleaningOutput,
   modules: Partial<Record<'decision' | 'research' | 'reading', DailyReportModule>>,
@@ -744,16 +1168,23 @@ function buildFinalFallback(
     cleaning.prioritySignals[0] ? `优先信号：${cleaning.prioritySignals[0]}` : '暂无优先信号',
     cleaning.themeLabels[0] ? `主主题：${cleaning.themeLabels.slice(0, 3).join(' / ')}` : '暂无主主题',
   ].filter(Boolean);
-  const aiNewsFocus = buildAiNewsFocus(snapshot);
-  const mustRead = snapshot.highScoreItems.slice(0, 3);
   const sourceFocus = snapshot.topSources.slice(0, 5).map((item) => `- ${item.sourceName}：${item.count} 条`);
-  const newsFocus = snapshot.topItems.slice(0, 4).map((item) => {
+  const topNewsItems = snapshot.topItems.slice(0, 4);
+  const newsReferences = buildTopNewsReferenceMap(topNewsItems);
+  const newsFocus = topNewsItems.map((item) => {
     const modeLabel = item.selectionMode ? ` · ${selectionModeLabel(item.selectionMode)}` : '';
-    return `- ${item.displayTitle || item.title} · ${item.sourceName}${modeLabel}`;
+    return `- [${itemDisplayTitle(item)}](${item.url}) · ${item.sourceName}${modeLabel}`;
   });
+  const repeatedSignalKeys = new Set([
+    ...topNewsItems.map((item) => normalizeDailyReportTitleKey(itemDisplayTitle(item))),
+    ...cleaning.prioritySignals.map((item) => normalizeDailyReportTitleKey(item)),
+  ].filter(Boolean));
   const aiBuckets = Object.entries(cleaning.domainBuckets || {}).flatMap(([key, titles]) => {
-    if (!titles?.length) return [];
-    return [`- ${AIHOT_DAILY_BUCKET_LABELS[key as AihotDailyBucket] || key}：${titles.slice(0, 2).join(' / ')}`];
+    const uniqueTitles = (titles || [])
+      .filter((title) => !repeatedSignalKeys.has(normalizeDailyReportTitleKey(title)))
+      .slice(0, 2);
+    if (!uniqueTitles.length) return [];
+    return [`- ${AIHOT_DAILY_BUCKET_LABELS[key as AihotDailyBucket] || key}：${uniqueTitles.join(' / ')}`];
   });
 
   const markdown = [
@@ -763,12 +1194,11 @@ function buildFinalFallback(
     '',
     '## 关键进展',
     '',
-    ...(cleaning.prioritySignals.length > 0 ? cleaning.prioritySignals.map((item) => `- ${item}`) : ['- 暂无']),
+    ...(cleaning.prioritySignals.length > 0 ? cleaning.prioritySignals.map((item) => `- ${summarizePrioritySignal(item, newsReferences)}`) : ['- 暂无']),
     '',
     '## 头部舆论/新闻焦点',
     '',
     ...(newsFocus.length > 0 ? newsFocus : ['- 暂无']),
-    ...(aiNewsFocus ? ['', ...aiNewsFocus.split('\n').map((line) => line.startsWith('- ') ? line : `- ${line}`)] : []),
     '',
     '## AI 产业与产品信号',
     '',
@@ -776,13 +1206,13 @@ function buildFinalFallback(
     '',
     '## 阅读建议',
     '',
-    ...(mustRead.length > 0
-      ? mustRead.map((item) => `- [${item.displayTitle || item.title}](${item.url}) · ${item.sourceName} · ${item.category}`)
-      : (cleaning.watchlist.length > 0 ? cleaning.watchlist.slice(0, 5).map((item) => `- ${item}`) : ['- 暂无'])),
+    ...(snapshot.topItems.length > 0
+      ? buildTieredReadingAdvice(snapshot, newsReferences)
+      : (cleaning.watchlist.length > 0 ? cleaning.watchlist.slice(0, 5).map((item) => compactWatchlistRecommendation(item, newsReferences)) : ['- 暂无'])),
     '',
     '## 下一步动作',
     '',
-    `- 先读 ${snapshot.highScoreItems[0] ? `《${snapshot.highScoreItems[0].displayTitle || snapshot.highScoreItems[0].title}》` : '高分条目'}，再决定是否展开专题复盘。`,
+    `- 先按“阅读建议”完成原文核对，再决定是否展开专题复盘。`,
     ...(modules.decision?.markdown ? ['- 如需快速判断，看“决策简报”；如需细查证据，看“研究汇总”。'] : []),
     ...(sourceFocus.length > 0 ? ['', '### 重点来源', '', ...sourceFocus] : []),
   ].join('\n');
@@ -810,17 +1240,72 @@ async function runFinalScene(
   const template = resolved.resolvedConfigType === sceneType
     ? resolved.config.promptTemplate
     : DEFAULT_SCENE_PROMPTS.final;
-  const prompt = interpolatePrompt(template, {
-    context: buildFinalContext(snapshot, cleaning, modules),
-  });
+  const finalContext = buildFinalContext(snapshot, cleaning, modules);
+  const prompt = appendSceneMarkdownContract('final', interpolatePrompt(template, {
+    context: finalContext,
+  }));
 
   try {
-    const result = await callLLM(resolved.config, prompt, {
+    let result = await callLLM(resolved.config, prompt, {
       maxTokens: DAILY_SCENE_MAX_TOKENS.final,
     });
     const quality = validateSceneMarkdown('final', result.text);
+    let promptForLog = prompt;
+    let repaired = false;
+    let repairReason: string | undefined;
     if (!quality.ok) {
-      throw new Error(`invalid_daily_scene_output:${quality.reason}`);
+      repairReason = quality.reason || 'unknown';
+      if (shouldTryDeterministicSceneRepairFirst(repairReason)) {
+        const deterministicRepair = repairSceneMarkdownWithFallback('final', result.text, fallback.markdown);
+        const deterministicQuality = validateSceneMarkdown('final', deterministicRepair);
+        if (deterministicQuality.ok) {
+          result = {
+            ...result,
+            text: deterministicRepair,
+          };
+          repaired = true;
+          repairReason = `${repairReason}; deterministic_repair_first`;
+        }
+      }
+    }
+    if (!quality.ok && !repaired) {
+      const repairPrompt = buildSceneRepairPrompt('final', result.text, fallback.markdown, finalContext, repairReason);
+      const repairResult = await callLLM(resolved.config, repairPrompt, {
+        maxTokens: DAILY_SCENE_MAX_TOKENS.final,
+      });
+      const repairQuality = validateSceneMarkdown('final', repairResult.text);
+      const combinedTokens = {
+        inputTokens: (result.inputTokens || 0) + (repairResult.inputTokens || 0),
+        outputTokens: (result.outputTokens || 0) + (repairResult.outputTokens || 0),
+        totalTokens: (result.totalTokens || 0) + (repairResult.totalTokens || 0),
+        estimatedCost: (result.estimatedCost || 0) + (repairResult.estimatedCost || 0),
+      };
+      if (!repairQuality.ok) {
+        const deterministicRepair = repairSceneMarkdownWithFallback(
+          'final',
+          [result.text, repairResult.text].filter(Boolean).join('\n\n'),
+          fallback.markdown,
+        );
+        const deterministicQuality = validateSceneMarkdown('final', deterministicRepair);
+        if (!deterministicQuality.ok) {
+          throw new Error(`invalid_daily_scene_output:${repairReason}; repair_failed:${repairQuality.reason}; deterministic_repair_failed:${deterministicQuality.reason}`);
+        }
+        result = {
+          ...repairResult,
+          text: deterministicRepair,
+          ...combinedTokens,
+        };
+        promptForLog = repairPrompt;
+        repaired = true;
+        repairReason = `${repairReason}; deterministic_repair_after:${repairQuality.reason || 'unknown'}`;
+      } else {
+        result = {
+          ...repairResult,
+          ...combinedTokens,
+        };
+        promptForLog = repairPrompt;
+        repaired = true;
+      }
     }
     await logAiUsage({
       userId,
@@ -840,12 +1325,13 @@ async function runFinalScene(
       latencyMs: result.latencyMs,
       providerRequestId: result.providerRequestId,
       apiKind: result.apiKind,
-      promptPreview: prompt,
+      promptPreview: promptForLog,
       responsePreview: result.text,
       label: `${snapshot.date}:final`,
     });
+    const normalizedFinalMarkdown = normalizeMarkdownForQuality(result.text) || fallback.markdown;
     return {
-      markdown: normalizeMarkdownForQuality(result.text) || fallback.markdown,
+      markdown: enforceFinalReadingAdvice(normalizedFinalMarkdown, snapshot),
       bullets: fallback.bullets,
       meta: {
         sceneType,
@@ -858,6 +1344,7 @@ async function runFinalScene(
         outputTokens: result.outputTokens,
         estimatedCost: result.estimatedCost,
         status: 'ai',
+        ...(repaired ? { repaired, repairReason } : {}),
       },
     };
   } catch (error) {
@@ -1030,7 +1517,7 @@ function ensureDistinctModules(
 }
 
 async function translateCandidateForDailyReport(userId: string, candidate: DailyReportCandidateInput) {
-  await translateItemsDetailed(userId, 1, { itemId: candidate.id });
+  await translateItemsDetailed(userId, 1, { itemId: candidate.id, includeAnyStatus: true });
   const rows = await db
     .select({
       aiSummary: schema.items.aiSummary,
@@ -1045,17 +1532,77 @@ async function translateCandidateForDailyReport(userId: string, candidate: Daily
   return rows[0] || null;
 }
 
-function buildGenerationScopeMarkdown(snapshot: DailyReportSnapshot) {
+export function normalizeDailyReportCandidateFunnelForSnapshot(
+  funnel: DailyReportCandidateFunnel,
+  fullDayNewItems: number,
+  mainVisibleItems: number,
+): DailyReportCandidateFunnel {
+  return {
+    ...funnel,
+    todayNew: fullDayNewItems,
+    mainVisible: mainVisibleItems,
+  };
+}
+
+export function countMainVisibleItemsForReportFunnel(
+  rows: Array<{ isFiltered: boolean | null; filterBucket: string | null }>,
+) {
+  return rows.filter((row) => row.isFiltered === false && row.filterBucket === 'main').length;
+}
+
+export function buildDailyReportInsightConflictUpdate(input: {
+  summary: string;
+  itemCount: number;
+  topics: unknown;
+  payload: unknown;
+}) {
+  return {
+    summary: input.summary,
+    itemCount: input.itemCount,
+    topics: input.topics,
+    payload: input.payload,
+    pipelineVersion: DAILY_PIPELINE_VERSION,
+    generatedAt: new Date(),
+  };
+}
+
+export type DailyReportModuleTask<T> = {
+  key: string;
+  enabled: boolean;
+  run: () => Promise<T>;
+  assign: (result: T) => void;
+};
+
+export async function runDailyReportModuleTasks<T>(tasks: DailyReportModuleTask<T>[]): Promise<void> {
+  await Promise.all(
+    tasks
+      .filter((task) => task.enabled)
+      .map(async (task) => {
+        const result = await task.run();
+        task.assign(result);
+      }),
+  );
+}
+
+function generationModeLabel(mode?: DailyReportGenerationMode) {
+  if (mode === 'fast') return '快速交付（只阻塞最终日报；清洗/决策/研究/阅读不阻塞）';
+  if (mode === 'full') return '完整深加工（清洗/决策/研究/阅读/最终日报全链路运行）';
+  return '未记录';
+}
+
+export function buildGenerationScopeMarkdown(snapshot: DailyReportSnapshot) {
   const funnel = snapshot.candidateFunnel;
   if (!funnel) return '';
   return [
     '## 生成口径',
     '',
+    `- 生成模式：${generationModeLabel(snapshot.generationMode)}`,
     `- 今日新增：${snapshot.newItems} 条`,
     `- 主流程可见：${funnel.mainVisible} 条`,
     `- 匹配日报范围：${funnel.scopeMatched} 条`,
     `- 高分候选：${funnel.scoredCandidates} 条`,
     `- 低分复核候选：${funnel.reviewCandidates} 条`,
+    `- 低置信兜底候选：${funnel.fallbackScoredCandidates} 条`,
     `- 软过滤恢复候选：${funnel.softFilteredRecovered} 条`,
     `- 评分失败候选：${funnel.scoreFailedCandidates} 条`,
     `- 最新兜底候选：${funnel.latestFallbackCandidates} 条`,
@@ -1088,20 +1635,17 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     includeCategoryTop: opts?.includeCategoryTop ?? true,
     preset: opts?.preset ?? 'full',
     compareWindowDays: opts?.compareWindowDays ?? DAILY_COMPARE_WINDOW_DAYS,
+    generationMode: opts?.generationMode ?? 'full',
     workflow: workflowConfig,
   };
 
-  const targetDate = date || new Date();
-  const dayStart = new Date(targetDate);
-  dayStart.setHours(0, 0, 0, 0);
+  const { dateKey: dateStr, dayStart, dayEnd } = resolveDailyReportWindow(date || new Date());
   const compareStart = new Date(dayStart);
   compareStart.setDate(compareStart.getDate() - options.compareWindowDays);
-
-  const dateStr = dayStart.toISOString().split('T')[0];
   const samplingLimit = Math.max(options.topN * 4, 60);
 
   const [newItemsResult, totalResult, todayAuditRows, todayRows, todayCategoryRows, previousCategoryRows] = await Promise.all([
-    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart))),
+    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart), lt(schema.items.fetchedAt, dayEnd))),
     db.select({ count: count() }).from(schema.items).where(eq(schema.items.userId, userId)),
     db.select({
       id: schema.items.id,
@@ -1112,11 +1656,12 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
       filterReason: schema.items.filterReason,
     })
     .from(schema.items)
-    .where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart))),
+    .where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart), lt(schema.items.fetchedAt, dayEnd))),
     db.select({
       id: schema.items.id,
       title: schema.items.title,
       url: schema.items.url,
+      snippet: schema.items.snippet,
       aiScore: schema.items.aiScore,
       aiSummary: schema.items.aiSummary,
       aiTranslation: schema.items.aiTranslation,
@@ -1131,6 +1676,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
       sourceType: schema.items.sourceType,
       sourceTier: schema.items.sourceTier,
       sourceKind: schema.sources.sourceKind,
+      clusterId: schema.items.clusterId,
       isFiltered: schema.items.isFiltered,
       filterBucket: schema.items.filterBucket,
       filterReason: schema.items.filterReason,
@@ -1142,6 +1688,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     .where(and(
       eq(schema.items.userId, userId),
       gte(schema.items.fetchedAt, dayStart),
+      lt(schema.items.fetchedAt, dayEnd),
       or(
         and(eq(schema.items.filterBucket, 'main'), eq(schema.items.isFiltered, false)),
         and(
@@ -1157,7 +1704,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     db.select({ category: schema.sources.category, count: count() })
       .from(schema.items)
       .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
-      .where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart), eq(schema.items.filterBucket, 'main'), eq(schema.items.isFiltered, false)))
+      .where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart), lt(schema.items.fetchedAt, dayEnd), eq(schema.items.filterBucket, 'main'), eq(schema.items.isFiltered, false)))
       .groupBy(schema.sources.category)
       .orderBy(desc(count())),
     db.select({ category: schema.sources.category, count: count() })
@@ -1176,6 +1723,25 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
 
   const newItems = newItemsResult[0]?.count || 0;
   const totalItems = totalResult[0]?.count || 0;
+  const todayItemIds = todayRows.map((row) => row.id);
+  const scoreRiskRows = todayItemIds.length > 0
+    ? await db
+      .select({
+        itemId: schema.itemScoreBreakdowns.itemId,
+        riskFlags: schema.itemScoreBreakdowns.riskFlags,
+      })
+      .from(schema.itemScoreBreakdowns)
+      .where(and(
+        eq(schema.itemScoreBreakdowns.userId, userId),
+        inArray(schema.itemScoreBreakdowns.itemId, todayItemIds),
+      ))
+    : [];
+  const scoreRiskFlagsByItem = new Map<string, string[]>();
+  for (const row of scoreRiskRows) {
+    const flags = Array.isArray(row.riskFlags) ? row.riskFlags.map((flag) => String(flag)).filter(Boolean) : [];
+    if (flags.length === 0) continue;
+    scoreRiskFlagsByItem.set(row.itemId, [...(scoreRiskFlagsByItem.get(row.itemId) || []), ...flags]);
+  }
 
   const toItem = (t: typeof todayRows[number]): TopItem => ({
     id: t.id,
@@ -1184,6 +1750,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     url: t.url,
     aiScore: t.aiScore,
     aiSummary: t.aiSummary,
+    snippet: t.snippet,
     reportSummary: t.aiSummary,
     aiTranslation: t.aiTranslation,
     language: t.language,
@@ -1197,11 +1764,13 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     sourceType: t.sourceType || 'article',
     sourceTier: t.sourceTier,
     sourceKind: t.sourceKind,
+    clusterId: t.clusterId,
     isFiltered: t.isFiltered,
     filterBucket: t.filterBucket,
     filterReason: t.filterReason,
     qualityDecision: t.qualityDecision,
     processingStatus: t.processingStatus,
+    scoreRiskFlags: [...new Set(scoreRiskFlagsByItem.get(t.id) || [])],
   });
 
   const visibleItems = todayRows.map(toItem);
@@ -1235,6 +1804,11 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     .map(([sourceName, items]) => ({ sourceName, count: items.length }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 8);
+  const candidateFunnel = normalizeDailyReportCandidateFunnelForSnapshot(
+    candidatePreparation.funnel,
+    newItems,
+    countMainVisibleItemsForReportFunnel(todayAuditRows),
+  );
   const reportFunnel = {
     newItems,
     eligibleItems: selection.eligibleItems,
@@ -1242,15 +1816,15 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     filteredBucketItems: todayAuditRows.filter((item) => item.filterBucket === 'filtered').length,
     reviewItems: todayAuditRows.filter((item) => item.qualityDecision === 'review' || (!item.isFiltered && item.filterReason)).length,
     pendingItems: todayAuditRows.filter((item) => item.contentStatus && item.contentStatus !== 'ready').length,
-    scopeMatched: candidatePreparation.funnel.scopeMatched,
-    scoredCandidates: candidatePreparation.funnel.scoredCandidates,
-    reviewCandidates: candidatePreparation.funnel.reviewCandidates,
-    softFilteredRecovered: candidatePreparation.funnel.softFilteredRecovered,
-    scoreFailedCandidates: candidatePreparation.funnel.scoreFailedCandidates,
-    latestFallbackCandidates: candidatePreparation.funnel.latestFallbackCandidates,
-    translationPending: candidatePreparation.funnel.translationPending,
-    translationFailed: candidatePreparation.funnel.translationFailed,
-    finalCandidates: candidatePreparation.funnel.finalCandidates,
+    scopeMatched: candidateFunnel.scopeMatched,
+    scoredCandidates: candidateFunnel.scoredCandidates,
+    reviewCandidates: candidateFunnel.reviewCandidates,
+    softFilteredRecovered: candidateFunnel.softFilteredRecovered,
+    scoreFailedCandidates: candidateFunnel.scoreFailedCandidates,
+    latestFallbackCandidates: candidateFunnel.latestFallbackCandidates,
+    translationPending: candidateFunnel.translationPending,
+    translationFailed: candidateFunnel.translationFailed,
+    finalCandidates: candidateFunnel.finalCandidates,
   };
   const filterReasonCounts = [...todayAuditRows.reduce((acc, item) => {
     if (!item.isFiltered && item.filterBucket !== 'filtered') return acc;
@@ -1268,8 +1842,9 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     newItems,
     reportFunnel,
     workflowConfig,
-    candidateFunnel: candidatePreparation.funnel,
+    candidateFunnel,
     excludedCandidates: candidatePreparation.excluded.slice(0, 20),
+    excludedCandidateSummary: summarizeDailyReportExcludedCandidates(candidatePreparation.excluded),
     selectionMode: selection.selectionMode,
     compareWindowDays: options.compareWindowDays,
     topItems,
@@ -1278,6 +1853,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     topSources,
     themeClusters: deriveThemeClusters(topItems),
     generatedAt: new Date().toISOString(),
+    generationMode: options.generationMode,
   };
 
   if (newItems > 0 && topItems.length === 0) {
@@ -1303,6 +1879,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
       modules: {},
       final,
       preset: options.preset,
+      generationMode: options.generationMode,
     };
     const report: DailyReportData = {
       date: dateStr,
@@ -1330,13 +1907,12 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
       pipelineVersion: DAILY_PIPELINE_VERSION,
     }).onConflictDoUpdate({
       target: [schema.insights.userId, schema.insights.date, schema.insights.type],
-      set: {
+      set: buildDailyReportInsightConflictUpdate({
         summary: report.markdown,
         itemCount: newItems,
         topics: [],
         payload,
-        pipelineVersion: DAILY_PIPELINE_VERSION,
-      },
+      }),
     });
 
     logger.info({ date: dateStr, newItems, reportFunnel }, 'Daily report generated as empty diagnosis');
@@ -1349,7 +1925,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
   const cleaningFallback = buildCleaningFallback(snapshot);
 
   const modules: DailyReportData['modules'] = {};
-  const cleaning: DailyReportCleaning = workflowConfig.enabledModules.cleaning
+  const cleaning: DailyReportCleaning = shouldRunDailyReportAiStage(options.generationMode, 'cleaning', workflowConfig.enabledModules.cleaning, options.preset)
     ? await runCleaningScene(userId, snapshot, cleaningFallback)
     : {
       output: cleaningFallback,
@@ -1357,66 +1933,80 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
       meta: {
         sceneType: DAILY_AGENT_SCENES.cleaning,
         status: 'fallback',
-        error: 'workflow_module_disabled',
+        error: options.generationMode === 'fast' ? 'fast_generation_mode' : 'workflow_module_disabled',
       },
     };
-  if (workflowConfig.enabledModules.decision && (options.preset === 'full' || options.preset === 'decision')) {
-    const result = await runScene(
-      userId,
-      'decision',
-      snapshot,
-      decisionFallback.markdown,
-      decisionFallback.bullets,
-      snapshot.highScoreItems.slice(0, 5),
-      buildModuleContext(snapshot, cleaning.output, 'decision'),
-    );
-    modules.decision = {
+  await runDailyReportModuleTasks([
+    {
       key: 'decision',
-      title: '决策简报',
-      markdown: result.markdown,
-      bullets: decisionFallback.bullets,
-      citations: snapshot.highScoreItems.slice(0, 5).map(({ id, title, url, sourceName, category, aiScore }) => ({ id, title, url, sourceName, category, aiScore })),
-      meta: result.meta,
-    };
-  }
-  if (workflowConfig.enabledModules.research && (options.preset === 'full' || options.preset === 'research')) {
-    const result = await runScene(
-      userId,
-      'research',
-      snapshot,
-      researchFallback.markdown,
-      researchFallback.bullets,
-      snapshot.topItems.slice(0, 6),
-      buildModuleContext(snapshot, cleaning.output, 'research'),
-    );
-    modules.research = {
+      enabled: shouldRunDailyReportAiStage(options.generationMode, 'decision', workflowConfig.enabledModules.decision, options.preset),
+      run: () => runScene(
+        userId,
+        'decision',
+        snapshot,
+        decisionFallback.markdown,
+        decisionFallback.bullets,
+        snapshot.highScoreItems.slice(0, 5),
+        buildModuleContext(snapshot, cleaning.output, 'decision'),
+      ),
+      assign: (result) => {
+        modules.decision = {
+          key: 'decision',
+          title: '决策简报',
+          markdown: result.markdown,
+          bullets: decisionFallback.bullets,
+          citations: snapshot.highScoreItems.slice(0, 5).map(({ id, title, url, sourceName, category, aiScore }) => ({ id, title, url, sourceName, category, aiScore })),
+          meta: result.meta,
+        };
+      },
+    },
+    {
       key: 'research',
-      title: '研究汇总',
-      markdown: result.markdown,
-      bullets: researchFallback.bullets,
-      citations: snapshot.topItems.slice(0, 6).map(({ id, title, url, sourceName, category, aiScore }) => ({ id, title, url, sourceName, category, aiScore })),
-      meta: result.meta,
-    };
-  }
-  if (workflowConfig.enabledModules.reading && (options.preset === 'full' || options.preset === 'reading')) {
-    const result = await runScene(
-      userId,
-      'reading',
-      snapshot,
-      readingFallback.markdown,
-      readingFallback.bullets,
-      snapshot.topItems.slice(0, 8),
-      buildModuleContext(snapshot, cleaning.output, 'reading'),
-    );
-    modules.reading = {
+      enabled: shouldRunDailyReportAiStage(options.generationMode, 'research', workflowConfig.enabledModules.research, options.preset),
+      run: () => runScene(
+        userId,
+        'research',
+        snapshot,
+        researchFallback.markdown,
+        researchFallback.bullets,
+        snapshot.topItems.slice(0, 6),
+        buildModuleContext(snapshot, cleaning.output, 'research'),
+      ),
+      assign: (result) => {
+        modules.research = {
+          key: 'research',
+          title: '研究汇总',
+          markdown: result.markdown,
+          bullets: researchFallback.bullets,
+          citations: snapshot.topItems.slice(0, 6).map(({ id, title, url, sourceName, category, aiScore }) => ({ id, title, url, sourceName, category, aiScore })),
+          meta: result.meta,
+        };
+      },
+    },
+    {
       key: 'reading',
-      title: '阅读导航',
-      markdown: result.markdown,
-      bullets: readingFallback.bullets,
-      citations: snapshot.topItems.slice(0, 8).map(({ id, title, url, sourceName, category, aiScore }) => ({ id, title, url, sourceName, category, aiScore })),
-      meta: result.meta,
-    };
-  }
+      enabled: shouldRunDailyReportAiStage(options.generationMode, 'reading', workflowConfig.enabledModules.reading, options.preset),
+      run: () => runScene(
+        userId,
+        'reading',
+        snapshot,
+        readingFallback.markdown,
+        readingFallback.bullets,
+        snapshot.topItems.slice(0, 8),
+        buildModuleContext(snapshot, cleaning.output, 'reading'),
+      ),
+      assign: (result) => {
+        modules.reading = {
+          key: 'reading',
+          title: '阅读导航',
+          markdown: result.markdown,
+          bullets: readingFallback.bullets,
+          citations: snapshot.topItems.slice(0, 8).map(({ id, title, url, sourceName, category, aiScore }) => ({ id, title, url, sourceName, category, aiScore })),
+          meta: result.meta,
+        };
+      },
+    },
+  ]);
 
   ensureDistinctModules(modules, {
     decision: decisionFallback,
@@ -1425,7 +2015,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
   });
 
   const finalFallback = buildFinalFallback(snapshot, cleaning.output, modules);
-  const final: DailyReportFinal = workflowConfig.enabledModules.final
+  const final: DailyReportFinal = shouldRunDailyReportAiStage(options.generationMode, 'final', workflowConfig.enabledModules.final, options.preset)
     ? await runFinalScene(userId, snapshot, cleaning.output, modules, finalFallback)
     : {
       markdown: finalFallback.markdown,
@@ -1449,6 +2039,7 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     modules,
     final,
     preset: options.preset,
+    generationMode: options.generationMode,
   };
 
   const report: DailyReportData = {
@@ -1479,13 +2070,12 @@ export async function generateDailyReport(userId: string, date?: Date, opts?: Da
     pipelineVersion: DAILY_PIPELINE_VERSION,
   }).onConflictDoUpdate({
     target: [schema.insights.userId, schema.insights.date, schema.insights.type],
-    set: {
+    set: buildDailyReportInsightConflictUpdate({
       summary: report.markdown,
       itemCount: newItems,
       topics: snapshot.themeClusters,
       payload,
-      pipelineVersion: DAILY_PIPELINE_VERSION,
-    },
+    }),
   });
 
   logger.info({ date: dateStr, newItems, topCount: topItems.length, highScore: highScoreItems.length, preset: options.preset }, 'Daily report generated');

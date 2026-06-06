@@ -19,19 +19,19 @@ export function Sidebar() {
   const { user, logout } = useAuth();
 
   return (
-    <aside className="w-56 shrink-0 border-r border-zinc-200 bg-zinc-50 flex flex-col h-screen sticky top-0">
-      <div className="px-4 py-5 border-b border-zinc-200">
+    <aside className="flex w-full shrink-0 flex-col border-b border-zinc-200 bg-zinc-50 md:sticky md:top-0 md:h-screen md:w-56 md:border-b-0 md:border-r">
+      <div className="border-b border-zinc-200 px-4 py-3 md:py-5">
         <h1 className="text-lg font-bold text-zinc-900 tracking-tight">信息中枢</h1>
         <p className="text-xs text-zinc-500 mt-0.5">v3.1 · 成长导向中枢</p>
       </div>
 
-      <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
+      <nav className="flex gap-1 overflow-x-auto px-2 py-2 md:block md:flex-1 md:space-y-0.5 md:overflow-y-auto md:py-3">
         {navItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
             className={({ isActive }) =>
-              `flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
+              `flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors md:shrink ${
                 isActive
                   ? 'bg-zinc-900 text-white font-medium'
                   : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
@@ -44,7 +44,7 @@ export function Sidebar() {
         ))}
       </nav>
 
-      <div className="px-3 py-3 border-t border-zinc-200">
+      <div className="hidden border-t border-zinc-200 px-3 py-3 md:block">
         <p className="text-[10px] text-zinc-400 text-center">24/7 自动采集运行中</p>
         {user && (
           <div className="mt-2 px-2 py-2 rounded bg-white border border-zinc-200">

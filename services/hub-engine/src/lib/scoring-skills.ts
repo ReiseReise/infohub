@@ -589,6 +589,8 @@ export function buildSkillPrompt(input: {
   const rubric = JSON.stringify(input.skill.rubricJson || defaultSkillRubric(), null, 2);
   const profileSummary = input.profileSummary?.trim() || `默认关注：${DEFAULT_REASON_TAGS.join('、')}`;
   return [
+    '输出硬约束：只返回一行 JSON；不要输出 Markdown、代码块、解释、前后缀或额外文本；每个数组最多 3 项，每项不超过 18 个字。',
+    'JSON 形状必须是：{"score":0-100,"confidence":0-1,"decision":"must_read|worth_read|skip|noise","reasons":["..."],"matchedSignals":["..."],"riskFlags":["..."]}',
     `技能名称：${input.skill.name}`,
     input.skill.description ? `技能定位：${input.skill.description}` : '',
     `用户偏好画像：${profileSummary}`,
@@ -653,6 +655,851 @@ export function aggregateSkillScores(results: Array<{ score: number; confidence:
   if (totalWeight <= 0) return null;
   const score = weighted.reduce((sum, item) => sum + item.score * item.effectiveWeight, 0) / totalWeight;
   return Number(score.toFixed(2));
+}
+
+export function buildSkillFailureSummary(errors: string[]) {
+  const uniqueErrors = [...new Set(errors.map((error) => String(error || '').trim()).filter(Boolean))];
+  if (uniqueErrors.length === 0) return '';
+  return `partial_scoring_skill_failures:${uniqueErrors.slice(0, 3).join(',')}`;
+}
+
+export type ScoringSkillHealthEvent = {
+  status?: string | null;
+  label?: string | null;
+  errorMessage?: string | null;
+  targetId?: string | null;
+  modelName?: string | null;
+  modelConfigId?: string | null;
+  createdAt?: Date | string | null;
+};
+
+export type ScoringSkillHealthSummary = {
+  status: 'healthy' | 'warning' | 'error';
+  totalSkillCount: number;
+  activeSkillCount: number;
+  recentErrorCount: number;
+  emptyResponseCount: number;
+  deterministicFallbackCount: number;
+  retryRecoveredCount: number;
+  unstableModelCount: number;
+  lastErrorAt: string | null;
+  activeSkills: Array<{
+    id: number;
+    name: string;
+    presetKey: string | null;
+    weight: number;
+    modelConfigId: string | null;
+  }>;
+  recentErrors: Array<{
+    skillName: string;
+    message: string;
+    targetId: string | null;
+    modelName: string | null;
+    modelConfigId: string | null;
+    createdAt: string | null;
+  }>;
+  unstableModels: Array<{
+    modelKey: string;
+    modelName: string | null;
+    modelConfigId: string | null;
+    retryableFailureCount: number;
+    retryRecoveredCount: number;
+    deterministicFallbackCount: number;
+    lastFailureAt: string | null;
+    circuitBreakerRecommended: boolean;
+  }>;
+  recommendations: string[];
+};
+
+export type ScoringModelCircuitBreakerDecision = {
+  shouldBypass: boolean;
+  modelKey: string | null;
+  modelName: string | null;
+  modelConfigId: string | null;
+  retryableFailureCount: number;
+  retryRecoveredCount: number;
+  deterministicFallbackCount: number;
+  reason: string | null;
+};
+
+const SCORING_MODEL_RECOVERY_SUCCESS_STREAK = 3;
+
+export type ScoringModelRemediationInput = {
+  currentModelConfigId?: string | null;
+  unstableModels: ScoringSkillHealthSummary['unstableModels'];
+  probeEvents?: ScoringSkillHealthEvent[];
+  availableModels: Array<{
+    id: string;
+    alias?: string | null;
+    provider?: string | null;
+    modelName?: string | null;
+    modelType?: string | null;
+    isActive?: boolean | null;
+    isDefault?: boolean | null;
+    testStatus?: string | null;
+  }>;
+};
+
+export type ScoringModelRemediation = {
+  action: 'none' | 'switch_model' | 'repair_config';
+  currentModelConfigId: string | null;
+  recommendedModelConfigId: string | null;
+  message: string;
+  candidateModels: Array<{
+    id: string;
+    label: string;
+    provider: string | null;
+    modelName: string | null;
+    testStatus: string | null;
+    isDefault: boolean;
+  }>;
+};
+
+export type ScoringModelProbeResult = {
+  itemId: string;
+  title: string;
+  ok: boolean;
+  score?: number | null;
+  decision?: string | null;
+  confidence?: number | null;
+  error?: string | null;
+};
+
+export type ScoringModelProbeSummary = {
+  status: 'passed' | 'failed' | 'empty';
+  canSwitch: boolean;
+  modelConfigId: string;
+  modelLabel: string;
+  probed: number;
+  passed: number;
+  failed: number;
+  firstError: string | null;
+  message: string;
+  results: ScoringModelProbeResult[];
+};
+
+export type ScoringModelRepairSummary = {
+  status: 'recovered' | 'failed' | 'empty';
+  canContinueBatchRepair: boolean;
+  modelConfigId: string;
+  modelLabel: string;
+  attempted: number;
+  recovered: number;
+  failed: number;
+  skipped: number;
+  recoveryRate: number;
+  firstError: string | null;
+  itemIds: string[];
+  message: string;
+};
+
+export const FALLBACK_SCORING_RISK_FLAGS = [
+  'deterministic_fallback',
+  'model_circuit_breaker',
+  'ai_scoring_unavailable',
+] as const;
+
+export type FallbackScoringRecoverySummary = {
+  status: 'recovered' | 'partial' | 'failed' | 'empty' | 'blocked';
+  candidateCount: number;
+  attempted: number;
+  recovered: number;
+  failed: number;
+  skipped: number;
+  remainingCandidateCount: number;
+  recoveryRate: number;
+  firstError: string | null;
+  itemIds: string[];
+  verifiedRecoveredItemIds: string[];
+  message: string;
+};
+
+export function canRecoverFallbackScoringItems(role?: string | null) {
+  return role === 'user' || role === 'admin';
+}
+
+export function isFallbackScoringRecoveryStatus(status?: string | null) {
+  return status === 'scored' || status === 'done';
+}
+
+export function normalizeFallbackScoringRecoveryRequest(input: unknown): { limit: number; itemIds: string[] } {
+  const body = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+  const seen = new Set<string>();
+  const itemIds = Array.isArray(body.itemIds)
+    ? body.itemIds
+      .map((value) => String(value || '').trim())
+      .filter((value) => {
+        if (!value || seen.has(value)) return false;
+        seen.add(value);
+        return true;
+      })
+      .slice(0, 20)
+    : [];
+  const requestedLimit = Number(body.limit || (itemIds.length > 0 ? itemIds.length : 3));
+  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 3, 1), 20);
+  return {
+    limit,
+    itemIds: itemIds.slice(0, limit),
+  };
+}
+
+function toIsoString(value?: Date | string | null) {
+  if (!value) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+export function buildScoringSkillHealthSummary(
+  skills: Array<Pick<ScoringSkillRecord, 'id' | 'name' | 'presetKey' | 'status' | 'weight' | 'modelConfigId'>>,
+  events: ScoringSkillHealthEvent[] = [],
+): ScoringSkillHealthSummary {
+  const activeSkills = skills
+    .filter((skill) => skill.status === 'active')
+    .map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      presetKey: skill.presetKey || null,
+      weight: Number(skill.weight || 1),
+      modelConfigId: skill.modelConfigId || null,
+    }));
+  const recentErrors = events
+    .filter((event) => event.status === 'error' || Boolean(event.errorMessage))
+    .map((event) => ({
+      skillName: event.label || '未知评分 Skill',
+      message: event.errorMessage || 'unknown_scoring_skill_error',
+      targetId: event.targetId || null,
+      modelName: event.modelName || null,
+      modelConfigId: event.modelConfigId || null,
+      createdAt: toIsoString(event.createdAt),
+    }))
+    .sort((left, right) => {
+      const leftMs = left.createdAt ? new Date(left.createdAt).getTime() : 0;
+      const rightMs = right.createdAt ? new Date(right.createdAt).getTime() : 0;
+      return rightMs - leftMs;
+    })
+    .slice(0, 10);
+  const emptyResponseCount = recentErrors.filter((event) => event.message.includes('empty_scoring_skill_response')).length;
+  const deterministicFallbackCount = recentErrors.filter((event) => (
+    event.skillName.includes('deterministic fallback scoring')
+    || event.message.includes('deterministic_fallback_scoring')
+  )).length;
+  const retryRecoveredCount = events.filter((event) => (
+    event.status === 'success'
+    && String(event.label || '').includes('retry recovered')
+  )).length;
+  const modelBuckets = new Map<string, {
+    modelKey: string;
+    modelName: string | null;
+    modelConfigId: string | null;
+    retryableFailureCount: number;
+    retryRecoveredCount: number;
+    deterministicFallbackCount: number;
+    lastFailureAt: string | null;
+    recoverySuccessStreak: number;
+  }>();
+  const getModelBucket = (event: ScoringSkillHealthEvent) => {
+    const modelConfigId = event.modelConfigId || null;
+    const modelName = event.modelName || null;
+    const modelKey = modelConfigId || modelName || 'unknown_model';
+    const existing = modelBuckets.get(modelKey);
+    if (existing) return existing;
+    const next = {
+      modelKey,
+      modelName,
+      modelConfigId,
+      retryableFailureCount: 0,
+      retryRecoveredCount: 0,
+      deterministicFallbackCount: 0,
+      lastFailureAt: null,
+      recoverySuccessStreak: 0,
+    };
+    modelBuckets.set(modelKey, next);
+    return next;
+  };
+
+  const orderedEvents = [...events].sort((left, right) => {
+    const leftMs = toIsoString(left.createdAt) ? new Date(toIsoString(left.createdAt) || '').getTime() : 0;
+    const rightMs = toIsoString(right.createdAt) ? new Date(toIsoString(right.createdAt) || '').getTime() : 0;
+    return leftMs - rightMs;
+  });
+
+  for (const event of orderedEvents) {
+    const message = event.errorMessage || '';
+    const label = event.label || '';
+    const bucket = getModelBucket(event);
+    const createdAt = toIsoString(event.createdAt);
+    const isFailure = isRetryableScoringFailure(message) || label.includes('retryable failure') || label.includes('retry failed');
+    if (isRetryableScoringFailure(message) || label.includes('retryable failure') || label.includes('retry failed')) {
+      bucket.retryableFailureCount += 1;
+      if (createdAt && (!bucket.lastFailureAt || new Date(createdAt).getTime() > new Date(bucket.lastFailureAt).getTime())) {
+        bucket.lastFailureAt = createdAt;
+      }
+      bucket.recoverySuccessStreak = 0;
+    }
+    if (event.status === 'success' && label.includes('retry recovered')) {
+      bucket.retryRecoveredCount += 1;
+    }
+    if (label.includes('deterministic fallback scoring') || message.includes('deterministic_fallback_scoring')) {
+      bucket.deterministicFallbackCount += 1;
+      if (createdAt && (!bucket.lastFailureAt || new Date(createdAt).getTime() > new Date(bucket.lastFailureAt).getTime())) {
+        bucket.lastFailureAt = createdAt;
+      }
+      bucket.recoverySuccessStreak = 0;
+    }
+    if (!isFailure && event.status === 'success' && !event.errorMessage && bucket.lastFailureAt && createdAt) {
+      if (new Date(createdAt).getTime() > new Date(bucket.lastFailureAt).getTime()) {
+        bucket.recoverySuccessStreak += 1;
+      }
+    }
+  }
+  const unstableModels = [...modelBuckets.values()]
+    .map((bucket) => ({
+      ...bucket,
+      circuitBreakerRecommended: (
+        bucket.recoverySuccessStreak < SCORING_MODEL_RECOVERY_SUCCESS_STREAK
+        && (bucket.retryableFailureCount >= 3 || bucket.deterministicFallbackCount >= 1)
+      ),
+    }))
+    .filter((bucket) => bucket.circuitBreakerRecommended)
+    .sort((left, right) => {
+      const failureDiff = right.retryableFailureCount - left.retryableFailureCount;
+      if (failureDiff !== 0) return failureDiff;
+      const rightMs = right.lastFailureAt ? new Date(right.lastFailureAt).getTime() : 0;
+      const leftMs = left.lastFailureAt ? new Date(left.lastFailureAt).getTime() : 0;
+      return rightMs - leftMs;
+    })
+    .slice(0, 5);
+  const recommendations: string[] = [];
+
+  if (activeSkills.length === 0) {
+    recommendations.push('启用至少 1 个评分 Skill，否则 Feed 精选只能退回基础规则。');
+  }
+  if (emptyResponseCount > 0) {
+    recommendations.push('近期有评分 Skill 返回空响应，优先检查模型绑定、输出 JSON 约束和该模型是否适合结构化评分。');
+  }
+  if (recentErrors.length > emptyResponseCount) {
+    recommendations.push('近期存在非空响应类评分错误，建议查看失败条目的 Feed 详情并重跑评分。');
+  }
+  if (deterministicFallbackCount > 0) {
+    recommendations.push('系统已用确定性低置信兜底接住部分评分失败；这类条目不会卡死，但仍建议修复模型输出稳定性。');
+  }
+  if (retryRecoveredCount > 0) {
+    recommendations.push('近期有评分失败通过紧凑 JSON 重试恢复，说明模型可用但输出稳定性仍需观察。');
+  }
+  if (unstableModels.length > 0) {
+    recommendations.push('已有评分模型达到熔断观察阈值，建议暂停或切换评分模型，并降低该模型进入日报链路的信任度。');
+  }
+  if (recommendations.length === 0) {
+    recommendations.push('评分 Skill 近期未发现错误，继续用 Feed 反馈校准偏好画像。');
+  }
+
+  return {
+    status: activeSkills.length === 0 ? 'error' : recentErrors.length > 0 ? 'warning' : 'healthy',
+    totalSkillCount: skills.length,
+    activeSkillCount: activeSkills.length,
+    recentErrorCount: recentErrors.length,
+    emptyResponseCount,
+    deterministicFallbackCount,
+    retryRecoveredCount,
+    unstableModelCount: unstableModels.length,
+    lastErrorAt: recentErrors[0]?.createdAt || null,
+    activeSkills,
+    recentErrors,
+    unstableModels,
+    recommendations,
+  };
+}
+
+export function resolveScoringModelCircuitBreaker(
+  model: { modelConfigId?: string | null; modelName?: string | null },
+  events: ScoringSkillHealthEvent[] = [],
+): ScoringModelCircuitBreakerDecision {
+  const modelConfigId = model.modelConfigId || null;
+  const modelName = model.modelName || null;
+  const modelKey = modelConfigId || modelName || null;
+  const health = buildScoringSkillHealthSummary([], events);
+  const unstableModel = health.unstableModels.find((entry) => {
+    if (modelConfigId && entry.modelConfigId === modelConfigId) return true;
+    if (!modelConfigId && modelName && entry.modelName === modelName) return true;
+    return false;
+  });
+  const modelEvents = events.filter((event) => (
+    (modelConfigId && event.modelConfigId === modelConfigId)
+    || (modelName && event.modelName === modelName)
+  ));
+  const latestProbeSuccessAt = modelEvents
+    .filter((event) => event.status === 'success' && String(event.label || '').includes('scoring model probe'))
+    .map((event) => toIsoString(event.createdAt))
+    .filter(Boolean)
+    .sort()
+    .at(-1) || null;
+
+  if (!unstableModel) {
+    return {
+      shouldBypass: false,
+      modelKey,
+      modelName,
+      modelConfigId,
+      retryableFailureCount: 0,
+      retryRecoveredCount: 0,
+      deterministicFallbackCount: 0,
+      reason: null,
+    };
+  }
+  if (latestProbeSuccessAt && unstableModel.lastFailureAt && new Date(latestProbeSuccessAt).getTime() > new Date(unstableModel.lastFailureAt).getTime()) {
+    return {
+      shouldBypass: false,
+      modelKey,
+      modelName,
+      modelConfigId,
+      retryableFailureCount: unstableModel.retryableFailureCount,
+      retryRecoveredCount: unstableModel.retryRecoveredCount,
+      deterministicFallbackCount: unstableModel.deterministicFallbackCount,
+      reason: null,
+    };
+  }
+
+  const reason = [
+    '评分模型近期不稳定，已触发运行时熔断并改用低置信确定性评分。',
+    `retryable_failures=${unstableModel.retryableFailureCount}`,
+    `deterministic_fallbacks=${unstableModel.deterministicFallbackCount}`,
+  ].join(' ');
+
+  return {
+    shouldBypass: true,
+    modelKey: unstableModel.modelKey,
+    modelName: unstableModel.modelName,
+    modelConfigId: unstableModel.modelConfigId,
+    retryableFailureCount: unstableModel.retryableFailureCount,
+    retryRecoveredCount: unstableModel.retryRecoveredCount,
+    deterministicFallbackCount: unstableModel.deterministicFallbackCount,
+    reason,
+  };
+}
+
+export function buildScoringModelRemediation(input: ScoringModelRemediationInput): ScoringModelRemediation {
+  const currentModelConfigId = input.currentModelConfigId || null;
+  const unstableKeys = new Set(input.unstableModels.flatMap((model) => [
+    model.modelKey,
+    model.modelConfigId || '',
+    model.modelName || '',
+  ].filter(Boolean)));
+  const currentIsUnstable = Boolean(
+    input.unstableModels.length > 0
+    && (!currentModelConfigId || unstableKeys.has(currentModelConfigId)),
+  );
+  const probeBuckets = new Map<string, { passed: number; failed: number; lastAt: string | null }>();
+  const latestProbeSuccessByKey = new Map<string, string>();
+  for (const event of input.probeEvents || []) {
+    const keys = [
+      event.modelConfigId || '',
+      event.modelName || '',
+    ].filter(Boolean);
+    if (keys.length === 0) continue;
+    const createdAt = toIsoString(event.createdAt);
+    for (const key of keys) {
+      const bucket = probeBuckets.get(key) || { passed: 0, failed: 0, lastAt: null };
+      if (event.status === 'success') {
+        bucket.passed += 1;
+        if (createdAt && (!latestProbeSuccessByKey.get(key) || new Date(createdAt).getTime() > new Date(latestProbeSuccessByKey.get(key) || 0).getTime())) {
+          latestProbeSuccessByKey.set(key, createdAt);
+        }
+      }
+      if (event.status === 'error' || event.errorMessage) bucket.failed += 1;
+      if (createdAt && (!bucket.lastAt || new Date(createdAt).getTime() > new Date(bucket.lastAt).getTime())) {
+        bucket.lastAt = createdAt;
+      }
+      probeBuckets.set(key, bucket);
+    }
+  }
+  const failedProbeKeys = new Set<string>();
+  for (const [key, bucket] of probeBuckets.entries()) {
+    if (bucket.failed > 0 && bucket.passed === 0) failedProbeKeys.add(key);
+  }
+  const isModelStillUnstable = (model: { id: string; modelName?: string | null }) => {
+    const matched = input.unstableModels.find((entry) => (
+      entry.modelKey === model.id
+      || entry.modelConfigId === model.id
+      || Boolean(model.modelName && (entry.modelKey === model.modelName || entry.modelName === model.modelName))
+    ));
+    if (!matched) return false;
+    const latestProbeSuccess = latestProbeSuccessByKey.get(model.id) || (model.modelName ? latestProbeSuccessByKey.get(model.modelName) : null);
+    if (!latestProbeSuccess) return true;
+    if (!matched.lastFailureAt) return false;
+    return new Date(latestProbeSuccess).getTime() <= new Date(matched.lastFailureAt).getTime();
+  };
+
+  if (!currentIsUnstable) {
+    return {
+      action: 'none',
+      currentModelConfigId,
+      recommendedModelConfigId: null,
+      message: '评分模型暂未触发治理动作。',
+      candidateModels: [],
+    };
+  }
+
+  const candidateModels = input.availableModels
+    .filter((model) => model.isActive !== false)
+    .filter((model) => String(model.modelType || '').toLowerCase() === 'llm')
+    .filter((model) => model.id !== currentModelConfigId)
+    .filter((model) => !isModelStillUnstable(model))
+    .filter((model) => !failedProbeKeys.has(model.id) && !failedProbeKeys.has(model.modelName || ''))
+    .map((model) => {
+      const testStatus = model.testStatus || null;
+      const testWeight = testStatus === 'passed' ? 0 : testStatus === 'untested' ? 1 : 2;
+      return {
+        id: model.id,
+        label: model.alias || model.modelName || model.id,
+        provider: model.provider || null,
+        modelName: model.modelName || null,
+        testStatus,
+        isDefault: Boolean(model.isDefault),
+        sortKey: `${testWeight}:${model.isDefault ? 0 : 1}:${model.alias || model.modelName || model.id}`,
+      };
+    })
+    .sort((left, right) => left.sortKey.localeCompare(right.sortKey))
+    .map(({ sortKey: _sortKey, ...model }) => model)
+    .slice(0, 3);
+
+  if (candidateModels.length > 0) {
+    return {
+      action: 'switch_model',
+      currentModelConfigId,
+      recommendedModelConfigId: candidateModels[0]?.id || null,
+      message: `当前评分模型已触发熔断，建议切换评分场景到备用模型：${candidateModels[0]?.label || '备用模型'}。`,
+      candidateModels,
+    };
+  }
+
+  return {
+    action: 'repair_config',
+    currentModelConfigId,
+    recommendedModelConfigId: null,
+    message: '当前评分模型已触发熔断，但没有可用备用模型；请先新增或测试通过一个 LLM 模型，再恢复评分链路。',
+    candidateModels: [],
+  };
+}
+
+export function buildScoringModelProbeSummary(input: {
+  modelConfigId: string;
+  modelLabel?: string | null;
+  results: ScoringModelProbeResult[];
+}): ScoringModelProbeSummary {
+  const results = input.results;
+  const passed = results.filter((result) => result.ok).length;
+  const failed = results.length - passed;
+  const firstError = results.find((result) => !result.ok)?.error || null;
+  const modelLabel = input.modelLabel || input.modelConfigId;
+  if (results.length === 0) {
+    return {
+      status: 'empty',
+      canSwitch: false,
+      modelConfigId: input.modelConfigId,
+      modelLabel,
+      probed: 0,
+      passed: 0,
+      failed: 0,
+      firstError: null,
+      message: '没有可用于验证的评分失败样本，暂不建议自动切换。',
+      results,
+    };
+  }
+  if (passed > 0) {
+    return {
+      status: 'passed',
+      canSwitch: true,
+      modelConfigId: input.modelConfigId,
+      modelLabel,
+      probed: results.length,
+      passed,
+      failed,
+      firstError,
+      message: `${modelLabel} 已通过 ${passed}/${results.length} 条评分样本验证，备用模型可用于评分。`,
+      results,
+    };
+  }
+  return {
+    status: 'failed',
+    canSwitch: false,
+    modelConfigId: input.modelConfigId,
+    modelLabel,
+    probed: results.length,
+    passed,
+    failed,
+    firstError,
+    message: `${modelLabel} 未通过评分样本验证，暂不建议切换。`,
+    results,
+  };
+}
+
+export function buildScoringModelRepairSummary(input: {
+  modelConfigId: string;
+  modelLabel?: string | null;
+  itemIds: string[];
+  scoring: {
+    processed: number;
+    attempted: number;
+    failed: number;
+    skipped: number;
+    errors: string[];
+  };
+}): ScoringModelRepairSummary {
+  const modelLabel = input.modelLabel || input.modelConfigId;
+  const attempted = Number(input.scoring.attempted || input.itemIds.length || 0);
+  const recovered = Number(input.scoring.processed || 0);
+  const skipped = Number(input.scoring.skipped || 0);
+  const failed = Math.max(Number(input.scoring.failed || 0), attempted - recovered - skipped);
+  const recoveryRate = attempted > 0 ? Number((recovered / attempted).toFixed(2)) : 0;
+  const firstError = input.scoring.errors[0] || null;
+
+  if (attempted === 0) {
+    return {
+      status: 'empty',
+      canContinueBatchRepair: false,
+      modelConfigId: input.modelConfigId,
+      modelLabel,
+      attempted,
+      recovered,
+      failed,
+      skipped,
+      recoveryRate,
+      firstError,
+      itemIds: input.itemIds,
+      message: '没有可用于小批量修复的评分失败条目。',
+    };
+  }
+
+  if (recovered > 0) {
+    return {
+      status: 'recovered',
+      canContinueBatchRepair: recoveryRate >= 0.5,
+      modelConfigId: input.modelConfigId,
+      modelLabel,
+      attempted,
+      recovered,
+      failed,
+      skipped,
+      recoveryRate,
+      firstError,
+      itemIds: input.itemIds,
+      message: `${modelLabel} 已恢复 ${recovered}/${attempted} 条评分失败项，恢复率 ${Math.round(recoveryRate * 100)}%。`,
+    };
+  }
+
+  return {
+    status: 'failed',
+    canContinueBatchRepair: false,
+    modelConfigId: input.modelConfigId,
+    modelLabel,
+    attempted,
+    recovered,
+    failed,
+    skipped,
+    recoveryRate,
+    firstError,
+    itemIds: input.itemIds,
+    message: `${modelLabel} 没有恢复失败条目，暂不建议扩大批量修复。`,
+  };
+}
+
+export function hasFallbackScoringRiskFlags(flags?: unknown[] | null) {
+  if (!Array.isArray(flags)) return false;
+  const fallbackFlags = new Set<string>(FALLBACK_SCORING_RISK_FLAGS);
+  return flags.some((flag) => fallbackFlags.has(String(flag)));
+}
+
+export function buildFallbackScoringRecoverySummary(input: {
+  candidateCount: number;
+  itemIds: string[];
+  verifiedRecoveredItemIds: string[];
+  blockedReason?: string | null;
+  scoring: {
+    processed: number;
+    attempted: number;
+    failed: number;
+    skipped: number;
+    errors: string[];
+  };
+}): FallbackScoringRecoverySummary {
+  const candidateCount = Math.max(Number(input.candidateCount || 0), 0);
+  const attempted = Number(input.scoring.attempted || input.itemIds.length || 0);
+  const recovered = input.verifiedRecoveredItemIds.length;
+  const skipped = Number(input.scoring.skipped || 0);
+  const failed = Math.max(Number(input.scoring.failed || 0), attempted - recovered - skipped);
+  const remainingCandidateCount = Math.max(candidateCount - recovered, 0);
+  const recoveryRate = attempted > 0 ? Number((recovered / attempted).toFixed(2)) : 0;
+  const firstError = input.blockedReason || input.scoring.errors[0] || null;
+
+  if (input.blockedReason) {
+    return {
+      status: 'blocked',
+      candidateCount,
+      attempted,
+      recovered,
+      failed: 0,
+      skipped,
+      remainingCandidateCount: candidateCount,
+      recoveryRate: 0,
+      firstError,
+      itemIds: input.itemIds,
+      verifiedRecoveredItemIds: input.verifiedRecoveredItemIds,
+      message: `${input.blockedReason}；请先切换或修复评分模型，再回收历史兜底评分。`,
+    };
+  }
+
+  if (candidateCount === 0 || attempted === 0) {
+    return {
+      status: 'empty',
+      candidateCount,
+      attempted,
+      recovered,
+      failed: 0,
+      skipped,
+      remainingCandidateCount: candidateCount,
+      recoveryRate: 0,
+      firstError: null,
+      itemIds: input.itemIds,
+      verifiedRecoveredItemIds: input.verifiedRecoveredItemIds,
+      message: '没有历史兜底评分条目需要回收。',
+    };
+  }
+
+  if (recovered === attempted) {
+    return {
+      status: 'recovered',
+      candidateCount,
+      attempted,
+      recovered,
+      failed: 0,
+      skipped,
+      remainingCandidateCount,
+      recoveryRate,
+      firstError,
+      itemIds: input.itemIds,
+      verifiedRecoveredItemIds: input.verifiedRecoveredItemIds,
+      message: `历史兜底评分已用真实 Skill 评分恢复 ${recovered}/${attempted} 条。`,
+    };
+  }
+
+  if (recovered > 0) {
+    return {
+      status: 'partial',
+      candidateCount,
+      attempted,
+      recovered,
+      failed,
+      skipped,
+      remainingCandidateCount,
+      recoveryRate,
+      firstError,
+      itemIds: input.itemIds,
+      verifiedRecoveredItemIds: input.verifiedRecoveredItemIds,
+      message: `历史兜底评分用真实 Skill 评分恢复 ${recovered}/${attempted} 条，剩余条目仍需继续修复或检查失败原因。`,
+    };
+  }
+
+  return {
+    status: 'failed',
+    candidateCount,
+    attempted,
+    recovered,
+    failed,
+    skipped,
+    remainingCandidateCount,
+    recoveryRate,
+    firstError,
+    itemIds: input.itemIds,
+    verifiedRecoveredItemIds: input.verifiedRecoveredItemIds,
+    message: '历史兜底评分本轮没有恢复，请先检查评分模型健康或失败原因。',
+  };
+}
+
+export function buildFallbackScoringPrompt(input: { title: string; content: string }) {
+  const compactContent = String(input.content || '').trim().slice(0, 1200);
+  return [
+    'You are a news ranking assistant. Return JSON only.',
+    'Score whether this item is worth reading for an AI/product/technology intelligence feed.',
+    'Use this exact JSON shape:',
+    '{"score":0-100,"confidence":0-1,"decision":"must_read|worth_read|skip|noise","reasons":["..."],"matchedSignals":["..."],"riskFlags":["..."]}',
+    '',
+    `Title: ${input.title}`,
+    `Content: ${compactContent || input.title}`,
+  ].join('\n');
+}
+
+export function isRetryableScoringFailure(message?: string | null) {
+  const text = String(message || '').toLowerCase();
+  if (!text) return false;
+  return text.includes('empty_scoring_skill_response')
+    || /\b(408|409|429|500|502|503|504)\b/.test(text)
+    || text.includes('timeout')
+    || text.includes('temporarily unavailable')
+    || text.includes('rate limit');
+}
+
+export function buildScoringRetryPrompt(input: {
+  title: string;
+  content: string;
+  failureMessage?: string | null;
+}) {
+  const compactContent = String(input.content || '').trim().slice(0, 1200);
+  return [
+    'Retry scoring after failure.',
+    `Failure: ${String(input.failureMessage || 'unknown_scoring_failure').slice(0, 180)}`,
+    'Return exactly one JSON object. No markdown. No explanation.',
+    '{"score":0-100,"confidence":0-1,"decision":"must_read|worth_read|skip|noise","reasons":["..."],"matchedSignals":["..."],"riskFlags":["..."]}',
+    'Use conservative scoring. If evidence is weak, choose skip or noise.',
+    '',
+    `Title: ${input.title}`,
+    `Content: ${compactContent || input.title}`,
+  ].join('\n');
+}
+
+export function buildDeterministicFallbackScore(input: {
+  title: string;
+  content: string;
+  failureSummary?: string | null;
+}) {
+  const text = `${input.title}\n${input.content}`.trim();
+  const contentLength = input.content.trim().length;
+  const aiSignal = /(AI|人工智能|大模型|LLM|Agent|智能体|OpenAI|Anthropic|Claude|Gemini|模型|算力|芯片|RAG|MCP|API|SDK)/i.test(text);
+  const productSignal = /(发布|上线|推出|release|launch|deploy|runtime|workflow|automation|企业|产品|用户|功能|能力)/i.test(text);
+  const noiseSignal = /(股价|行情|财报|融资|估值|广告|促销|招聘|coupon|deal)/i.test(text);
+  const lengthScore = contentLength >= 900 ? 8 : contentLength >= 300 ? 5 : contentLength >= 120 ? 2 : -4;
+  const signalScore = (aiSignal ? 7 : 0) + (productSignal ? 3 : 0) - (noiseSignal ? 5 : 0);
+  const score = Math.min(58, Math.max(contentLength < 80 ? 32 : 40, 40 + lengthScore + signalScore));
+  const decision = score >= 62 ? 'worth_read' : score >= 35 ? 'skip' : 'noise';
+  const reasons = [
+    'AI 评分不可用，系统使用确定性低置信兜底分，避免条目长期卡在评分失败。',
+    aiSignal ? '标题或正文包含 AI/模型/Agent 等相关信号，但仍需人工或模型复核。' : '未识别到强 AI/科技信号，默认保守降权。',
+    input.failureSummary ? `失败摘要：${String(input.failureSummary).slice(0, 120)}` : '',
+  ].filter(Boolean);
+
+  return {
+    score,
+    confidence: 0.25,
+    decision,
+    reasons,
+    matchedSignals: [
+      aiSignal ? 'AI/模型信号' : '',
+      productSignal ? '产品/落地信号' : '',
+    ].filter(Boolean),
+    riskFlags: ['deterministic_fallback', 'ai_scoring_unavailable'],
+    rawResponse: JSON.stringify({
+      score,
+      confidence: 0.25,
+      decision,
+      reasons,
+      matchedSignals: [
+        aiSignal ? 'AI/模型信号' : '',
+        productSignal ? '产品/落地信号' : '',
+      ].filter(Boolean),
+      riskFlags: ['deterministic_fallback', 'ai_scoring_unavailable'],
+      fallback: 'deterministic_fallback',
+    }),
+  };
 }
 
 export async function replaceItemBreakdowns(userId: string, itemId: string, rows: Array<{

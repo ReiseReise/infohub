@@ -8,10 +8,11 @@ import { computeSourceFreshness } from '../lib/freshness.js';
 import { deriveSourceProfile, normalizeGrowthAxes } from '../lib/growth.js';
 import { buildSourceFingerprint } from '../lib/source-normalization.js';
 import { classifySourceKind, normalizeAuthorityWeight } from '../lib/aihot-governance.js';
+import { buildSourceQualityFunnel, type SourceQualityFunnel } from '../lib/content-quality.js';
 
 const app = new Hono();
 
-type SourceListSort = 'createdAt' | 'latest' | 'unread' | 'health' | 'name';
+type SourceListSort = 'createdAt' | 'latest' | 'unread' | 'health' | 'name' | 'quality' | 'content' | 'ai' | 'noise';
 
 type SourceOverview = {
   itemCount: number;
@@ -22,6 +23,16 @@ type SourceOverview = {
   selectedCount: number;
   selectedHitRate: number;
   duplicateContribution: number;
+  contentReadyCount: number;
+  contentDegradedCount: number;
+  contentMissingCount: number;
+  qualityPassCount: number;
+  qualityReviewCount: number;
+  qualityFilterCount: number;
+  scoredCount: number;
+  summarizedCount: number;
+  translationCompletedCount: number;
+  sourceQuality: SourceQualityFunnel;
   latestItemTitle: string | null;
   latestItemUrl: string | null;
   latestItemAt: string | null;
@@ -63,6 +74,7 @@ function sortSources<T extends {
   latestItemAt?: string | null;
   unreadCount?: number | null;
   healthScore?: number | null;
+  sourceQuality?: SourceQualityFunnel | null;
 }>(rows: T[], sortBy: SourceListSort): T[] {
   return [...rows].sort((a, b) => {
     if (sortBy === 'name') {
@@ -71,6 +83,22 @@ function sortSources<T extends {
     if (sortBy === 'health') {
       const healthDiff = Number(b.healthScore || 0) - Number(a.healthScore || 0);
       if (healthDiff !== 0) return healthDiff;
+    }
+    if (sortBy === 'quality') {
+      const scoreDiff = Number(b.sourceQuality?.qualityScore || 0) - Number(a.sourceQuality?.qualityScore || 0);
+      if (scoreDiff !== 0) return scoreDiff;
+    }
+    if (sortBy === 'content') {
+      const contentDiff = Number(b.sourceQuality?.contentReadyRate || 0) - Number(a.sourceQuality?.contentReadyRate || 0);
+      if (contentDiff !== 0) return contentDiff;
+    }
+    if (sortBy === 'ai') {
+      const aiDiff = Number(b.sourceQuality?.aiReadyRate || 0) - Number(a.sourceQuality?.aiReadyRate || 0);
+      if (aiDiff !== 0) return aiDiff;
+    }
+    if (sortBy === 'noise') {
+      const noiseDiff = Number(a.sourceQuality?.noiseRate || 0) - Number(b.sourceQuality?.noiseRate || 0);
+      if (noiseDiff !== 0) return noiseDiff;
     }
     if (sortBy === 'unread') {
       const unreadDiff = Number(b.unreadCount || 0) - Number(a.unreadCount || 0);
@@ -131,6 +159,15 @@ app.get('/', async (c) => {
       unreadCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isRead} = false and ${schema.items.isFiltered} = false then 1 else 0 end)`,
       favoriteCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFavorite} = true and ${schema.items.isFiltered} = false then 1 else 0 end)`,
       selectedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (coalesce(${schema.items.aiScore}, 0) >= 70 or coalesce(${schema.items.priorityScore}, 0) >= 0.7) then 1 else 0 end)`,
+      contentReadyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.contentStatus} = 'ready' and coalesce(length(trim(${schema.items.content})), 0) >= 180 then 1 else 0 end)`,
+      contentDegradedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.contentStatus} = 'degraded' or (${schema.items.contentStatus} = 'ready' and coalesce(length(trim(${schema.items.content})), 0) < 180 and coalesce(length(trim(${schema.items.snippet})), 0) >= 24)) then 1 else 0 end)`,
+      contentMissingCount: sql<number>`sum(case when ${schema.items.contentStatus} in ('missing', 'failed', 'unavailable') then 1 else 0 end)`,
+      qualityPassCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'pass' then 1 else 0 end)`,
+      qualityReviewCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'review' then 1 else 0 end)`,
+      qualityFilterCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'filter' then 1 else 0 end)`,
+      scoredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.aiScore} is not null then 1 else 0 end)`,
+      summarizedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.summaryStatus} = 'ready' or coalesce(length(trim(${schema.items.aiSummary})), 0) > 0) then 1 else 0 end)`,
+      translationCompletedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.translationStatus} in ('ready', 'skipped') then 1 else 0 end)`,
     })
     .from(schema.items)
     .where(eq(schema.items.userId, authUser.userId))
@@ -158,16 +195,51 @@ app.get('/', async (c) => {
     .select({
       sourceId: schema.fetchLogs.sourceId,
       itemsFound: sql<number>`sum(coalesce(${schema.fetchLogs.itemsFound}, 0))`,
+      itemsNew: sql<number>`sum(coalesce(${schema.fetchLogs.itemsNew}, 0))`,
+      itemsFiltered: sql<number>`sum(coalesce(${schema.fetchLogs.itemsFiltered}, 0))`,
       itemsDuplicate: sql<number>`sum(coalesce(${schema.fetchLogs.itemsDuplicate}, 0))`,
     })
     .from(schema.fetchLogs)
     .where(gte(schema.fetchLogs.startedAt, new Date(Date.now() - 14 * 24 * 3600 * 1000)))
     .groupBy(schema.fetchLogs.sourceId);
 
-  const statsMap = new Map<number, Pick<SourceOverview, 'itemCount' | 'entryCount' | 'filteredCount' | 'unreadCount' | 'favoriteCount' | 'selectedCount' | 'selectedHitRate'>>();
+  const fetchLogMap = new Map<number, { itemsFound: number; itemsNew: number; itemsFiltered: number; itemsDuplicate: number }>();
+  for (const row of fetchLogRows) {
+    if (row.sourceId == null) continue;
+    fetchLogMap.set(row.sourceId, {
+      itemsFound: Number(row.itemsFound || 0),
+      itemsNew: Number(row.itemsNew || 0),
+      itemsFiltered: Number(row.itemsFiltered || 0),
+      itemsDuplicate: Number(row.itemsDuplicate || 0),
+    });
+  }
+
+  const statsMap = new Map<number, Pick<SourceOverview,
+    'itemCount' | 'entryCount' | 'filteredCount' | 'unreadCount' | 'favoriteCount' | 'selectedCount' | 'selectedHitRate'
+    | 'contentReadyCount' | 'contentDegradedCount' | 'contentMissingCount'
+    | 'qualityPassCount' | 'qualityReviewCount' | 'qualityFilterCount'
+    | 'scoredCount' | 'summarizedCount' | 'translationCompletedCount' | 'sourceQuality'
+  >>();
   for (const row of itemStatsRows) {
     const entryCount = Number(row.entryCount || 0);
     const selectedCount = Number(row.selectedCount || 0);
+    const fetchLog = fetchLogMap.get(row.sourceId) || { itemsFound: 0, itemsNew: 0, itemsFiltered: 0, itemsDuplicate: 0 };
+    const sourceQuality = buildSourceQualityFunnel({
+      ...fetchLog,
+      itemCount: Number(row.itemCount || 0),
+      entryCount,
+      filteredCount: Number(row.filteredCount || 0),
+      contentReadyCount: Number(row.contentReadyCount || 0),
+      contentDegradedCount: Number(row.contentDegradedCount || 0),
+      contentMissingCount: Number(row.contentMissingCount || 0),
+      qualityPassCount: Number(row.qualityPassCount || 0),
+      qualityReviewCount: Number(row.qualityReviewCount || 0),
+      qualityFilterCount: Number(row.qualityFilterCount || 0),
+      scoredCount: Number(row.scoredCount || 0),
+      summarizedCount: Number(row.summarizedCount || 0),
+      translationCompletedCount: Number(row.translationCompletedCount || 0),
+      reportSelectedCount: selectedCount,
+    });
     statsMap.set(row.sourceId, {
       itemCount: Number(row.itemCount || 0),
       entryCount,
@@ -176,6 +248,16 @@ app.get('/', async (c) => {
       favoriteCount: Number(row.favoriteCount || 0),
       selectedCount,
       selectedHitRate: entryCount > 0 ? Number((selectedCount / entryCount).toFixed(3)) : 0,
+      contentReadyCount: Number(row.contentReadyCount || 0),
+      contentDegradedCount: Number(row.contentDegradedCount || 0),
+      contentMissingCount: Number(row.contentMissingCount || 0),
+      qualityPassCount: Number(row.qualityPassCount || 0),
+      qualityReviewCount: Number(row.qualityReviewCount || 0),
+      qualityFilterCount: Number(row.qualityFilterCount || 0),
+      scoredCount: Number(row.scoredCount || 0),
+      summarizedCount: Number(row.summarizedCount || 0),
+      translationCompletedCount: Number(row.translationCompletedCount || 0),
+      sourceQuality,
     });
   }
 
@@ -184,7 +266,7 @@ app.get('/', async (c) => {
     if (row.sourceId == null) continue;
     const found = Number(row.itemsFound || 0);
     const duplicate = Number(row.itemsDuplicate || 0);
-    duplicateMap.set(row.sourceId, found > 0 ? Number((duplicate / found).toFixed(3)) : 0);
+    duplicateMap.set(row.sourceId, found > 0 ? Number(Math.min(1, Math.max(0, duplicate / found)).toFixed(3)) : 0);
   }
 
   const latestMap = new Map<number, Pick<SourceOverview, 'latestItemTitle' | 'latestItemUrl' | 'latestItemAt'>>();
@@ -209,7 +291,17 @@ app.get('/', async (c) => {
       favoriteCount: sourceStats?.favoriteCount || 0,
       selectedCount: sourceStats?.selectedCount || 0,
       selectedHitRate: sourceStats?.selectedHitRate || 0,
-      duplicateContribution: duplicateMap.get(row.id) || 0,
+      contentReadyCount: sourceStats?.contentReadyCount || 0,
+      contentDegradedCount: sourceStats?.contentDegradedCount || 0,
+      contentMissingCount: sourceStats?.contentMissingCount || 0,
+      qualityPassCount: sourceStats?.qualityPassCount || 0,
+      qualityReviewCount: sourceStats?.qualityReviewCount || 0,
+      qualityFilterCount: sourceStats?.qualityFilterCount || 0,
+      scoredCount: sourceStats?.scoredCount || 0,
+      summarizedCount: sourceStats?.summarizedCount || 0,
+      translationCompletedCount: sourceStats?.translationCompletedCount || 0,
+      sourceQuality: sourceStats?.sourceQuality || buildSourceQualityFunnel({}),
+      duplicateContribution: sourceStats?.sourceQuality.duplicateRate ?? duplicateMap.get(row.id) ?? 0,
       latestItemTitle: latest?.latestItemTitle || null,
       latestItemUrl: latest?.latestItemUrl || null,
       latestItemAt: latest?.latestItemAt || null,

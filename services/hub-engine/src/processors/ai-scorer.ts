@@ -2,16 +2,23 @@ import { and, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { completeWithModelConfig, getEffectiveAiConfig, getEffectiveAiSceneAvailability, type ResolvedAiConfig } from '../lib/ai-configs.js';
-import { logAiUsage } from '../lib/ai-usage.js';
+import { getAiUsageEvents, logAiUsage } from '../lib/ai-usage.js';
 import { applyRulesAndPriority } from './priority.js';
 import { ensureItemContent, resolveItemText } from '../lib/item-enrichment.js';
+import { AI_TOKEN_BUDGETS } from '../lib/ai-token-budgets.js';
 import {
   aggregateSkillScores,
+  buildDeterministicFallbackScore,
+  buildScoringRetryPrompt,
+  buildSkillFailureSummary,
+  buildFallbackScoringPrompt,
   buildSkillPrompt,
   getActiveScoringSkills,
   getPreferenceProfile,
+  isRetryableScoringFailure,
   parseSkillResponse,
   replaceItemBreakdowns,
+  resolveScoringModelCircuitBreaker,
   type ScoringSkillRecord,
 } from '../lib/scoring-skills.js';
 
@@ -35,6 +42,7 @@ export type AiStageResult = {
   processed: number;
   attempted: number;
   failed: number;
+  skipped: number;
   errors: string[];
 };
 
@@ -42,11 +50,12 @@ type LlmCallOptions = {
   maxTokens?: number;
 };
 
-function buildAiStageResult(processed: number, attempted: number, errors: string[]): AiStageResult {
+export function buildAiStageResult(processed: number, attempted: number, errors: string[], skipped = 0): AiStageResult {
   return {
     processed,
     attempted,
-    failed: Math.max(attempted - processed, 0),
+    skipped,
+    failed: Math.max(attempted - processed - skipped, 0),
     errors: [...new Set(errors)].slice(0, 3),
   };
 }
@@ -154,16 +163,21 @@ async function callSkillLLM(
   if (skill.modelConfigId) {
     return completeWithModelConfig(skill.modelConfigId, prompt, {
       temperature: baseConfig.temperature,
-      maxTokens: 320,
+      maxTokens: AI_TOKEN_BUDGETS.feedScoringSkill,
     });
   }
-  return callLLM(baseConfig, prompt, { maxTokens: 320 });
+  return callLLM(baseConfig, prompt, { maxTokens: AI_TOKEN_BUDGETS.feedScoringSkill });
 }
 
 type ScoreOptions = {
   itemId?: string;
   itemIds?: string[];
+  bypassQualityGate?: boolean;
 };
+
+export function shouldRequireQualityCheckedForScoring(activeScenes: Set<string>, options: ScoreOptions) {
+  return activeScenes.has('quality_filter') && options.bypassQualityGate !== true;
+}
 
 export async function scoreItems(userId: string, limit = 10, options: ScoreOptions = {}): Promise<number> {
   const result = await scoreItemsDetailed(userId, limit, options);
@@ -179,6 +193,15 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
   const activeScenes = await getEffectiveAiSceneAvailability(userId);
   const activeSkills = await getActiveScoringSkills(userId);
   const preferenceProfile = await getPreferenceProfile(userId);
+  const [skillUsageEvents, fallbackUsageEvents, probeUsageEvents] = await Promise.all([
+    getAiUsageEvents({ userId, sceneType: 'feed_scoring_skill', limit: 50 }),
+    getAiUsageEvents({ userId, sceneType: 'feed_scoring', limit: 20 }),
+    getAiUsageEvents({ userId, sceneType: 'feed_scoring_model_probe', limit: 20 }),
+  ]);
+  const circuitBreaker = resolveScoringModelCircuitBreaker({
+    modelConfigId: config.modelConfigId || null,
+    modelName: config.model || null,
+  }, [...skillUsageEvents, ...fallbackUsageEvents, ...probeUsageEvents]);
 
   const conditions = [
     eq(schema.items.userId, userId),
@@ -190,7 +213,7 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
   } else if (options.itemIds && options.itemIds.length > 0) {
     conditions.push(inArray(schema.items.id, options.itemIds));
   }
-  if (activeScenes.has('quality_filter')) {
+  if (shouldRequireQualityCheckedForScoring(activeScenes, options)) {
     conditions.push(isNotNull(schema.items.qualityCheckedAt));
   }
 
@@ -230,6 +253,59 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
       let score: number | null = null;
       let lastResponseText = '';
 
+      if (circuitBreaker.shouldBypass) {
+        const parsed = buildDeterministicFallbackScore({
+          title: effectiveItem.title,
+          content: source.text,
+          failureSummary: circuitBreaker.reason || 'scoring_model_circuit_breaker',
+        });
+        const breakdownRows = [{
+          skillId: null,
+          score: parsed.score,
+          confidence: parsed.confidence,
+          decision: parsed.decision,
+          reasons: parsed.reasons,
+          matchedSignals: parsed.matchedSignals,
+          riskFlags: [...parsed.riskFlags, 'model_circuit_breaker'],
+          rawResponse: parsed.rawResponse,
+          weight: 0.5,
+        }];
+        await replaceItemBreakdowns(userId, item.id, breakdownRows);
+        score = aggregateSkillScores(
+          breakdownRows.map((row) => ({
+            score: row.score,
+            confidence: row.confidence,
+            weight: row.weight,
+          })),
+        );
+        lastResponseText = parsed.rawResponse;
+        await logAiUsage({
+          userId,
+          sceneType: 'feed_scoring',
+          status: 'skipped',
+          provider: config.provider,
+          modelName: config.model,
+          endpointId: config.provider === 'volcengine_ark' && config.model.startsWith('ep-') ? config.model : null,
+          modelConfigId: config.modelConfigId || null,
+          promptTemplateId: config.promptTemplateId || null,
+          targetType: 'item',
+          targetId: item.id,
+          responsePreview: parsed.rawResponse,
+          label: `${effectiveItem.title} / model circuit breaker fallback`,
+          errorMessage: circuitBreaker.reason || 'scoring_model_circuit_breaker',
+        });
+        await db.update(schema.items).set({
+          aiScore: score,
+          processingStatus: 'scored',
+        }).where(eq(schema.items.id, item.id));
+
+        await applyRulesAndPriority(item.id, userId);
+
+        scored++;
+        logger.debug({ itemId: item.id, score, mode: 'model_circuit_breaker', preview: lastResponseText.slice(0, 80) }, 'Item scored with circuit breaker fallback');
+        continue;
+      }
+
       if (activeSkills.length > 0) {
         const breakdownRows: Array<{
           skillId: number | null;
@@ -240,7 +316,9 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
           matchedSignals: string[];
           riskFlags: string[];
           rawResponse: string;
+          weight: number;
         }> = [];
+        const skillErrors: string[] = [];
 
         for (const skill of activeSkills) {
           const skillPrompt = buildSkillPrompt({
@@ -249,49 +327,302 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
             title: effectiveItem.title,
             content: source.text.slice(0, 6000),
           });
-          const result = await callSkillLLM(config, skill, skillPrompt);
-          const parsed = parseSkillResponse(result.text);
-          breakdownRows.push({
-            skillId: skill.id,
-            score: parsed.score,
-            confidence: parsed.confidence,
-            decision: parsed.decision,
-            reasons: parsed.reasons,
-            matchedSignals: parsed.matchedSignals,
-            riskFlags: parsed.riskFlags,
-            rawResponse: parsed.rawResponse,
-          });
-          lastResponseText = parsed.rawResponse;
-          await logAiUsage({
-            userId,
-            sceneType: 'feed_scoring_skill',
-            status: 'success',
-            provider: result.provider || config.provider,
-            modelName: result.model || config.model,
-            endpointId: result.endpointId || null,
-            modelConfigId: skill.modelConfigId || config.modelConfigId || null,
-            promptTemplateId: config.promptTemplateId || null,
-            targetType: 'item',
-            targetId: item.id,
-            inputTokens: result.inputTokens,
-            outputTokens: result.outputTokens,
-            totalTokens: result.totalTokens,
-            estimatedCost: result.estimatedCost,
-            latencyMs: result.latencyMs,
-            providerRequestId: result.providerRequestId,
-            apiKind: result.apiKind,
-            promptPreview: skillPrompt,
-            responsePreview: result.text,
-            label: `${effectiveItem.title} / ${skill.name}`,
-          });
+          try {
+            const result = await callSkillLLM(config, skill, skillPrompt);
+            const parsed = parseSkillResponse(result.text);
+            breakdownRows.push({
+              skillId: skill.id,
+              score: parsed.score,
+              confidence: parsed.confidence,
+              decision: parsed.decision,
+              reasons: parsed.reasons,
+              matchedSignals: parsed.matchedSignals,
+              riskFlags: parsed.riskFlags,
+              rawResponse: parsed.rawResponse,
+              weight: skill.weight ?? 1,
+            });
+            lastResponseText = parsed.rawResponse;
+            await logAiUsage({
+              userId,
+              sceneType: 'feed_scoring_skill',
+              status: 'success',
+              provider: result.provider || config.provider,
+              modelName: result.model || config.model,
+              endpointId: result.endpointId || null,
+              modelConfigId: skill.modelConfigId || config.modelConfigId || null,
+              promptTemplateId: config.promptTemplateId || null,
+              targetType: 'item',
+              targetId: item.id,
+              inputTokens: result.inputTokens,
+              outputTokens: result.outputTokens,
+              totalTokens: result.totalTokens,
+              estimatedCost: result.estimatedCost,
+              latencyMs: result.latencyMs,
+              providerRequestId: result.providerRequestId,
+              apiKind: result.apiKind,
+              promptPreview: skillPrompt,
+              responsePreview: result.text,
+              label: `${effectiveItem.title} / ${skill.name}`,
+            });
+          } catch (skillErr) {
+            const message = (skillErr as Error).message;
+            if (isRetryableScoringFailure(message)) {
+              await logAiUsage({
+                userId,
+                sceneType: 'feed_scoring_skill',
+                status: 'skipped',
+                provider: config.provider,
+                modelName: config.model,
+                endpointId: config.provider === 'volcengine_ark' && config.model.startsWith('ep-') ? config.model : null,
+                modelConfigId: skill.modelConfigId || config.modelConfigId || null,
+                promptTemplateId: config.promptTemplateId || null,
+                targetType: 'item',
+                targetId: item.id,
+                promptPreview: skillPrompt,
+                label: `${effectiveItem.title} / ${skill.name} / retryable failure`,
+                errorMessage: message,
+              });
+              const retryPrompt = buildScoringRetryPrompt({
+                title: effectiveItem.title,
+                content: source.text,
+                failureMessage: message,
+              });
+              try {
+                const retryResult = await callSkillLLM(config, skill, retryPrompt);
+                const retryParsed = parseSkillResponse(retryResult.text);
+                breakdownRows.push({
+                  skillId: skill.id,
+                  score: retryParsed.score,
+                  confidence: retryParsed.confidence,
+                  decision: retryParsed.decision,
+                  reasons: retryParsed.reasons,
+                  matchedSignals: retryParsed.matchedSignals,
+                  riskFlags: [...retryParsed.riskFlags, 'scoring_retry_recovered'],
+                  rawResponse: retryParsed.rawResponse,
+                  weight: skill.weight ?? 1,
+                });
+                lastResponseText = retryParsed.rawResponse;
+                await logAiUsage({
+                  userId,
+                  sceneType: 'feed_scoring_skill',
+                  status: 'success',
+                  provider: retryResult.provider || config.provider,
+                  modelName: retryResult.model || config.model,
+                  endpointId: retryResult.endpointId || null,
+                  modelConfigId: skill.modelConfigId || config.modelConfigId || null,
+                  promptTemplateId: config.promptTemplateId || null,
+                  targetType: 'item',
+                  targetId: item.id,
+                  inputTokens: retryResult.inputTokens,
+                  outputTokens: retryResult.outputTokens,
+                  totalTokens: retryResult.totalTokens,
+                  estimatedCost: retryResult.estimatedCost,
+                  latencyMs: retryResult.latencyMs,
+                  providerRequestId: retryResult.providerRequestId,
+                  apiKind: retryResult.apiKind,
+                  promptPreview: retryPrompt,
+                  responsePreview: retryResult.text,
+                  label: `${effectiveItem.title} / ${skill.name} / retry recovered`,
+                });
+                continue;
+              } catch (retryErr) {
+                const retryMessage = (retryErr as Error).message;
+                skillErrors.push(message, retryMessage);
+                await logAiUsage({
+                  userId,
+                  sceneType: 'feed_scoring_skill',
+                  status: 'error',
+                  provider: config.provider,
+                  modelName: config.model,
+                  endpointId: config.provider === 'volcengine_ark' && config.model.startsWith('ep-') ? config.model : null,
+                  modelConfigId: skill.modelConfigId || config.modelConfigId || null,
+                  promptTemplateId: config.promptTemplateId || null,
+                  targetType: 'item',
+                  targetId: item.id,
+                  promptPreview: retryPrompt,
+                  label: `${effectiveItem.title} / ${skill.name} / retry failed`,
+                  errorMessage: retryMessage,
+                });
+                continue;
+              }
+            }
+            skillErrors.push(message);
+            await logAiUsage({
+              userId,
+              sceneType: 'feed_scoring_skill',
+              status: 'error',
+              provider: config.provider,
+              modelName: config.model,
+              endpointId: config.provider === 'volcengine_ark' && config.model.startsWith('ep-') ? config.model : null,
+              modelConfigId: skill.modelConfigId || config.modelConfigId || null,
+              promptTemplateId: config.promptTemplateId || null,
+              targetType: 'item',
+              targetId: item.id,
+              promptPreview: skillPrompt,
+              label: `${effectiveItem.title} / ${skill.name}`,
+              errorMessage: message,
+            });
+          }
         }
+
+        if (breakdownRows.length === 0) {
+          const fallbackPrompt = buildFallbackScoringPrompt({
+            title: effectiveItem.title,
+            content: source.text,
+          });
+          try {
+            const result = await callLLM(config, fallbackPrompt, { maxTokens: AI_TOKEN_BUDGETS.feedScoringFallback });
+            const parsed = parseSkillResponse(result.text);
+            breakdownRows.push({
+              skillId: null,
+              score: parsed.score,
+              confidence: parsed.confidence,
+              decision: parsed.decision,
+              reasons: parsed.reasons,
+              matchedSignals: parsed.matchedSignals,
+              riskFlags: parsed.riskFlags,
+              rawResponse: parsed.rawResponse,
+              weight: 0.8,
+            });
+            lastResponseText = parsed.rawResponse;
+            await logAiUsage({
+              userId,
+              sceneType: 'feed_scoring',
+              status: 'success',
+              provider: result.provider || config.provider,
+              modelName: result.model || config.model,
+              endpointId: result.endpointId || null,
+              modelConfigId: config.modelConfigId || null,
+              promptTemplateId: config.promptTemplateId || null,
+              targetType: 'item',
+              targetId: item.id,
+              inputTokens: result.inputTokens,
+              outputTokens: result.outputTokens,
+              totalTokens: result.totalTokens,
+              estimatedCost: result.estimatedCost,
+              latencyMs: result.latencyMs,
+              providerRequestId: result.providerRequestId,
+              apiKind: result.apiKind,
+              promptPreview: fallbackPrompt,
+              responsePreview: result.text,
+              label: `${effectiveItem.title} / fallback scoring`,
+            });
+          } catch (fallbackErr) {
+            let fallbackMessage = (fallbackErr as Error).message;
+            if (isRetryableScoringFailure(fallbackMessage)) {
+              const retryPrompt = buildScoringRetryPrompt({
+                title: effectiveItem.title,
+                content: source.text,
+                failureMessage: fallbackMessage,
+              });
+              try {
+                const retryResult = await callLLM(config, retryPrompt, { maxTokens: AI_TOKEN_BUDGETS.feedScoringFallback });
+                const retryParsed = parseSkillResponse(retryResult.text);
+                breakdownRows.push({
+                  skillId: null,
+                  score: retryParsed.score,
+                  confidence: retryParsed.confidence,
+                  decision: retryParsed.decision,
+                  reasons: retryParsed.reasons,
+                  matchedSignals: retryParsed.matchedSignals,
+                  riskFlags: [...retryParsed.riskFlags, 'fallback_retry_recovered'],
+                  rawResponse: retryParsed.rawResponse,
+                  weight: 0.75,
+                });
+                lastResponseText = retryParsed.rawResponse;
+                await logAiUsage({
+                  userId,
+                  sceneType: 'feed_scoring',
+                  status: 'success',
+                  provider: retryResult.provider || config.provider,
+                  modelName: retryResult.model || config.model,
+                  endpointId: retryResult.endpointId || null,
+                  modelConfigId: config.modelConfigId || null,
+                  promptTemplateId: config.promptTemplateId || null,
+                  targetType: 'item',
+                  targetId: item.id,
+                  inputTokens: retryResult.inputTokens,
+                  outputTokens: retryResult.outputTokens,
+                  totalTokens: retryResult.totalTokens,
+                  estimatedCost: retryResult.estimatedCost,
+                  latencyMs: retryResult.latencyMs,
+                  providerRequestId: retryResult.providerRequestId,
+                  apiKind: retryResult.apiKind,
+                  promptPreview: retryPrompt,
+                  responsePreview: retryResult.text,
+                  label: `${effectiveItem.title} / fallback scoring / retry recovered`,
+                });
+              } catch (retryErr) {
+                fallbackMessage = (retryErr as Error).message;
+              }
+            }
+            if (breakdownRows.length > 0) {
+              const partialFailureSummary = buildSkillFailureSummary(skillErrors);
+              if (partialFailureSummary) errors.push(partialFailureSummary);
+              await replaceItemBreakdowns(userId, item.id, breakdownRows);
+              score = aggregateSkillScores(
+                breakdownRows.map((row) => ({
+                  score: row.score,
+                  confidence: row.confidence,
+                  weight: row.weight,
+                })),
+              );
+              await db.update(schema.items).set({
+                aiScore: score,
+                processingStatus: 'scored',
+              }).where(eq(schema.items.id, item.id));
+
+              await applyRulesAndPriority(item.id, userId);
+
+              scored++;
+              logger.debug({ itemId: item.id, score, mode: 'skills', preview: lastResponseText.slice(0, 80) }, 'Item scored');
+              continue;
+            }
+            const parsed = buildDeterministicFallbackScore({
+              title: effectiveItem.title,
+              content: source.text,
+              failureSummary: buildSkillFailureSummary([...skillErrors, fallbackMessage]) || fallbackMessage,
+            });
+            skillErrors.push(fallbackMessage, 'deterministic_fallback_scoring');
+            breakdownRows.push({
+              skillId: null,
+              score: parsed.score,
+              confidence: parsed.confidence,
+              decision: parsed.decision,
+              reasons: parsed.reasons,
+              matchedSignals: parsed.matchedSignals,
+              riskFlags: parsed.riskFlags,
+              rawResponse: parsed.rawResponse,
+              weight: 0.55,
+            });
+            lastResponseText = parsed.rawResponse;
+            await logAiUsage({
+              userId,
+              sceneType: 'feed_scoring',
+              status: 'skipped',
+              provider: config.provider,
+              modelName: config.model,
+              endpointId: config.provider === 'volcengine_ark' && config.model.startsWith('ep-') ? config.model : null,
+              modelConfigId: config.modelConfigId || null,
+              promptTemplateId: config.promptTemplateId || null,
+              targetType: 'item',
+              targetId: item.id,
+              promptPreview: fallbackPrompt,
+              responsePreview: parsed.rawResponse,
+              label: `${effectiveItem.title} / deterministic fallback scoring`,
+              errorMessage: fallbackMessage,
+            });
+          }
+        }
+        const partialFailureSummary = buildSkillFailureSummary(skillErrors);
+        if (partialFailureSummary) errors.push(partialFailureSummary);
 
         await replaceItemBreakdowns(userId, item.id, breakdownRows);
         score = aggregateSkillScores(
-          breakdownRows.map((row, index) => ({
+          breakdownRows.map((row) => ({
             score: row.score,
             confidence: row.confidence,
-            weight: activeSkills[index]?.weight ?? 1,
+            weight: row.weight,
           })),
         );
       } else {
@@ -299,7 +630,7 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
           .replace('{title}', effectiveItem.title)
           .replace('{content}', source.text.slice(0, 4000));
 
-        const result = await callLLM(config, prompt);
+        const result = await callLLM(config, prompt, { maxTokens: AI_TOKEN_BUDGETS.feedScoringLegacy });
         const scoreMatch = result.text.match(/(\d{1,3})/);
         score = scoreMatch ? Math.min(100, Math.max(0, parseInt(scoreMatch[1], 10))) : null;
         lastResponseText = result.text;

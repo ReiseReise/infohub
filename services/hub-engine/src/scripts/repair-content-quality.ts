@@ -72,6 +72,7 @@ async function main() {
       processingStatus: 'scored',
       summaryStatus: 'pending',
       summaryBasis: null,
+      summaryReason: null,
     }).where(eq(schema.items.id, row.id));
   }
 

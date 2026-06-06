@@ -2,13 +2,15 @@ import { and, desc, eq, inArray } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
 import { logAiUsage } from '../lib/ai-usage.js';
-import { getActiveAiConfig, callLLM, type AiStageResult } from './ai-scorer.js';
+import { getActiveAiConfig, callLLM, buildAiStageResult, type AiStageResult } from './ai-scorer.js';
 import { detectLikelyLanguage } from '../lib/content-extractor.js';
 import { ensureItemContent, resolveItemText } from '../lib/item-enrichment.js';
+import { AI_TOKEN_BUDGETS } from '../lib/ai-token-budgets.js';
 
 type ProcessOptions = {
   itemId?: string;
   itemIds?: string[];
+  includeAnyStatus?: boolean;
 };
 
 type LlmAggregate = {
@@ -43,7 +45,7 @@ function countMatches(input: string, pattern: RegExp): number {
   return (input.match(pattern) || []).length;
 }
 
-function isMostlyChinese(input: string): boolean {
+export function isMostlyChineseSummary(input: string): boolean {
   const text = input.trim();
   if (!text) return false;
   const hanCount = countMatches(text, /[\u4e00-\u9fff]/g);
@@ -53,10 +55,63 @@ function isMostlyChinese(input: string): boolean {
   return hanCount > 0 && latinCount <= 12;
 }
 
+export function isUsableChineseSummary(input: string): boolean {
+  const text = input.trim();
+  if (!isMostlyChineseSummary(text)) return false;
+  if (/^[{\[]/.test(text)) return false;
+  if (/(请提供|未提供|无法进行|不能进行|很抱歉).{0,24}(摘要|改写|内容)/.test(text)) return false;
+  return true;
+}
+
+export function parseSummaryResponse(input: string): { summary: string; tags: string[] } {
+  const normalized = unwrapJsonBlock(input);
+  let summary = '';
+  let tags: string[] = [];
+
+  try {
+    const parsed = JSON.parse(normalized);
+    summary = typeof parsed.summary === 'string'
+      ? parsed.summary
+      : typeof parsed.one_sentence === 'string'
+        ? parsed.one_sentence
+        : normalized;
+    tags = Array.isArray(parsed.tags)
+      ? parsed.tags.filter((tag: unknown): tag is string => typeof tag === 'string')
+      : [];
+  } catch {
+    summary = normalized.slice(0, 300);
+  }
+
+  return {
+    summary: normalizeSummaryText(summary),
+    tags,
+  };
+}
+
+export function buildChineseSummaryRepairPrompt(title: string, sourceText: string): string {
+  return [
+    '请基于标题和正文写一段 120-220 字的简体中文摘要。',
+    '只输出中文自然段，不要 JSON，不要英文整句；Claude、RAG、MCP、API、SDK 等英文专名可以保留。',
+    '',
+    `标题：${title}`,
+    '正文：',
+    sourceText.trim().slice(0, 2500),
+  ].join('\n');
+}
+
 function shouldFetchFullContent(profile?: string | null, score?: number | null): boolean {
   if (profile === 'full') return true;
   if (profile === 'smart') return (score ?? 0) >= 60;
   return false;
+}
+
+export function resolveSummarySkipReason(input: {
+  processingProfile?: string | null;
+  aiScore?: number | null;
+}): string | null {
+  if (input.processingProfile === 'monitor') return '监控档位默认不做摘要';
+  if (typeof input.aiScore === 'number' && input.aiScore < 40) return 'AI 评分过低，跳过摘要';
+  return null;
 }
 
 function looksTruncatedText(input: string): boolean {
@@ -157,7 +212,18 @@ async function rewriteSummaryAsChinese(
     '待改写摘要：',
     summary.trim(),
   ].join('\n');
-  return callLLM(config, prompt, { maxTokens: 420 });
+  return callLLM(config, prompt, { maxTokens: AI_TOKEN_BUDGETS.feedSummaryRewrite });
+}
+
+async function repairSummaryFromSourceAsChinese(
+  config: Awaited<ReturnType<typeof getActiveAiConfig>>,
+  title: string,
+  sourceText: string,
+): Promise<LlmAggregate> {
+  if (!config) throw new Error('missing_summary_config');
+  return callLLM(config, buildChineseSummaryRepairPrompt(title, sourceText), {
+    maxTokens: AI_TOKEN_BUDGETS.feedSummary,
+  });
 }
 
 async function translateInChunks(
@@ -183,15 +249,6 @@ async function translateInChunks(
 export async function summarizeItems(userId: string, limit = 10, options: ProcessOptions = {}): Promise<number> {
   const result = await summarizeItemsDetailed(userId, limit, options);
   return result.processed;
-}
-
-function buildAiStageResult(processed: number, attempted: number, errors: string[]): AiStageResult {
-  return {
-    processed,
-    attempted,
-    failed: Math.max(attempted - processed, 0),
-    errors: [...new Set(errors)].slice(0, 3),
-  };
 }
 
 export async function summarizeItemsDetailed(userId: string, limit = 10, options: ProcessOptions = {}): Promise<AiStageResult> {
@@ -230,23 +287,20 @@ export async function summarizeItemsDetailed(userId: string, limit = 10, options
 
   if (items.length === 0) return buildAiStageResult(0, 0, []);
 
-  let processed = 0;
+  let summarized = 0;
+  let skipped = 0;
   const errors: string[] = [];
   for (const item of items) {
-    if (item.processingProfile === 'monitor') {
+    const skipReason = resolveSummarySkipReason(item);
+    if (skipReason) {
       await db.update(schema.items).set({
         processingStatus: 'done',
         summaryStatus: 'skipped',
+        summaryReason: skipReason,
+        translationStatus: 'skipped',
+        translationReason: `${skipReason}，未进入翻译`,
       }).where(eq(schema.items.id, item.id));
-      processed++;
-      continue;
-    }
-    if (typeof item.aiScore === 'number' && item.aiScore < 40) {
-      await db.update(schema.items).set({
-        processingStatus: 'done',
-        summaryStatus: 'skipped',
-      }).where(eq(schema.items.id, item.id));
-      processed++;
+      skipped++;
       continue;
     }
 
@@ -271,25 +325,21 @@ export async function summarizeItemsDetailed(userId: string, limit = 10, options
         .replace('{title}', effectiveItem.title)
         .replace('{content}', source.text.slice(0, 4000));
 
-      let result: LlmAggregate = await callLLM(config, prompt, { maxTokens: 520 });
-      const normalizedResult = unwrapJsonBlock(result.text);
-
-      let summary = '';
-      let tags: string[] = [];
-      try {
-        const parsed = JSON.parse(normalizedResult);
-        summary = parsed.summary || parsed.one_sentence || normalizedResult;
-        tags = parsed.tags || [];
-      } catch {
-        summary = normalizedResult.slice(0, 300);
+      let result: LlmAggregate = await callLLM(config, prompt, { maxTokens: AI_TOKEN_BUDGETS.feedSummary });
+      let { summary, tags } = parseSummaryResponse(result.text);
+      if (!isUsableChineseSummary(summary)) {
+        result = await rewriteSummaryAsChinese(config, effectiveItem.title, summary || result.text);
+        const rewritten = parseSummaryResponse(result.text);
+        summary = rewritten.summary;
+        if (tags.length === 0) tags = rewritten.tags;
       }
-
-      summary = normalizeSummaryText(summary);
-      if (!isMostlyChinese(summary)) {
-        result = await rewriteSummaryAsChinese(config, effectiveItem.title, summary || normalizedResult);
-        summary = normalizeSummaryText(result.text);
+      if (!isUsableChineseSummary(summary)) {
+        result = await repairSummaryFromSourceAsChinese(config, effectiveItem.title, source.text);
+        const repaired = parseSummaryResponse(result.text);
+        summary = repaired.summary;
+        if (tags.length === 0) tags = repaired.tags;
       }
-      if (!summary || !isMostlyChinese(summary)) {
+      if (!summary || !isUsableChineseSummary(summary)) {
         throw new Error('summary_must_be_chinese');
       }
 
@@ -298,6 +348,7 @@ export async function summarizeItemsDetailed(userId: string, limit = 10, options
         aiTags: tags,
         processingStatus: 'summarized',
         summaryStatus: 'ready',
+        summaryReason: null,
         summaryBasis: source.basis,
       }).where(eq(schema.items.id, item.id));
 
@@ -324,7 +375,7 @@ export async function summarizeItemsDetailed(userId: string, limit = 10, options
         label: effectiveItem.title,
       });
 
-      processed++;
+      summarized++;
       logger.debug({ itemId: item.id, summaryLen: summary.length, tagsCount: tags.length }, 'Item summarized');
     } catch (err) {
       const message = (err as Error).message;
@@ -332,6 +383,7 @@ export async function summarizeItemsDetailed(userId: string, limit = 10, options
       await db.update(schema.items).set({
         processingStatus: 'summary_failed',
         summaryStatus: 'failed',
+        summaryReason: message,
       }).where(eq(schema.items.id, item.id));
       await logAiUsage({
         userId,
@@ -351,8 +403,8 @@ export async function summarizeItemsDetailed(userId: string, limit = 10, options
     }
   }
 
-  logger.info({ userId, processed, total: items.length }, 'Batch summarization complete');
-  return buildAiStageResult(processed, items.length, errors);
+  logger.info({ userId, summarized, skipped, total: items.length }, 'Batch summarization complete');
+  return buildAiStageResult(summarized, items.length, errors, skipped);
 }
 
 export async function translateItems(userId: string, limit = 5): Promise<number> {
@@ -373,9 +425,11 @@ export async function translateItemsDetailed(userId: string, limit = 5, options:
 
   const conditions = [
     eq(schema.items.userId, userId),
-    inArray(schema.items.processingStatus, ['summarized', 'translation_failed']),
     eq(schema.items.isFiltered, false),
   ];
+  if (!options.includeAnyStatus) {
+    conditions.push(inArray(schema.items.processingStatus, ['summarized', 'translation_failed']));
+  }
   if (options.itemId) {
     conditions.push(eq(schema.items.id, options.itemId));
   } else if (options.itemIds && options.itemIds.length > 0) {
@@ -400,7 +454,7 @@ export async function translateItemsDetailed(userId: string, limit = 5, options:
     .limit(options.itemId ? 1 : limit);
 
   let translated = 0;
-  let attempted = 0;
+  let skipped = 0;
   const errors: string[] = [];
   for (const item of items) {
     let effectiveItem = item;
@@ -411,6 +465,7 @@ export async function translateItemsDetailed(userId: string, limit = 5, options:
         translationStatus: 'skipped',
         translationReason: '监控档位默认不做翻译',
       }).where(eq(schema.items.id, item.id));
+      skipped++;
       continue;
     }
     if (item.contentStatus !== 'ready' && shouldFetchFullContent(item.processingProfile, item.aiScore)) {
@@ -434,6 +489,7 @@ export async function translateItemsDetailed(userId: string, limit = 5, options:
         translationStatus: 'skipped',
         translationReason: effectiveLanguage === 'zh' ? '原文已是中文' : '未能识别为外文',
       }).where(eq(schema.items.id, item.id));
+      skipped++;
       continue;
     }
 
@@ -443,6 +499,7 @@ export async function translateItemsDetailed(userId: string, limit = 5, options:
         translationStatus: 'skipped',
         translationReason: 'AI 评分过低，跳过翻译',
       }).where(eq(schema.items.id, item.id));
+      skipped++;
       continue;
     }
     if (item.processingProfile === 'brief' && typeof item.aiScore === 'number' && item.aiScore < 70) {
@@ -451,16 +508,17 @@ export async function translateItemsDetailed(userId: string, limit = 5, options:
         translationStatus: 'skipped',
         translationReason: '轻处理档位仅翻译高分内容',
       }).where(eq(schema.items.id, item.id));
+      skipped++;
       continue;
     }
 
     try {
-      attempted++;
       if (!source.text.trim()) {
         await db.update(schema.items).set({
           translationStatus: 'skipped',
           translationReason: '缺少可翻译正文',
         }).where(eq(schema.items.id, item.id));
+        skipped++;
         continue;
       }
       const translationSource = source.text.slice(0, 4000);
@@ -544,6 +602,6 @@ export async function translateItemsDetailed(userId: string, limit = 5, options:
     }
   }
 
-  logger.info({ userId, translated, total: items.length }, 'Batch translation complete');
-  return buildAiStageResult(translated, attempted, errors);
+  logger.info({ userId, translated, skipped, total: items.length }, 'Batch translation complete');
+  return buildAiStageResult(translated, items.length, errors, skipped);
 }

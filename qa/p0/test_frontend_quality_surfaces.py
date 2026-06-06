@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Optional
+
+from playwright.sync_api import sync_playwright
+
+
+API_URL = os.environ.get("INFOHUB_API_URL", "http://127.0.0.1:3001").rstrip("/")
+WEB_URL = os.environ.get("INFOHUB_WEB_URL", "http://127.0.0.1").rstrip("/")
+REPORT_DATE = os.environ.get("INFOHUB_REPORT_DATE")
+SCREENSHOT_DIR = Path(os.environ.get("INFOHUB_SCREENSHOT_DIR", "/private/tmp"))
+
+
+def api_json(path: str, token: Optional[str] = None, method: str = "GET", payload: Optional[dict] = None) -> dict:
+    body = None
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(f"{API_URL}{path}", data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"{method} {path} -> HTTP {exc.code}: {detail}") from exc
+
+
+def resolve_token() -> str:
+    token = os.environ.get("INFOHUB_TOKEN")
+    if token:
+        return token
+    email = os.environ.get("INFOHUB_EMAIL")
+    password = os.environ.get("INFOHUB_PASSWORD")
+    if not email or not password:
+        raise RuntimeError("Set INFOHUB_TOKEN, or set INFOHUB_EMAIL and INFOHUB_PASSWORD.")
+    data = api_json("/api/auth/login", method="POST", payload={"email": email, "password": password})
+    token = data.get("accessToken")
+    if not token:
+        raise RuntimeError("Login did not return accessToken.")
+    return token
+
+
+def latest_insight(token: str) -> dict:
+    if REPORT_DATE:
+        return api_json(f"/api/insights/{REPORT_DATE}", token).get("data") or {}
+    listed = api_json("/api/insights?limit=1", token).get("data") or []
+    if not listed:
+        raise RuntimeError("No daily insight found. Generate a daily report before running this probe.")
+    date = listed[0].get("date")
+    if not date:
+        raise RuntimeError(f"Latest insight is missing date: {listed[0]}")
+    return api_json(f"/api/insights/{date}", token).get("data") or {}
+
+
+def choose_item_ids(insight: dict) -> tuple[str, Optional[str]]:
+    snapshot = ((insight.get("payload") or {}).get("snapshot") or {})
+    top_items = snapshot.get("topItems") or []
+    top_item_id = os.environ.get("INFOHUB_TOP_ITEM_ID") or (top_items[0] or {}).get("id")
+    if not top_item_id:
+        raise RuntimeError("No top item id found in latest daily report snapshot.")
+
+    noise_item_id = os.environ.get("INFOHUB_NOISE_ITEM_ID")
+    if noise_item_id:
+        return top_item_id, noise_item_id
+
+    for item in snapshot.get("excludedCandidates") or []:
+        if item.get("reason") == "business_noise" and item.get("id"):
+            return top_item_id, item["id"]
+    return top_item_id, None
+
+
+def assert_text(page, needles: list[str], label: str) -> None:
+    text = page.locator("body").inner_text(timeout=15000)
+    missing = [needle for needle in needles if needle not in text]
+    if missing:
+        raise AssertionError(f"{label} missing text: {missing}\nVisible text head:\n{text[:1600]}")
+
+
+def assert_no_body_overflow(page, label: str) -> None:
+    metrics = page.evaluate(
+        """() => ({
+            width: window.innerWidth,
+            clientWidth: document.documentElement.clientWidth,
+            scrollWidth: document.documentElement.scrollWidth,
+            bodyScrollWidth: document.body.scrollWidth
+        })"""
+    )
+    max_width = max(metrics["scrollWidth"], metrics["bodyScrollWidth"])
+    if max_width > metrics["clientWidth"] + 16:
+        raise AssertionError(f"{label} horizontal overflow: {metrics}")
+
+
+def wait_ready(page) -> None:
+    page.wait_for_load_state("domcontentloaded", timeout=20000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=12000)
+    except Exception:
+        page.wait_for_timeout(1200)
+
+
+def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: list[str]) -> str:
+    page.goto(f"{WEB_URL}{route}", wait_until="domcontentloaded", timeout=30000)
+    wait_ready(page)
+    assert_text(page, needles, f"{viewport_name} {route}")
+    assert_no_body_overflow(page, f"{viewport_name} {route}")
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    screenshot_path = SCREENSHOT_DIR / f"infohub-front-{slug}-{viewport_name}.png"
+    page.screenshot(path=str(screenshot_path), full_page=True)
+    return str(screenshot_path)
+
+
+def main() -> int:
+    token = resolve_token()
+    insight = latest_insight(token)
+    top_item_id, noise_item_id = choose_item_ids(insight)
+
+    sources = api_json("/api/sources?sortBy=quality&limit=5", token)
+    if not sources.get("data"):
+        raise RuntimeError("Sources API returned empty data.")
+    source = sources["data"][0]
+    quality = source.get("sourceQuality") or {}
+    for key in ("contentReadyRate", "aiReadyRate", "noiseRate", "reportSelectedRate"):
+        if key not in quality:
+            raise AssertionError(f"sourceQuality missing {key}: {quality}")
+
+    top_detail = api_json(f"/api/items/{top_item_id}", token).get("data") or {}
+    top_label = (top_detail.get("dailyReportDiagnostic") or {}).get("label")
+    if top_label != "已进入日报":
+        raise AssertionError(f"Top item diagnostic mismatch: {top_detail.get('dailyReportDiagnostic')}")
+
+    noise_detail = None
+    if noise_item_id:
+        noise_detail = api_json(f"/api/items/{noise_item_id}", token).get("data") or {}
+        noise_label = (noise_detail.get("dailyReportDiagnostic") or {}).get("label")
+        if noise_label != "未入报：泛商业噪声":
+            raise AssertionError(f"Noise item diagnostic mismatch: {noise_detail.get('dailyReportDiagnostic')}")
+
+    screenshots: list[str] = []
+    console_errors: list[str] = []
+    viewports = {
+        "desktop": {"width": 1366, "height": 900},
+        "mobile": {"width": 390, "height": 844},
+    }
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        for viewport_name, viewport in viewports.items():
+            context = browser.new_context(viewport=viewport)
+            context.add_init_script(
+                f"window.localStorage.setItem('infohub_v3_access_token', {json.dumps(token)});"
+            )
+            page = context.new_page()
+            page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
+
+            screenshots.append(
+                visit_and_capture(
+                    page,
+                    "/sources",
+                    "sources",
+                    viewport_name,
+                    ["信源管理", "质量底座", "正文率", "噪声率", "日报入选率"],
+                )
+            )
+            screenshots.append(
+                visit_and_capture(
+                    page,
+                    f"/feed/{top_item_id}",
+                    "feed-selected",
+                    viewport_name,
+                    ["日报解释", "已进入日报", "依据：同日最新日报快照", "内容依据：", "阶段修复", "评分拆解"],
+                )
+            )
+            if noise_item_id:
+                screenshots.append(
+                    visit_and_capture(
+                        page,
+                        f"/feed/{noise_item_id}",
+                        "feed-noise",
+                        viewport_name,
+                        ["日报解释", "未入报：泛商业噪声", "依据：同日最新日报快照", "阶段修复"],
+                    )
+                )
+            screenshots.append(
+                visit_and_capture(
+                    page,
+                    "/insights",
+                    "insights",
+                    viewport_name,
+                    ["日报工作流", "预览候选池", "日报档案", "未入报解释", "TOP 入报理由", "最终入报"],
+                )
+            )
+            context.close()
+        browser.close()
+
+    noisy_errors = [err for err in console_errors if "favicon" not in err.lower()]
+    if noisy_errors:
+        raise AssertionError(f"Console errors observed: {noisy_errors[:8]}")
+
+    print(
+        json.dumps(
+            {
+                "status": "pass",
+                "screenshots": screenshots,
+                "sourceSample": {
+                    "id": source.get("id"),
+                    "name": source.get("name"),
+                    "quality": quality,
+                },
+                "topItemDiagnostic": top_detail.get("dailyReportDiagnostic"),
+                "noiseItemDiagnostic": noise_detail.get("dailyReportDiagnostic") if noise_detail else None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        raise
