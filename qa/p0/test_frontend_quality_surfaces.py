@@ -195,6 +195,33 @@ def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} refresh button is cramped: {box}")
 
 
+def assert_mobile_insights_report_shortcut(page, route: str, label: str) -> None:
+    if not route.startswith("/insights"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    button = page.get_by_role("button", name="查看最新日报", exact=True).first
+    if button.count() == 0:
+        raise AssertionError(f"{label} is missing the mobile latest report shortcut")
+    box = button.bounding_box()
+    viewport_height = page.evaluate("() => window.innerHeight")
+    if not box:
+        raise AssertionError(f"{label} latest report shortcut is not visible")
+    if box["y"] < 0 or box["y"] + box["height"] > viewport_height:
+        raise AssertionError(f"{label} latest report shortcut is outside the first viewport: {box}")
+    button.click()
+    page.wait_for_timeout(600)
+    report_section = page.locator("#daily-report-section").first
+    section_box = report_section.bounding_box()
+    if not section_box:
+        raise AssertionError(f"{label} latest report target is not visible after clicking the shortcut")
+    if section_box["y"] > 180:
+        raise AssertionError(f"{label} latest report shortcut did not scroll near the report section: {section_box}")
+    page.evaluate("() => window.scrollTo({ top: 0, behavior: 'instant' })")
+    page.wait_for_timeout(100)
+
+
 def wait_ready(page) -> None:
     page.wait_for_load_state("domcontentloaded", timeout=20000)
     try:
@@ -214,6 +241,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_desktop_sources_table_actions_visible(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
+    assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     screenshot_path = SCREENSHOT_DIR / f"infohub-front-{slug}-{viewport_name}.png"
     page.screenshot(path=str(screenshot_path), full_page=True)

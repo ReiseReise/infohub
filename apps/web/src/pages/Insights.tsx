@@ -314,6 +314,10 @@ export function Insights() {
   const workflowNoticeMessage = typeof workflowNotice === 'string' ? workflowNotice : workflowNotice?.message;
   const workflowNoticeTone: NoticeTone = typeof workflowNotice === 'string' || !workflowNotice ? 'success' : workflowNotice.tone;
 
+  function handleJumpToLatestReport() {
+    document.getElementById('daily-report-section')?.scrollIntoView({ behavior: 'auto', block: 'start' });
+  }
+
   function updateWorkflow(patch: Partial<DailyReportWorkflowConfig>) {
     setWorkflowDraft((current) => current ? { ...current, ...patch } : current);
   }
@@ -704,6 +708,15 @@ export function Insights() {
               >
                 <SlidersHorizontal size={14} />
                 日报工作流
+              </button>
+              <button
+                type="button"
+                onClick={handleJumpToLatestReport}
+                disabled={!selectedInsight}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+              >
+                <FileText size={14} />
+                查看最新日报
               </button>
               <div className="inline-flex overflow-hidden rounded-xl border border-zinc-200 bg-white p-0.5 text-sm">
                 {(['fast', 'full'] as const).map((mode) => (
@@ -1127,7 +1140,7 @@ export function Insights() {
             </div>
           </section>
 
-          <section className="rounded-[28px] border border-zinc-200 bg-white p-5 shadow-[0_16px_48px_-40px_rgba(15,23,42,0.35)]">
+          <section id="daily-report-section" className="scroll-mt-4 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-[0_16px_48px_-40px_rgba(15,23,42,0.35)]">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
                 <div className="text-sm font-semibold text-zinc-900">日报档案</div>
