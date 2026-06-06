@@ -1422,7 +1422,7 @@ export function Feed() {
                   {detailError}
                 </div>
               )}
-              <div className="sticky top-0 z-10 -mx-5 -mt-5 mb-5 border-b border-zinc-100 bg-white/92 px-5 py-4 backdrop-blur">
+              <div data-feed-detail-header className="sticky top-0 z-10 -mx-5 -mt-5 mb-5 border-b border-zinc-100 bg-white/92 px-5 py-4 backdrop-blur">
                 <button
                   type="button"
                   onClick={handleReturnToList}
@@ -1458,14 +1458,14 @@ export function Feed() {
                     )}
                   </div>
                 </div>
-                <div className="shrink-0 flex items-center gap-2">
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                   {(selectedItem.mediaType === 'audio' || !!selectedItem.mediaUrl) && (
                     <button
                       onClick={() => {
                         void handleStartAudio(selectedItem);
                       }}
                       disabled={audioSubmittingId === selectedItem.id}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50 disabled:opacity-50"
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-zinc-200 px-3 py-2 text-xs hover:bg-zinc-50 disabled:opacity-50"
                     >
                       {audioSubmittingId === selectedItem.id ? <Loader2 size={12} className="animate-spin" /> : <Headphones size={12} />}
                       {selectedItem.audioTaskId ? '重新转写' : '播客转写'}
@@ -1474,7 +1474,7 @@ export function Feed() {
                   {selectedItem.audioTaskId && (
                     <button
                       onClick={() => navigate(`/audio?taskId=${selectedItem.audioTaskId}`)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50"
+                      className="inline-flex min-h-9 items-center gap-1.5 rounded-xl border border-zinc-200 px-3 py-2 text-xs hover:bg-zinc-50"
                     >
                       查看音频任务
                     </button>
@@ -1483,7 +1483,7 @@ export function Feed() {
                     href={selectedItem.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-xs text-zinc-600 hover:text-zinc-900"
+                    className="inline-flex min-h-9 items-center gap-1 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900"
                   >
                     原文
                     <ExternalLink size={12} />
@@ -1493,7 +1493,7 @@ export function Feed() {
                       void handleReprocessAi(selectedItem);
                     }}
                     disabled={aiReprocessingId === selectedItem.id}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50 disabled:opacity-50"
+                    className="inline-flex min-h-9 items-center gap-1 rounded-xl border border-zinc-200 px-3 py-2 text-xs hover:bg-zinc-50 disabled:opacity-50"
                   >
                     {aiReprocessingId === selectedItem.id ? <Loader2 size={12} className="animate-spin" /> : null}
                     重跑AI
@@ -1503,7 +1503,7 @@ export function Feed() {
                       void handleEnrich(selectedItem);
                     }}
                     disabled={enrichingId === selectedItem.id}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-teal-200 bg-teal-50 text-teal-800 hover:bg-teal-100 disabled:opacity-50"
+                    className="inline-flex min-h-9 items-center gap-1 rounded-xl border border-teal-200 bg-teal-50 px-3 py-2 text-xs text-teal-800 hover:bg-teal-100 disabled:opacity-50"
                   >
                     {enrichingId === selectedItem.id ? <Loader2 size={12} className="animate-spin" /> : null}
                     补抓正文

@@ -265,6 +265,46 @@ def assert_mobile_feed_detail_has_return_to_list(page, route: str, label: str) -
         raise AssertionError(f"{label} return-to-list action did not scroll near the list panel: {list_box}")
 
 
+def assert_mobile_feed_detail_header_actions_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/feed/"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    cramped_actions = page.evaluate(
+        """() => {
+            const header = document.querySelector('[data-feed-detail-header]') || document.querySelector('.sticky');
+            if (!header) return [{ error: 'missing-detail-header' }];
+            const requiredLabels = ['原文', '重跑AI', '补抓正文'];
+            const viewportHeight = window.innerHeight;
+            return requiredLabels.map((actionLabel) => {
+                const node = Array.from(header.querySelectorAll('button, a')).find((candidate) => {
+                    const text = (candidate.textContent || '').replace(/\\s+/g, '');
+                    return text.includes(actionLabel);
+                });
+                if (!node) return { label: actionLabel, error: 'missing-action' };
+                const rect = node.getBoundingClientRect();
+                const accessibleLabel = [
+                    node.getAttribute('aria-label'),
+                    node.getAttribute('title'),
+                    (node.textContent || '').trim(),
+                ].filter(Boolean).join(' ');
+                return {
+                    label: actionLabel,
+                    accessibleLabel,
+                    width: rect.width,
+                    height: rect.height,
+                    x: rect.x,
+                    y: rect.y,
+                    outsideViewport: rect.y < 0 || rect.y > viewportHeight,
+                };
+            }).filter((item) => item.error || item.outsideViewport || !item.accessibleLabel || item.height < 36 || item.width < 36);
+        }"""
+    )
+    if cramped_actions:
+        raise AssertionError(f"{label} feed detail header actions are too small or unlabeled on mobile: {cramped_actions}")
+
+
 def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
     if not route.startswith("/settings"):
         return
@@ -389,6 +429,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_preview_copy_clean(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_list_actions_discoverable(page, route, f"{viewport_name} {route}")
+    assert_mobile_feed_detail_header_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_detail_has_return_to_list(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
