@@ -94,7 +94,7 @@ function resultToMarkdown(value: unknown): string {
     if (typeof record.summary === 'string') return record.summary;
     if (typeof record.markdown === 'string') return record.markdown;
     if (typeof record.content === 'string') return record.content;
-    return `\n\`\`\`json\n${JSON.stringify(record, null, 2)}\n\`\`\``;
+    return '';
   }
 
   return String(value);
@@ -126,6 +126,7 @@ function asrModeLabel(mode?: string | null): string {
 
 function providerLabel(provider?: string | null): string {
   const value = (provider || '').toLowerCase();
+  if (value === 'auto') return '自动选择';
   if (value === 'paraformer') return 'DashScope Paraformer';
   if (value === 'tingwu') return '阿里听悟';
   return value || '—';
@@ -136,6 +137,55 @@ function storageBackendLabel(backend?: string | null): string {
   if (value === 'oss') return '阿里云 OSS';
   if (value === 'local') return '本地存储';
   return value || '—';
+}
+
+function stageStatusLabel(status?: string | null): string {
+  const value = (status || '').toLowerCase();
+  if (!value) return '—';
+  if (value === 'ready') return '已就绪';
+  if (value === 'pending' || value === 'queued') return '等待中';
+  if (value === 'running' || value === 'processing' || value === 'in_progress') return '处理中';
+  if (value === 'done' || value === 'completed' || value === 'success') return '已完成';
+  if (value === 'failed' || value === 'error') return '失败';
+  if (value === 'skipped') return '已跳过';
+  return status || '—';
+}
+
+function audioFailureDiagnostic(task?: AudioTask | null) {
+  const detail = task?.failure_detail || task?.error_message || '';
+  const normalized = detail.toLowerCase();
+  if (!detail && task?.status !== 'failed' && task?.summary_status !== 'failed' && task?.asr_status !== 'failed') {
+    return null;
+  }
+
+  let title = '处理失败';
+  let message = '这条音频任务没有完成。可以先重跑；如果再次失败，再切换模型或检查音频链接。';
+  let action = '建议：点击“重跑”，或在左侧换一个 LLM/ASR 模型后再重跑。';
+
+  if (normalized.includes('llm provider not provided') || normalized.includes('model=') || normalized.includes('litellm')) {
+    title = '模型配置不匹配';
+    message = '当前 LLM 配置无法被供应商正确调用，所以摘要阶段失败。';
+    action = '建议：到设置检查默认 LLM，或在左侧选择可用 LLM 后点击“重跑”。';
+  } else if (normalized.includes('timeout') || normalized.includes('timed out')) {
+    title = '处理超时';
+    message = '音频下载、转写或总结等待时间过长，本次任务已停止。';
+    action = '建议：稍后重跑；长音频可换成更短片段或使用远程批量转写。';
+  } else if (normalized.includes('403') || normalized.includes('forbidden') || normalized.includes('unauthorized')) {
+    title = '链接访问受限';
+    message = '系统无法访问这个音频链接，通常是登录态、权限或防盗链限制。';
+    action = '建议：换公开音频链接，或先下载文件后从本页上传。';
+  } else if (normalized.includes('404') || normalized.includes('not found')) {
+    title = '音频链接不可用';
+    message = '目标音频不存在或地址已经失效。';
+    action = '建议：检查链接后重新抓取，或直接上传本地文件。';
+  }
+
+  return {
+    title,
+    message,
+    action,
+    technicalDetail: detail,
+  };
 }
 
 type AudioDetailTab = 'overview' | 'summary' | 'transcript' | 'markdown' | 'raw';
@@ -153,6 +203,7 @@ export function AudioStudio() {
   const [selectedTask, setSelectedTask] = useState<AudioTask | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailTab, setDetailTab] = useState<AudioDetailTab>('overview');
+  const [showFailureDetail, setShowFailureDetail] = useState(false);
 
   const [statusFilter, setStatusFilter] = useState('');
 
@@ -267,6 +318,7 @@ export function AudioStudio() {
 
   useEffect(() => {
     setDetailTab('overview');
+    setShowFailureDetail(false);
   }, [selectedId]);
 
   useEffect(() => {
@@ -390,11 +442,13 @@ export function AudioStudio() {
     multimodal_result: selectedTask?.multimodal_result ?? null,
   }, null, 2), [selectedTask]);
   const isActiveTask = ['uploading', 'preprocessing', 'transcribing', 'transcribing_fallback', 'summarizing', 'generating', 'post_processing'].includes(selectedTask?.status || '');
+  const selectedFailure = audioFailureDiagnostic(selectedTask);
+  const failureEmptyText = selectedFailure ? `${selectedFailure.title}：${selectedFailure.message}` : '暂无结果';
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-zinc-900">音频工坊</h1>
           <p className="text-sm text-zinc-500 mt-1">上传文件或输入链接，自动执行转写与 AI 总结</p>
         </div>
@@ -403,7 +457,7 @@ export function AudioStudio() {
             void fetchTasks();
             if (selectedId) void fetchTaskDetail(selectedId);
           }}
-          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border border-zinc-200 hover:bg-zinc-50"
+          className="inline-flex w-fit items-center gap-1.5 whitespace-nowrap px-3 py-2 text-sm rounded-lg border border-zinc-200 hover:bg-zinc-50"
         >
           <RefreshCw size={14} /> 刷新
         </button>
@@ -427,12 +481,18 @@ export function AudioStudio() {
               <Upload size={16} className="text-blue-600" /> 上传或抓取
             </h2>
 
-            <input
-              type="file"
-              accept=".mp3,.m4a,.wav,.flac,.ogg,.mp4,.webm,.aac,.wma"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
-              className="w-full text-sm border border-zinc-200 rounded-lg px-3 py-2"
-            />
+            <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-3 py-2 text-sm text-zinc-700 transition-colors hover:border-zinc-400 hover:bg-white">
+              <span className="min-w-0 truncate">{file?.name || '选择音频或视频文件'}</span>
+              <span className="shrink-0 rounded-md bg-white px-2 py-1 text-xs font-medium text-zinc-700 shadow-sm">
+                浏览
+              </span>
+              <input
+                type="file"
+                accept=".mp3,.m4a,.wav,.flac,.ogg,.mp4,.webm,.aac,.wma"
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+                className="sr-only"
+              />
+            </label>
 
             <input
               value={title}
@@ -562,13 +622,13 @@ export function AudioStudio() {
           </div>
         </div>
 
-        <div className="border border-zinc-200 rounded-xl bg-white p-4 max-h-[76vh] overflow-y-auto">
+        <div className="border border-zinc-200 rounded-xl bg-white p-4 xl:max-h-[76vh] xl:overflow-y-auto">
           {detailLoading ? (
             <div className="text-center py-20 text-zinc-400">加载详情...</div>
           ) : selectedTask ? (
             <>
-              <div className="flex items-start justify-between gap-3">
-                <div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
                   <h2 className="text-lg font-semibold text-zinc-900">{selectedTask.title}</h2>
                   <p className={`mt-1 text-xs inline-flex items-center gap-1 ${selectedStatus.tone}`}>
                     <SelectedStatusIcon size={12} className={isActiveTask ? 'animate-spin' : ''} />
@@ -576,11 +636,11 @@ export function AudioStudio() {
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                   <button
                     onClick={handleReprocess}
                     disabled={reprocessing}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-md border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
+                    className="inline-flex items-center gap-1 whitespace-nowrap px-2.5 py-1.5 text-xs rounded-md border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
                   >
                     {reprocessing ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
                     重跑
@@ -588,7 +648,7 @@ export function AudioStudio() {
                   <button
                     onClick={handleDelete}
                     disabled={deleting}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40"
+                    className="inline-flex items-center gap-1 whitespace-nowrap px-2.5 py-1.5 text-xs rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40"
                   >
                     {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
                     删除
@@ -602,8 +662,8 @@ export function AudioStudio() {
                 <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">来源类型：{sourceKindLabel(selectedTask.source_kind)}</div>
                 <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">抓取策略：{strategyLabel(selectedTask.download_strategy)}</div>
                 <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">存储后端：{storageBackendLabel(selectedTask.storage_backend)}</div>
-                <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">转写状态：{selectedTask.asr_status || '—'}</div>
-                <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">摘要状态：{selectedTask.summary_status || '—'}</div>
+                <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">转写状态：{stageStatusLabel(selectedTask.asr_status)}</div>
+                <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">摘要状态：{stageStatusLabel(selectedTask.summary_status)}</div>
                 <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">请求 ASR：{providerLabel(selectedTask.requested_asr_model || selectedTask.asr_model)}</div>
                 <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">实际 ASR：{providerLabel(selectedTask.effective_asr_model || selectedTask.requested_asr_model || selectedTask.asr_model)}</div>
                 <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">执行模式：{asrModeLabel(selectedTask.asr_mode)}</div>
@@ -614,8 +674,33 @@ export function AudioStudio() {
                   原始链接：{selectedTask.source_url || '—'}
                 </div>
                 <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">失败码：{selectedTask.failure_code || '—'}</div>
-                <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">失败详情：{selectedTask.failure_detail || '—'}</div>
               </div>
+
+              {selectedFailure && (
+                <div className="mt-4 rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-800">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <div className="font-semibold">{selectedFailure.title}</div>
+                      <p className="mt-1 leading-6">{selectedFailure.message}</p>
+                      <p className="mt-1 text-xs leading-5 text-red-700/80">{selectedFailure.action}</p>
+                    </div>
+                    {selectedFailure.technicalDetail && (
+                      <button
+                        type="button"
+                        onClick={() => setShowFailureDetail((value) => !value)}
+                        className="shrink-0 whitespace-nowrap rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                      >
+                        {showFailureDetail ? '收起技术详情' : '查看技术详情'}
+                      </button>
+                    )}
+                  </div>
+                  {showFailureDetail && selectedFailure.technicalDetail && (
+                    <pre className="mt-3 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-red-100 bg-white px-3 py-2 text-xs leading-5 text-red-700">
+                      {selectedFailure.technicalDetail}
+                    </pre>
+                  )}
+                </div>
+              )}
 
               <div className="mt-5 flex gap-2 flex-wrap">
                 {[
@@ -647,7 +732,7 @@ export function AudioStudio() {
                       <div className="mt-3">
                         <MarkdownContent
                           content={summaryMarkdown}
-                          empty={selectedTask.summary_status === 'failed' ? (selectedTask.failure_detail || selectedTask.error_message || '摘要未生成') : '暂无总结结果'}
+                          empty={selectedTask.summary_status === 'failed' ? failureEmptyText : '暂无总结结果'}
                         />
                       </div>
                     </div>
@@ -657,8 +742,8 @@ export function AudioStudio() {
                         <p>ASR 选路：{providerLabel(selectedTask.effective_asr_model || selectedTask.requested_asr_model || selectedTask.asr_model)}</p>
                         <p>执行模式：{asrModeLabel(selectedTask.asr_mode)}</p>
                         <p>存储后端：{storageBackendLabel(selectedTask.storage_backend)}</p>
-                        <p>失败原因：{selectedTask.failure_detail || selectedTask.error_message || '—'}</p>
-                        <p>结果渲染：{selectedTask.render_status || '—'}</p>
+                        <p>失败原因：{selectedFailure ? selectedFailure.title : '—'}</p>
+                        <p>结果渲染：{stageStatusLabel(selectedTask.render_status)}</p>
                       </div>
                     </div>
                   </div>
@@ -667,14 +752,14 @@ export function AudioStudio() {
                 {detailTab === 'summary' && (
                   <MarkdownContent
                     content={summaryMarkdown}
-                    empty={selectedTask.summary_status === 'failed' ? (selectedTask.failure_detail || selectedTask.error_message || '摘要未生成') : '暂无总结结果'}
+                    empty={selectedTask.summary_status === 'failed' ? failureEmptyText : '暂无总结结果'}
                   />
                 )}
 
                 {detailTab === 'transcript' && (
                   <MarkdownContent
                     content={transcriptMarkdown}
-                    empty={selectedTask.asr_status === 'failed' ? (selectedTask.failure_detail || selectedTask.error_message || '转写失败') : '暂无转写内容'}
+                    empty={selectedTask.asr_status === 'failed' ? failureEmptyText : '暂无转写内容'}
                   />
                 )}
 

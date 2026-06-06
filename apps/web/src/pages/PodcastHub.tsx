@@ -44,7 +44,7 @@ function resultToMarkdown(value: unknown): string {
     if (typeof record.text === 'string') return record.text;
     if (typeof record.summary === 'string') return record.summary;
     if (typeof record.markdown === 'string') return record.markdown;
-    return `\n\`\`\`json\n${JSON.stringify(record, null, 2)}\n\`\`\``;
+    return '';
   }
   return String(value);
 }
@@ -239,22 +239,22 @@ export function PodcastHub() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-zinc-900">播客专栏</h1>
           <p className="text-sm text-zinc-500 mt-1">独立查看播客条目、转写结果与导出稿，不再混在 Feed 主阅读流里。</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           <button
             onClick={() => navigate('/audio')}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border border-zinc-200 hover:bg-zinc-50"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-sm rounded-lg border border-zinc-200 hover:bg-zinc-50"
           >
             <Radio size={14} />
             打开音频工坊
           </button>
           <button
             onClick={() => void fetchData()}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border border-zinc-200 hover:bg-zinc-50"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-sm rounded-lg border border-zinc-200 hover:bg-zinc-50"
           >
             <RefreshCw size={14} />
             刷新
@@ -262,7 +262,7 @@ export function PodcastHub() {
           <button
             onClick={() => void handleTriggerFetch()}
             disabled={triggering}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-zinc-900 text-white hover:bg-zinc-800 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-sm rounded-lg bg-zinc-900 text-white hover:bg-zinc-800 disabled:opacity-50"
           >
             {triggering ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             立即拉取
@@ -323,12 +323,12 @@ export function PodcastHub() {
           </div>
         </div>
 
-        <div className="border border-zinc-200 rounded-xl bg-white p-4 max-h-[76vh] overflow-y-auto">
+        <div className="border border-zinc-200 rounded-xl bg-white p-4 xl:max-h-[76vh] xl:overflow-y-auto">
           {!selectedCard ? (
             <div className="text-center py-24 text-sm text-zinc-400">请选择一个播客条目</div>
           ) : (
             <>
-              <div className="flex items-start justify-between gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
                   <h2 className="text-lg font-semibold text-zinc-900">{selectedCard.item.title}</h2>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
@@ -340,11 +340,11 @@ export function PodcastHub() {
                     <span>时长 {fmtDuration(displayTask?.audio_duration || selectedCard.item.audioDuration)}</span>
                   </div>
                 </div>
-                <div className="shrink-0 flex items-center gap-2">
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
                   <button
                     onClick={() => void handleStartAudio(selectedCard.item)}
                     disabled={startingId === selectedCard.item.id}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50 disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50 disabled:opacity-50"
                   >
                     {startingId === selectedCard.item.id ? <Loader2 size={13} className="animate-spin" /> : <Headphones size={13} />}
                     {selectedCard.item.audioTaskId ? '重新转写' : '开始转写'}
@@ -352,7 +352,7 @@ export function PodcastHub() {
                   {displayTask?.id && (
                     <button
                       onClick={() => navigate(`/audio?taskId=${displayTask.id}`)}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50"
+                      className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50"
                     >
                       <Wand2 size={13} />
                       任务详情
@@ -362,7 +362,7 @@ export function PodcastHub() {
                     href={selectedCard.item.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50"
+                    className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50"
                   >
                     原文 <ExternalLink size={13} />
                   </a>
