@@ -1355,7 +1355,7 @@ export function Feed() {
           )}
         </div>
 
-        <div ref={detailPanelRef} className={`max-h-[72vh] overflow-y-auto rounded-[32px] border border-zinc-200/80 bg-white p-5 shadow-[0_24px_80px_-52px_rgba(15,23,42,0.45)] ${resolveFeedDetailOrderClassName(Boolean(selectedItem))}`}>
+        <div ref={detailPanelRef} className={`rounded-[32px] border border-zinc-200/80 bg-white p-5 shadow-[0_24px_80px_-52px_rgba(15,23,42,0.45)] xl:max-h-[72vh] xl:overflow-y-auto ${resolveFeedDetailOrderClassName(Boolean(selectedItem))}`}>
           {detailLoading ? (
             <div className="text-center py-20 text-zinc-400">加载详情...</div>
           ) : selectedItem ? (

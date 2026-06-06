@@ -250,6 +250,25 @@ function sourceWebsiteLabel(source: SourceRecord) {
   return '';
 }
 
+function sourceIssueLabel(source: SourceRecord) {
+  const detail = source.blockedReason || source.lastError || source.errorMessage;
+  if (!detail) return null;
+  const normalized = String(detail).toLowerCase();
+  let label = '采集失败';
+  if (normalized.includes('timed out') || normalized.includes('timeout')) {
+    label = '采集超时';
+  } else if (normalized.includes('non-whitespace') || normalized.includes('xml') || normalized.includes('rss')) {
+    label = '订阅格式异常';
+  } else if (normalized.includes('404') || normalized.includes('not found')) {
+    label = '链接不可访问';
+  } else if (normalized.includes('403') || normalized.includes('forbidden') || normalized.includes('unauthorized')) {
+    label = '访问受限';
+  } else if (normalized.includes('enotfound') || normalized.includes('getaddrinfo')) {
+    label = '域名不可达';
+  }
+  return { label, detail };
+}
+
 function sourceKindLabel(kind?: string | null) {
   return SOURCE_KIND_OPTIONS.find((option) => option.value === kind)?.label || kind || '未分型';
 }
@@ -1552,6 +1571,7 @@ export function Sources() {
             const config = (source.config || {}) as Record<string, unknown>;
             const currentRenderMode = (config.renderMode as WebCaptureRenderMode | undefined) || 'auto';
             const currentBrowserProvider = (config.browserProvider as BrowserAssistProvider | undefined) || 'generic';
+            const sourceIssue = sourceIssueLabel(source);
             return (
               <div key={source.id} className="rounded-[26px] border border-zinc-200 bg-white p-4 shadow-[0_20px_56px_-48px_rgba(15,23,42,0.45)] transition-colors hover:border-zinc-300">
                 <div className="flex flex-col gap-4 xl:flex-row xl:items-start">
@@ -1584,7 +1604,7 @@ export function Sources() {
                         <span>周期 {source.fetchInterval ?? 60} 分钟</span>
                       </div>
 
-                      <div className="mt-3 grid gap-2 sm:grid-cols-6">
+                      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-6">
                         <button
                           type="button"
                           onClick={() => openSourceFeed(source, true)}
@@ -1615,7 +1635,7 @@ export function Sources() {
                         </div>
                       </div>
 
-                      <div className="mt-2 grid gap-2 sm:grid-cols-5">
+                      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-5">
                         <div className="rounded-2xl border border-teal-100 bg-teal-50/60 px-3 py-2">
                           <div className="text-[10px] tracking-[0.2em] text-teal-700/70">质量分</div>
                           <div className="mt-1 text-xl font-semibold text-zinc-900">{source.sourceQuality?.qualityScore ?? 0}</div>
@@ -1658,14 +1678,18 @@ export function Sources() {
                         </div>
                       )}
 
-                      {(feedLabel || websiteLabel || source.lastFetchEngine || source.blockedReason || source.lastChangeSummary || source.staleReason || source.lastError) && (
+                      {(feedLabel || websiteLabel || source.lastFetchEngine || sourceIssue || source.lastChangeSummary || source.staleReason) && (
                         <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
                           {websiteLabel && <span className="max-w-[18rem] truncate">站点: {websiteLabel}</span>}
                           {feedLabel && <span className="max-w-[20rem] truncate">订阅: {feedLabel}</span>}
                           {source.lastFetchEngine && <span>引擎: {source.lastFetchEngine}</span>}
                           {source.lastChangeSummary && <span className="max-w-[20rem] truncate">变化: {source.lastChangeSummary}</span>}
                           {source.staleReason && <span className="max-w-[18rem] truncate text-amber-600">过期: {source.staleReason}</span>}
-                          {(source.blockedReason || source.lastError) && <span className="max-w-[18rem] truncate text-rose-600">异常: {source.blockedReason || source.lastError}</span>}
+                          {sourceIssue && (
+                            <span className="max-w-[18rem] truncate text-rose-600" title={`原始错误：${sourceIssue.detail}`}>
+                              异常: {sourceIssue.label}
+                            </span>
+                          )}
                         </div>
                       )}
 
@@ -1804,43 +1828,43 @@ export function Sources() {
                     </div>
                   </div>
 
-                  <div className="flex shrink-0 flex-row gap-1 xl:flex-col">
+                  <div className="flex shrink-0 flex-wrap items-center justify-start gap-1.5 xl:flex-col xl:items-stretch">
                     <button
                       onClick={() => openSourceFeed(source, true)}
-                      className="rounded-xl border border-zinc-200 px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
+                      className="whitespace-nowrap rounded-xl border border-zinc-200 px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
                       title="查看该来源的阅读流"
                     >
                       查看 Feed
                     </button>
                     <button
                       onClick={() => void handleToggleAutoFetch(source)}
-                      className={`rounded-xl p-2 hover:bg-zinc-100 ${(source.autoFetchEnabled ?? true) ? 'text-emerald-600' : 'text-zinc-400'}`}
+                      className={`inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-100 ${(source.autoFetchEnabled ?? true) ? 'text-emerald-600' : 'text-zinc-400'}`}
                       title={(source.autoFetchEnabled ?? true) ? '关闭自动抓取' : '开启自动抓取'}
                     >
                       {(source.autoFetchEnabled ?? true) ? <Pause size={14} /> : <Play size={14} />}
                     </button>
                     <button
                       onClick={() => void handleToggleAutoTranscribe(source)}
-                      className={`rounded-xl p-2 hover:bg-zinc-100 ${source.autoTranscribe ? 'text-sky-600' : 'text-zinc-400'}`}
+                      className={`inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-100 ${source.autoTranscribe ? 'text-sky-600' : 'text-zinc-400'}`}
                       title={source.autoTranscribe ? '关闭自动转写' : '开启自动转写'}
                     >
                       <Headphones size={14} />
                     </button>
-                    <button onClick={() => void handleFetch(source.id)} className="rounded-xl p-2 hover:bg-zinc-100" title="立即采集">
+                    <button onClick={() => void handleFetch(source.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-100" title="立即采集">
                       <RefreshCw size={14} className="text-zinc-400" />
                     </button>
                     <button
                       onClick={() => void handleSourceReprocess(source)}
                       disabled={reprocessingSourceId === source.id}
-                      className="rounded-xl border border-teal-200 px-3 py-2 text-xs text-teal-700 hover:bg-teal-50 disabled:opacity-50"
+                      className="whitespace-nowrap rounded-xl border border-teal-200 px-3 py-2 text-xs text-teal-700 hover:bg-teal-50 disabled:opacity-50"
                       title="批量重试正文、质检、评分、摘要和翻译"
                     >
                       {reprocessingSourceId === source.id ? '修复中' : '批量修复'}
                     </button>
-                    <button onClick={() => void handleToggleStatus(source.id, source.status)} className="rounded-xl p-2 hover:bg-zinc-100" title={source.status === 'active' ? '暂停信源' : '恢复信源'}>
+                    <button onClick={() => void handleToggleStatus(source.id, source.status)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-100" title={source.status === 'active' ? '暂停信源' : '恢复信源'}>
                       {source.status === 'active' ? <Pause size={14} className="text-zinc-400" /> : <Play size={14} className="text-zinc-400" />}
                     </button>
-                    <button onClick={() => void handleDelete(source.id)} className="rounded-xl p-2 hover:bg-red-50" title="删除">
+                    <button onClick={() => void handleDelete(source.id)} className="inline-flex h-9 w-9 items-center justify-center rounded-xl hover:bg-red-50" title="删除">
                       <Trash2 size={14} className="text-zinc-300 hover:text-red-500" />
                     </button>
                   </div>

@@ -141,9 +141,61 @@ function cloneWorkflow(workflow: DailyReportWorkflowConfig): DailyReportWorkflow
   return JSON.parse(JSON.stringify(workflow));
 }
 
+const REPORT_SECTION_HEADINGS = new Set([
+  '生成口径',
+  '今日结论',
+  '关键进展',
+  '头部舆论/新闻焦点',
+  '阅读建议',
+  '下一步行动',
+  '低分复核',
+  '泛商业噪声',
+  '候选漏斗',
+  '入报理由',
+  '未入报诊断',
+]);
+
+function normalizeReportMarkdownForDisplay(value: string) {
+  const normalized = value.replace(/\r\n?/g, '\n').trim();
+  if (!normalized) return '';
+  if (/^#{1,6}\s+\S/m.test(normalized)) {
+    return normalized;
+  }
+
+  const lines = normalized
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const out: string[] = [];
+  let currentSection = '';
+
+  lines.forEach((line, index) => {
+    if (index === 0 && /日报/.test(line)) {
+      out.push(`# ${line}`, '');
+      return;
+    }
+    if (REPORT_SECTION_HEADINGS.has(line)) {
+      currentSection = line;
+      out.push('', `## ${line}`, '');
+      return;
+    }
+    if (currentSection === '生成口径' && /[:：]/.test(line)) {
+      out.push(`- ${line}`);
+      return;
+    }
+    if ((currentSection === '关键进展' || currentSection === '头部舆论/新闻焦点') && /[:：].*(AI|入报原因|摘要|来源|标签)/i.test(line)) {
+      out.push(`- ${line}`);
+      return;
+    }
+    out.push(line, '');
+  });
+
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function extractReportMarkdown(report?: InsightRecord | null) {
   if (!report) return '';
-  return report.payload?.final?.markdown || report.summary || '';
+  return normalizeReportMarkdownForDisplay(report.payload?.final?.markdown || report.summary || '');
 }
 
 function getReportModuleStatuses(report?: InsightRecord | null) {
