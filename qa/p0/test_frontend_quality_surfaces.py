@@ -181,6 +181,26 @@ def assert_mobile_filtered_item_budget(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} renders too many mobile filtered items: {rendered_items}")
 
 
+def assert_mobile_feed_preview_copy_clean(page, route: str, label: str) -> None:
+    if not route.startswith("/feed"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    noisy_previews = page.evaluate(
+        """() => Array.from(document.querySelectorAll('p')).map((node) => {
+            const text = (node.textContent || '').trim();
+            return {
+                text,
+                hasRepeatedArrow: /(?:->\\s*){4,}|>{8,}|[-_=*]{12,}/.test(text),
+                hasModelBoilerplate: /您提供的.*摘要内容为空|请补充需要改写的摘要文本|作为(?:一个)?AI|As an AI language model/i.test(text),
+            };
+        }).filter((item) => item.text && (item.hasRepeatedArrow || item.hasModelBoilerplate)).slice(0, 5)"""
+    )
+    if noisy_previews:
+        raise AssertionError(f"{label} feed preview exposes raw noise or model boilerplate: {noisy_previews}")
+
+
 def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
     if not route.startswith("/settings"):
         return
@@ -303,6 +323,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_sources_action_labels(page, route, f"{viewport_name} {route}")
     assert_desktop_sources_table_actions_visible(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
+    assert_mobile_feed_preview_copy_clean(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)

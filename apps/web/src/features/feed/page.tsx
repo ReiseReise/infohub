@@ -46,6 +46,47 @@ function normalizeAiSummary(raw?: string | null): string {
   }
 }
 
+function cleanFeedPreviewText(raw?: string | null): string {
+  const normalized = (raw || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const cleaned = normalized
+    .replace(/\s*(?:-->|->|=>|>{2,}|[-_=*~]{4,})\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) return '';
+  if (/您提供的.*摘要内容为空|请补充需要改写的摘要文本|作为(?:一个)?AI|As an AI language model/i.test(cleaned)) return '';
+  if (/(?:->\s*){4,}|>{8,}|[-_=*]{12,}/.test(cleaned)) return '';
+
+  const readableChars = (cleaned.match(/[\p{L}\p{N}]/gu) || []).length;
+  const noisySymbols = (cleaned.match(/[>→<|_=*~^#`\\]/g) || []).length;
+  if (readableChars < 10 || noisySymbols > readableChars / 2) return '';
+
+  return cleaned;
+}
+
+function getFeedListPreview(item: FeedItem): { text: string; className: string } | null {
+  const summaryPreview = cleanFeedPreviewText(normalizeAiSummary(item.aiSummary));
+  if (summaryPreview) return { text: summaryPreview, className: 'text-zinc-500' };
+
+  const snippetPreview = cleanFeedPreviewText(item.snippet);
+  if (snippetPreview) return { text: snippetPreview, className: 'text-zinc-400' };
+
+  if (normalizeAiSummary(item.aiSummary) || item.snippet) {
+    return {
+      text: '预览片段含抓取噪声，打开详情查看原文依据。',
+      className: 'rounded-xl border border-amber-100 bg-amber-50 px-2.5 py-2 text-amber-700',
+    };
+  }
+
+  return null;
+}
+
 function asValidDate(date?: string | null): Date | null {
   if (!date) return null;
   const parsed = new Date(date);
@@ -1271,8 +1312,10 @@ export function Feed() {
                       )}
                     </div>
                     <h3 className={`text-[15px] leading-6 line-clamp-2 ${item.isRead ? 'text-zinc-500 font-medium' : 'text-zinc-900 font-semibold'}`}>{item.title}</h3>
-                    {normalizeAiSummary(item.aiSummary) && <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-500">{normalizeAiSummary(item.aiSummary)}</p>}
-                    {!normalizeAiSummary(item.aiSummary) && item.snippet && <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-400">{item.snippet}</p>}
+                    {(() => {
+                      const preview = getFeedListPreview(item);
+                      return preview ? <p className={`mt-2 line-clamp-2 text-xs leading-5 ${preview.className}`}>{preview.text}</p> : null;
+                    })()}
                     <div className="mt-2.5 flex items-center gap-2 flex-wrap">
                       <button
                         type="button"
