@@ -218,6 +218,19 @@ def assert_mobile_insights_report_shortcut(page, route: str, label: str) -> None
         raise AssertionError(f"{label} latest report target is not visible after clicking the shortcut")
     if section_box["y"] > 180:
         raise AssertionError(f"{label} latest report shortcut did not scroll near the report section: {section_box}")
+    if page.get_by_text("日报导航").count() == 0:
+        raise AssertionError(f"{label} daily report section is missing a local report navigation")
+    markdown_button = page.get_by_role("button", name="日报正文", exact=True).first
+    if markdown_button.count() == 0:
+        raise AssertionError(f"{label} daily report navigation is missing the markdown shortcut")
+    markdown_button.click()
+    page.wait_for_timeout(200)
+    markdown_section = page.locator("#report-markdown-section").first
+    markdown_box = markdown_section.bounding_box()
+    if not markdown_box:
+        raise AssertionError(f"{label} report markdown target is not visible after clicking the navigation")
+    if markdown_box["y"] > 220:
+        raise AssertionError(f"{label} markdown navigation did not scroll near the report body: {markdown_box}")
     page.evaluate("() => window.scrollTo({ top: 0, behavior: 'instant' })")
     page.wait_for_timeout(100)
 

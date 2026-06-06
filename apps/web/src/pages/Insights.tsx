@@ -314,8 +314,12 @@ export function Insights() {
   const workflowNoticeMessage = typeof workflowNotice === 'string' ? workflowNotice : workflowNotice?.message;
   const workflowNoticeTone: NoticeTone = typeof workflowNotice === 'string' || !workflowNotice ? 'success' : workflowNotice.tone;
 
+  function handleJumpToReportAnchor(anchorId: string) {
+    document.getElementById(anchorId)?.scrollIntoView({ behavior: 'auto', block: 'start' });
+  }
+
   function handleJumpToLatestReport() {
-    document.getElementById('daily-report-section')?.scrollIntoView({ behavior: 'auto', block: 'start' });
+    handleJumpToReportAnchor('daily-report-section');
   }
 
   function updateWorkflow(patch: Partial<DailyReportWorkflowConfig>) {
@@ -681,6 +685,12 @@ export function Insights() {
   if (loading) {
     return <div className="p-8 text-sm text-zinc-400">加载成长仪表板...</div>;
   }
+
+  const reportModuleStatuses = getReportModuleStatuses(selectedInsight);
+  const reportExclusionSummary = getReportExclusionSummary(selectedInsight);
+  const reportTopItems = getReportTopItems(selectedInsight);
+  const reportMarkdown = extractReportMarkdown(selectedInsight);
+  const hasReportSnapshot = Boolean(selectedInsight?.payload?.snapshot);
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.08),_transparent_30%),linear-gradient(180deg,_#fffdf8_0%,_#f8fafc_100%)] p-4 md:p-6">
@@ -1180,8 +1190,29 @@ export function Insights() {
                   <FileText size={16} />
                   {selectedInsight ? `${selectedInsight.date} 日报` : '暂无日报'}
                 </div>
+                <div className="mb-4 rounded-2xl border border-zinc-200 bg-white px-3 py-3">
+                  <div className="text-xs font-semibold text-zinc-900">日报导航</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {[
+                      { label: '漏斗概览', anchor: 'report-snapshot-section', disabled: !hasReportSnapshot },
+                      { label: '未入报', anchor: 'report-exclusions-section', disabled: reportExclusionSummary.length === 0 },
+                      { label: '入报理由', anchor: 'report-top-items-section', disabled: reportTopItems.length === 0 },
+                      { label: '日报正文', anchor: 'report-markdown-section', disabled: !reportMarkdown },
+                    ].map((item) => (
+                      <button
+                        key={item.anchor}
+                        type="button"
+                        onClick={() => handleJumpToReportAnchor(item.anchor)}
+                        disabled={item.disabled}
+                        className="rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 {selectedInsight?.payload?.snapshot && (
-                  <div className="mb-4 rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-xs text-zinc-600">
+                  <div id="report-snapshot-section" className="scroll-mt-4 mb-4 rounded-2xl border border-zinc-200 bg-white px-3 py-3 text-xs text-zinc-600">
                     <div className="grid gap-2 sm:grid-cols-2">
                       <div className="rounded-xl border border-zinc-100 bg-zinc-50 px-3 py-2">
                         模式
@@ -1212,9 +1243,9 @@ export function Insights() {
                     </div>
                   </div>
                 )}
-                {getReportModuleStatuses(selectedInsight).length > 0 && (
+                {reportModuleStatuses.length > 0 && (
                   <div className="mb-4 flex flex-wrap gap-2 text-xs">
-                    {getReportModuleStatuses(selectedInsight).map((item) => {
+                    {reportModuleStatuses.map((item) => {
                       const meta = item.meta!;
                       const label = moduleStatusLabel(meta);
                       const tone = moduleStatusTone(meta);
@@ -1241,14 +1272,14 @@ export function Insights() {
                     })()}
                   </div>
                 )}
-                {getReportExclusionSummary(selectedInsight).length > 0 && (
-                  <div className="mb-4 rounded-2xl border border-zinc-200 bg-white p-4">
+                {reportExclusionSummary.length > 0 && (
+                  <div id="report-exclusions-section" className="scroll-mt-4 mb-4 rounded-2xl border border-zinc-200 bg-white p-4">
                     <div className="text-sm font-semibold text-zinc-900">未入报解释</div>
                     <div className="mt-1 text-xs leading-5 text-zinc-600">
                       这些条目没有进入最终日报；这里按原因保留计数和样例，用来判断是噪声、中文化问题，还是筛选门槛问题。
                     </div>
                     <div className="mt-3 grid gap-3">
-                      {getReportExclusionSummary(selectedInsight).map((group) => {
+                      {reportExclusionSummary.map((group) => {
                         const meta = EXCLUDED_REASON_META[group.reason] || {
                           label: group.reason,
                           description: '系统记录的其他未入报原因。',
@@ -1290,11 +1321,11 @@ export function Insights() {
                     </div>
                   </div>
                 )}
-                {getReportTopItems(selectedInsight).length > 0 && (
-                  <div className="mb-4 rounded-2xl border border-zinc-200 bg-white p-4">
+                {reportTopItems.length > 0 && (
+                  <div id="report-top-items-section" className="scroll-mt-4 mb-4 rounded-2xl border border-zinc-200 bg-white p-4">
                     <div className="text-sm font-semibold text-zinc-900">TOP 入报理由</div>
                     <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                      {getReportTopItems(selectedInsight).map((item, index) => (
+                      {reportTopItems.map((item, index) => (
                         <a
                           key={item.id}
                           href={item.url}
@@ -1319,7 +1350,9 @@ export function Insights() {
                     </div>
                   </div>
                 )}
-                <MarkdownContent content={extractReportMarkdown(selectedInsight)} empty="还没有日报内容。" className="min-w-0" mode="markdown" variant="report" />
+                <div id="report-markdown-section" className="scroll-mt-4">
+                  <MarkdownContent content={reportMarkdown} empty="还没有日报内容。" className="min-w-0" mode="markdown" variant="report" />
+                </div>
               </div>
             </div>
           </section>
