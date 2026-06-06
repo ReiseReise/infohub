@@ -4,6 +4,11 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api, type FeedItemRecord, type ItemQualityCheckPayload } from '../lib/api';
 
 const TIER_OPTIONS = ['all', 'T1', 'T1.5', 'T2', 'S', 'A', 'B', 'C', 'D'] as const;
+const FILTERED_MOBILE_BATCH_SIZE = 18;
+
+function isCompactFilteredViewport() {
+  return typeof window !== 'undefined' ? window.innerWidth < 1280 : false;
+}
 
 function tierLabel(tier?: string | null) {
   const labels: Record<string, string> = {
@@ -61,6 +66,8 @@ export function Filtered() {
   const [sourceIdFilter, setSourceIdFilter] = useState(
     Number.isInteger(Number(initialSourceId)) && Number(initialSourceId) > 0 ? String(Number(initialSourceId)) : '',
   );
+  const [isCompactList, setIsCompactList] = useState(isCompactFilteredViewport);
+  const [visibleFilteredItemCount, setVisibleFilteredItemCount] = useState(FILTERED_MOBILE_BATCH_SIZE);
   const [selectedItem, setSelectedItem] = useState<FeedItemRecord | null>(null);
   const [qualityDetail, setQualityDetail] = useState<ItemQualityCheckPayload | null>(null);
   const deferredSearch = useDeferredValue(search);
@@ -115,6 +122,17 @@ export function Filtered() {
   useEffect(() => {
     void loadItems();
   }, [loadItems]);
+
+  useEffect(() => {
+    const handleResize = () => setIsCompactList(isCompactFilteredViewport());
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    setVisibleFilteredItemCount(FILTERED_MOBILE_BATCH_SIZE);
+  }, [deferredSearch, sourceIdFilter, tagFilter, tierFilter]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -198,6 +216,12 @@ export function Filtered() {
     () => (selectedId ? items.findIndex((item) => item.id === selectedId) : -1),
     [items, selectedId],
   );
+
+  const displayedItems = useMemo(
+    () => (isCompactList ? items.slice(0, visibleFilteredItemCount) : items),
+    [isCompactList, items, visibleFilteredItemCount],
+  );
+  const hiddenLoadedItems = isCompactList ? Math.max(items.length - displayedItems.length, 0) : 0;
 
   const selectedPositionLabel = selectedIndex >= 0 ? `${selectedIndex + 1} / ${items.length}` : '--';
 
@@ -343,7 +367,7 @@ export function Filtered() {
                 </div>
               ) : (
                 <>
-                  {items.map((item) => (
+                  {displayedItems.map((item) => (
                     <button
                       key={item.id}
                       type="button"
@@ -379,7 +403,24 @@ export function Filtered() {
                       </div>
                     </button>
                   ))}
-                  {hasMore && nextOffset !== null && (
+                  {hiddenLoadedItems > 0 && (
+                    <div className="rounded-[22px] border border-dashed border-zinc-300 bg-zinc-50 px-4 py-4 text-center">
+                      <div className="text-sm font-medium text-zinc-800">
+                        已显示 {displayedItems.length} / {items.length} 条已加载过滤内容
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-zinc-500">
+                        手机端先展示首批过滤条目，避免列表过长。继续展开不会改变筛选条件。
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setVisibleFilteredItemCount((count) => count + FILTERED_MOBILE_BATCH_SIZE)}
+                        className="mt-3 rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+                      >
+                        再显示 {Math.min(FILTERED_MOBILE_BATCH_SIZE, hiddenLoadedItems)} 条
+                      </button>
+                    </div>
+                  )}
+                  {hasMore && nextOffset !== null && (!isCompactList || hiddenLoadedItems === 0) && (
                     <button
                       type="button"
                       onClick={() => void loadItems({ append: true, offset: nextOffset })}
