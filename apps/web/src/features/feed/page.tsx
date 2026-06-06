@@ -1359,22 +1359,27 @@ export function Feed() {
                     />
                   )}
 
-                  <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex shrink-0 flex-col gap-1 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
                     <button
+                      type="button"
+                      aria-label={item.isFavorite ? '取消收藏' : '收藏文章'}
+                      title={item.isFavorite ? '取消收藏' : '收藏文章'}
                       onClick={(e) => {
                         e.stopPropagation();
                         void handleFavorite(item.id, item.isFavorite);
                       }}
-                      className="rounded-lg p-1.5 hover:bg-zinc-100"
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-500 shadow-sm transition-colors hover:bg-zinc-100 md:h-auto md:w-auto md:border-0 md:bg-transparent md:p-1.5 md:shadow-none"
                     >
                       <Star size={14} className={item.isFavorite ? 'fill-amber-400 text-amber-400' : 'text-zinc-300'} />
                     </button>
                     <a
                       href={item.url}
                       target="_blank"
-                      rel="noopener"
+                      rel="noopener noreferrer"
+                      aria-label="打开原文"
+                      title="打开原文"
                       onClick={(e) => e.stopPropagation()}
-                      className="rounded-lg p-1.5 hover:bg-zinc-100"
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-500 shadow-sm transition-colors hover:bg-zinc-100 md:h-auto md:w-auto md:border-0 md:bg-transparent md:p-1.5 md:shadow-none"
                     >
                       <ExternalLink size={14} className="text-zinc-300" />
                     </a>

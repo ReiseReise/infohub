@@ -201,6 +201,48 @@ def assert_mobile_feed_preview_copy_clean(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} feed preview exposes raw noise or model boilerplate: {noisy_previews}")
 
 
+def assert_mobile_feed_list_actions_discoverable(page, route: str, label: str) -> None:
+    if not route.startswith("/feed"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    hidden_or_unlabeled_actions = page.evaluate(
+        """() => Array.from(document.querySelectorAll('div')).filter((node) => {
+            const className = String(node.getAttribute('class') || '');
+            return className.includes('group-hover:opacity-100') && node.querySelector('button, a');
+        }).slice(0, 3).flatMap((container, index) => {
+            return Array.from(container.querySelectorAll('button, a')).map((node) => {
+                let effectiveOpacity = 1;
+                let current = node;
+                while (current && current.nodeType === Node.ELEMENT_NODE) {
+                    effectiveOpacity *= Number(window.getComputedStyle(current).opacity || 1);
+                    if (current === container.parentElement) break;
+                    current = current.parentElement;
+                }
+                const rect = node.getBoundingClientRect();
+                const label = [
+                    node.getAttribute('aria-label'),
+                    node.getAttribute('title'),
+                    (node.textContent || '').trim(),
+                ].filter(Boolean).join(' ');
+                return {
+                    index,
+                    label,
+                    effectiveOpacity,
+                    width: rect.width,
+                    height: rect.height,
+                    x: rect.x,
+                    y: rect.y,
+                    tag: node.tagName,
+                };
+            });
+        }).filter((item) => item.effectiveOpacity < 0.95 || !item.label || item.width < 32 || item.height < 32)"""
+    )
+    if hidden_or_unlabeled_actions:
+        raise AssertionError(f"{label} feed list actions are hidden, unlabeled, or too small on mobile: {hidden_or_unlabeled_actions}")
+
+
 def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
     if not route.startswith("/settings"):
         return
@@ -324,6 +366,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_desktop_sources_table_actions_visible(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_preview_copy_clean(page, route, f"{viewport_name} {route}")
+    assert_mobile_feed_list_actions_discoverable(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
