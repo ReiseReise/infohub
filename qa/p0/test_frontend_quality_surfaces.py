@@ -458,6 +458,37 @@ def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} refresh button is cramped: {box}")
 
 
+def assert_mobile_settings_tabs_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/settings"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    cramped_tabs = page.evaluate(
+        """() => {
+            const requiredLabels = ['通用偏好', '阅读 AI', 'AI 管理中心', '集成', '诊断中心', '播客配额', '管理后台'];
+            const buttons = Array.from(document.querySelectorAll('button')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                const label = (node.textContent || '').trim().replace(/\\s+/g, ' ');
+                return {
+                    label,
+                    width: rect.width,
+                    height: rect.height,
+                    x: rect.x,
+                    y: rect.y,
+                };
+            });
+            return requiredLabels.flatMap((requiredLabel) => {
+                const matched = buttons.filter((button) => button.label === requiredLabel);
+                if (!matched.length) return [{ error: 'missing-settings-tab', label: requiredLabel }];
+                return matched.filter((button) => button.width < 36 || button.height < 36);
+            });
+        }"""
+    )
+    if cramped_tabs:
+        raise AssertionError(f"{label} settings tabs are too small or missing on mobile: {cramped_tabs}")
+
+
 def assert_report_heading_date_not_split(page, label: str) -> None:
     date_layout = page.evaluate(
         """() => {
@@ -605,6 +636,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_feed_stage_repair_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_feedback_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
+    assert_mobile_settings_tabs_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_mode_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)

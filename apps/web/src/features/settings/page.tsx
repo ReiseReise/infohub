@@ -1512,7 +1512,7 @@ export function Settings() {
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
-            className={`px-3 py-1.5 text-sm rounded-lg border ${activeTab === tab.key ? 'bg-zinc-900 text-white border-zinc-900' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
+            className={`min-h-9 px-3 py-2 text-sm rounded-lg border ${activeTab === tab.key ? 'bg-zinc-900 text-white border-zinc-900' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
           >
             {tab.label}
           </button>
