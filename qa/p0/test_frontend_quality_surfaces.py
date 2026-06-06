@@ -161,6 +161,20 @@ def assert_mobile_filtered_item_budget(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} renders too many mobile filtered items: {rendered_items}")
 
 
+def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
+    if not route.startswith("/settings"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    button = page.get_by_role("button", name="刷新").first
+    box = button.bounding_box()
+    if not box:
+        raise AssertionError(f"{label} refresh button is not visible")
+    if box["height"] > 52 or box["width"] < 72:
+        raise AssertionError(f"{label} refresh button is cramped: {box}")
+
+
 def wait_ready(page) -> None:
     page.wait_for_load_state("domcontentloaded", timeout=20000)
     try:
@@ -178,6 +192,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_sources_card_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_sources_action_labels(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
+    assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     screenshot_path = SCREENSHOT_DIR / f"infohub-front-{slug}-{viewport_name}.png"
     page.screenshot(path=str(screenshot_path), full_page=True)
@@ -243,6 +258,15 @@ def main() -> int:
                     "filtered",
                     viewport_name,
                     ["过滤池", "过滤原因", "恢复到主 Feed"],
+                )
+            )
+            screenshots.append(
+                visit_and_capture(
+                    page,
+                    "/settings",
+                    "settings",
+                    viewport_name,
+                    ["设置中心", "通用偏好", "自动抓取"],
                 )
             )
             screenshots.append(

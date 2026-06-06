@@ -1490,8 +1490,8 @@ export function Settings() {
 
   return (
     <div className="p-6 max-w-7xl">
-      <div className="flex items-center justify-between mb-4">
-        <div>
+      <div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-zinc-900">设置中心</h1>
           <p className="text-sm text-zinc-500 mt-1">通用偏好、阅读翻译、模型配置、集成、配额与后台管理</p>
         </div>
@@ -1501,7 +1501,7 @@ export function Settings() {
             if (activeTab === 'admin' && isAdmin) void refreshAdmin();
             if (activeTab === 'diagnostics') void refreshDiagnostics();
           }}
-          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border border-zinc-200 hover:bg-zinc-50"
+          className="inline-flex w-fit items-center gap-1.5 whitespace-nowrap px-3 py-2 text-sm rounded-lg border border-zinc-200 hover:bg-zinc-50"
         >
           <Activity size={14} /> 刷新
         </button>
