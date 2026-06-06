@@ -305,6 +305,47 @@ def assert_mobile_feed_detail_header_actions_touchable(page, route: str, label: 
         raise AssertionError(f"{label} feed detail header actions are too small or unlabeled on mobile: {cramped_actions}")
 
 
+def assert_mobile_feed_stage_repair_actions_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/feed/"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    stage_heading = page.get_by_text("阶段修复", exact=True).first
+    if stage_heading.count() == 0:
+        raise AssertionError(f"{label} feed detail is missing the stage repair section")
+    stage_heading.scroll_into_view_if_needed()
+    page.wait_for_timeout(100)
+    cramped_actions = page.evaluate(
+        """() => {
+            const section = document.querySelector('[data-feed-stage-repair]') || (() => {
+                const heading = Array.from(document.querySelectorAll('*')).find((node) => (node.textContent || '').trim() === '阶段修复');
+                return heading?.closest('.rounded-2xl') || null;
+            })();
+            if (!section) return [{ error: 'missing-stage-repair-section' }];
+            const buttons = Array.from(section.querySelectorAll('button'));
+            if (!buttons.length) return [{ error: 'missing-stage-repair-actions' }];
+            return buttons.map((node) => {
+                const rect = node.getBoundingClientRect();
+                const accessibleLabel = [
+                    node.getAttribute('aria-label'),
+                    node.getAttribute('title'),
+                    (node.textContent || '').trim(),
+                ].filter(Boolean).join(' ');
+                return {
+                    label: (node.textContent || '').trim().replace(/\\s+/g, ' '),
+                    accessibleLabel,
+                    width: rect.width,
+                    height: rect.height,
+                    disabled: Boolean(node.disabled),
+                };
+            }).filter((item) => item.error || !item.accessibleLabel || item.height < 36 || item.width < 36);
+        }"""
+    )
+    if cramped_actions:
+        raise AssertionError(f"{label} feed stage repair actions are too small or unlabeled on mobile: {cramped_actions}")
+
+
 def assert_mobile_settings_header_action(page, route: str, label: str) -> None:
     if not route.startswith("/settings"):
         return
@@ -430,6 +471,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_feed_preview_copy_clean(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_list_actions_discoverable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_detail_header_actions_touchable(page, route, f"{viewport_name} {route}")
+    assert_mobile_feed_stage_repair_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_detail_has_return_to_list(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
