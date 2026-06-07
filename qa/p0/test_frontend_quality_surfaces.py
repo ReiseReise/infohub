@@ -720,7 +720,7 @@ def assert_mobile_settings_diagnostics_copy_clean(page, route: str, label: str) 
         """() => {
             const sections = Array.from(document.querySelectorAll('*')).filter((node) => {
                 const text = (node.textContent || '').trim();
-                return text === '抓取队列诊断' || text === '最近抓取结果';
+                return text === '抓取队列诊断' || text === '最近抓取结果' || text === '历史裁剪状态' || text === '存储与备份';
             }).map((heading) => heading.closest('.rounded-xl') || heading.parentElement).filter(Boolean);
             if (!sections.length) return [{ error: 'missing-diagnostics-sections' }];
             const rawPatterns = [
@@ -737,6 +737,15 @@ def assert_mobile_settings_diagnostics_copy_clean(page, route: str, label: str) 
                 /\\battempts\\s*:/i,
                 /\\ball_duplicate\\b/i,
                 /\\bprioritized\\b/i,
+                /模式：\\s*apply/i,
+                /状态：\\s*success/i,
+                /音频存储\\s+local/i,
+                /最近结果：\\s*success/i,
+                /\\bbackup_only\\b/i,
+                /\\bsync_ok\\b/i,
+                /\\barchive_only\\b/i,
+                /预计\\/最近删除：\\s*items/i,
+                /预计\\/最近删除：.*\\baudio\\b/i,
             ];
             return sections.flatMap((section) => {
                 const text = (section.textContent || '').replace(/\\s+/g, ' ').trim();

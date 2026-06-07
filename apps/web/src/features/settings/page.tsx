@@ -209,6 +209,71 @@ function fetchOutcomeLabel(outcome?: unknown, status?: unknown) {
   return FETCH_OUTCOME_LABELS[normalized] || '状态待确认';
 }
 
+const DIAGNOSTIC_STATUS_LABELS: Record<string, string> = {
+  ok: '正常',
+  healthy: '健康',
+  success: '成功',
+  done: '完成',
+  running: '运行中',
+  pending: '等待中',
+  warning: '需关注',
+  error: '异常',
+  failed: '失败',
+  skipped: '已跳过',
+  unknown: '状态待确认',
+};
+
+function diagnosticStatusLabel(value?: unknown, fallback = '暂无') {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return fallback;
+  return DIAGNOSTIC_STATUS_LABELS[normalized] || '状态待确认';
+}
+
+const RETENTION_MODE_LABELS: Record<string, string> = {
+  apply: '正式执行',
+  live: '正式执行',
+  dry_run: '预演',
+  dryrun: '预演',
+  preview: '预演',
+};
+
+function retentionModeLabel(value?: unknown) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return '暂无';
+  return RETENTION_MODE_LABELS[normalized] || '模式待确认';
+}
+
+const STORAGE_BACKEND_LABELS: Record<string, string> = {
+  local: '本地存储',
+  filesystem: '本地文件',
+  fs: '本地文件',
+  oss: '对象存储',
+  s3: '对象存储',
+  r2: '对象存储',
+  none: '未配置',
+};
+
+function storageBackendLabel(value?: unknown) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return '未配置';
+  return STORAGE_BACKEND_LABELS[normalized] || '存储方式待确认';
+}
+
+const SYNC_MODE_LABELS: Record<string, string> = {
+  sync_ok: '可同步',
+  sync: '可同步',
+  backup_only: '仅备份',
+  archive_only: '仅归档',
+  ignore: '不建议同步',
+  disabled: '未启用',
+};
+
+function syncModeLabel(value?: unknown) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return '待确认';
+  return SYNC_MODE_LABELS[normalized] || '待确认';
+}
+
 type IntegrationPrefs = {
   ntfyTopic: string;
   feishuWebhook: string;
@@ -2888,7 +2953,7 @@ export function Settings() {
                         <div className="flex items-center justify-between">
                           <span className="font-medium text-zinc-800">服务状态</span>
                           <span className={`rounded px-2 py-0.5 ${scraplingService?.status === 'ok' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-                            {scraplingService?.status || 'unknown'}
+                            {diagnosticStatusLabel(scraplingService?.status, '未知')}
                           </span>
                         </div>
                         <div>当前定位：网页正文富化 / 网页快照监控的动态抓取兜底层。</div>
@@ -2904,9 +2969,9 @@ export function Settings() {
                   {sectionTitle('历史裁剪状态', '默认保留最近 30 天；收藏 / 稍后读和被引用音频任务不会被直接裁掉。')}
                   <div className="space-y-2 text-xs text-zinc-600">
                     <div>最近一次运行：{retentionStatus?.createdAt ? new Date(retentionStatus.createdAt).toLocaleString('zh-CN') : '暂无'}</div>
-                    <div>模式：{retentionStatus?.mode || '暂无'} · 状态：{retentionStatus?.status || 'unknown'}</div>
+                    <div>模式：{retentionModeLabel(retentionStatus?.mode)} · 状态：{diagnosticStatusLabel(retentionStatus?.status, '暂无')}</div>
                     <div>保留天数：{retentionStatus?.retentionDays ?? (retentionStatus?.summary as { retentionDays?: number } | undefined)?.retentionDays ?? 30}</div>
-                    <div>预计/最近删除：items {(retentionStatus?.summary as { deleted?: { items?: number }, items?: number } | undefined)?.deleted?.items ?? (retentionStatus?.summary as { items?: number } | undefined)?.items ?? 0} · audio {(retentionStatus?.summary as { deleted?: { audioTasks?: number }, audioTasks?: number } | undefined)?.deleted?.audioTasks ?? (retentionStatus?.summary as { audioTasks?: number } | undefined)?.audioTasks ?? 0}</div>
+                    <div>预计/最近删除：条目 {(retentionStatus?.summary as { deleted?: { items?: number }, items?: number } | undefined)?.deleted?.items ?? (retentionStatus?.summary as { items?: number } | undefined)?.items ?? 0} · 音频任务 {(retentionStatus?.summary as { deleted?: { audioTasks?: number }, audioTasks?: number } | undefined)?.deleted?.audioTasks ?? (retentionStatus?.summary as { audioTasks?: number } | undefined)?.audioTasks ?? 0}</div>
                     <div>跳过引用音频任务：{(retentionStatus?.summary as { skippedReferencedAudioTasks?: number } | undefined)?.skippedReferencedAudioTasks ?? 0}</div>
                     <div>存储清理失败：{(retentionStatus?.summary as { storageDeleteFailed?: number } | undefined)?.storageDeleteFailed ?? 0}</div>
                   </div>
@@ -2922,13 +2987,13 @@ export function Settings() {
                       <div className="flex items-center justify-between">
                         <span className="font-medium text-zinc-800">音频存储</span>
                         <span className={`rounded px-2 py-0.5 ${storageStatus?.storage.audioStorageBackend === 'local' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                          {storageStatus?.storage.audioStorageBackend || 'unknown'}
+                          {storageBackendLabel(storageStatus?.storage.audioStorageBackend)}
                         </span>
                       </div>
                       <div>数据根目录：{storageStatus?.storage.hostDataRoot || '暂无'}</div>
                       <div>导出目录：{storageStatus?.storage.hostExportRoot || '暂无'}</div>
                       <div>备份目录：{storageStatus?.storage.hostBackupRoot || '暂无'}</div>
-                      <div>最近结果：{storageStatus?.backup.lastRun?.status || '暂无'} · {storageStatus?.backup.lastRun?.message || '未执行过备份'}</div>
+                      <div>最近结果：{diagnosticStatusLabel(storageStatus?.backup.lastRun?.status, '暂无')} · {storageStatus?.backup.lastRun?.message || '未执行过备份'}</div>
                       <div>最近时间：{storageStatus?.backup.lastRun?.updatedAt ? new Date(storageStatus.backup.lastRun.updatedAt).toLocaleString('zh-CN') : '暂无'}</div>
                       <div>最近包：{storageStatus?.backup.lastRun?.bundle?.name || storageStatus?.backup.latestBundleName || '暂无'}{storageStatus?.backup.lastRun?.bundle?.sizeBytes ? ` · ${formatBytes(storageStatus.backup.lastRun.bundle.sizeBytes)}` : ''}</div>
                       <div>本地保留：{storageStatus?.backup.localRetention ?? 0} 份 · 当前可见：{storageStatus?.backup.localBundleCount ?? 0} 份</div>
@@ -2944,7 +3009,7 @@ export function Settings() {
                           {(storageStatus?.storage.syncGuidance || []).map((entry) => (
                             <div key={entry.path}>
                               <span className="font-medium text-zinc-800">{entry.path}</span>
-                              <span className="ml-1 text-zinc-500">[{entry.mode}]</span>
+                              <span className="ml-1 text-zinc-500">[{syncModeLabel(entry.mode)}]</span>
                               <span className="ml-1">· {entry.reason}</span>
                             </div>
                           ))}

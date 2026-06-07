@@ -981,10 +981,13 @@ export function Feed() {
 
   useEffect(() => {
     if (!shouldAutoScrollFeedDetailIntoView(Boolean(selectedItem))) return;
-    window.requestAnimationFrame(() => {
+    const scrollToDetail = () => {
       detailPanelRef.current?.scrollIntoView({ block: 'start' });
-    });
-  }, [selectedItem?.id]);
+    };
+    window.requestAnimationFrame(scrollToDetail);
+    const settledTimer = window.setTimeout(scrollToDetail, 450);
+    return () => window.clearTimeout(settledTimer);
+  }, [detailLoading, selectedItem?.id]);
 
   const selectedHost = useMemo(() => {
     if (!selectedItem?.url) return '';
@@ -1241,7 +1244,7 @@ export function Feed() {
         <div
           id="feed-list-panel"
           ref={listPanelRef}
-          className="overflow-hidden rounded-[28px] border border-zinc-200/80 bg-white shadow-[0_24px_60px_-48px_rgba(15,23,42,0.5)]"
+          className="overflow-hidden rounded-[28px] border border-zinc-200/80 bg-white shadow-[0_24px_60px_-48px_rgba(15,23,42,0.5)] [overflow-anchor:none]"
         >
           {loading ? (
             <div className="text-center py-20 text-zinc-400">加载中...</div>
