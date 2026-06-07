@@ -1268,7 +1268,7 @@ export function Sources() {
                     key={axis}
                     type="button"
                     onClick={() => setForm((prev) => ({ ...prev, growthAxes: toggleGrowthAxis(prev.growthAxes, axis) }))}
-                    className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                    className={`min-h-9 rounded-full border px-3 py-2 text-xs transition-colors ${
                       active
                         ? 'border-zinc-900 bg-zinc-900 text-white'
                         : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50'

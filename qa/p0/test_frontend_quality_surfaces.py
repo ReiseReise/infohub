@@ -198,6 +198,44 @@ def assert_mobile_sources_governance_controls_touchable(page, route: str, label:
         raise AssertionError(f"{label} source governance controls are too small, missing, or unlabeled on mobile: {control_problems}")
 
 
+def assert_mobile_sources_add_form_growth_axes_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/sources"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+
+    add_button = page.get_by_role("button", name="添加信源", exact=True).first
+    if add_button.count() == 0:
+        raise AssertionError(f"{label} sources page is missing add-source action")
+    add_button.click()
+    page.wait_for_timeout(200)
+
+    control_problems = page.evaluate(
+        """() => {
+            const labels = new Set(['认知升级', '技术能力', '商业判断', '表达输出']);
+            return Array.from(document.querySelectorAll('button')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                const label = node.getAttribute('aria-label') || node.getAttribute('title') || (node.textContent || '').trim().replace(/\\s+/g, ' ');
+                return {
+                    label,
+                    width: rect.width,
+                    height: rect.height,
+                    x: rect.x,
+                    y: rect.y,
+                    visible: rect.width > 0 && rect.height > 0,
+                };
+            }).filter((item) => item.visible && labels.has(item.label) && (!item.label || item.width < 36 || item.height < 36));
+        }"""
+    )
+    close_button = page.get_by_role("button", name="取消", exact=True).first
+    if close_button.count() > 0:
+        close_button.click()
+        page.wait_for_timeout(100)
+    if control_problems:
+        raise AssertionError(f"{label} add-source growth axis controls are too small, missing, or unlabeled on mobile: {control_problems}")
+
+
 def assert_desktop_sources_table_actions_visible(page, route: str, label: str) -> None:
     if not route.startswith("/sources"):
         return
@@ -811,6 +849,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_sources_card_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_sources_action_labels(page, route, f"{viewport_name} {route}")
     assert_mobile_sources_governance_controls_touchable(page, route, f"{viewport_name} {route}")
+    assert_mobile_sources_add_form_growth_axes_touchable(page, route, f"{viewport_name} {route}")
     assert_desktop_sources_table_actions_visible(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_preview_copy_clean(page, route, f"{viewport_name} {route}")
