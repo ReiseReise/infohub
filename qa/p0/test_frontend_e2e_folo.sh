@@ -19,10 +19,18 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 HELPER_DIR="$(cd "$(dirname "$0")/.." && pwd)/helpers"
 source "$HELPER_DIR/auth.sh"
 
-HUB_PORT="${HUB_ENGINE_PORT:-3901}"
-HUB_URL="${HUB_ENGINE_URL:-http://127.0.0.1:${HUB_PORT}}"
-WEB_PORT="${WEB_PORT:-5179}"
-WEB_URL="${WEB_URL:-http://127.0.0.1:${WEB_PORT}}"
+USE_EXISTING_STACK="${E2E_USE_EXISTING_STACK:-auto}"
+if [[ "$USE_EXISTING_STACK" == "1" || "$USE_EXISTING_STACK" == "auto" ]]; then
+  HUB_PORT="${HUB_ENGINE_PORT:-3001}"
+  HUB_URL="${HUB_ENGINE_URL:-http://127.0.0.1:${HUB_PORT}}"
+  WEB_PORT="${WEB_PORT:-80}"
+  WEB_URL="${WEB_URL:-http://127.0.0.1}"
+else
+  HUB_PORT="${HUB_ENGINE_PORT:-3901}"
+  HUB_URL="${HUB_ENGINE_URL:-http://127.0.0.1:${HUB_PORT}}"
+  WEB_PORT="${WEB_PORT:-5179}"
+  WEB_URL="${WEB_URL:-http://127.0.0.1:${WEB_PORT}}"
+fi
 TS="$(date +%s)"
 FEED_PORT="${FEED_PORT:-$((18084 + (TS % 1000)))}"
 
@@ -44,6 +52,26 @@ wait_http_ready() {
   done
   return 1
 }
+
+if [[ "$USE_EXISTING_STACK" == "auto" ]]; then
+  if wait_http_ready "$HUB_URL/health" 1 1 && wait_http_ready "$WEB_URL/login" 1 1; then
+    USE_EXISTING_STACK="1"
+  else
+    USE_EXISTING_STACK="0"
+    HUB_PORT="${HUB_ENGINE_PORT:-3901}"
+    HUB_URL="${HUB_ENGINE_URL:-http://127.0.0.1:${HUB_PORT}}"
+    WEB_PORT="${WEB_PORT:-5179}"
+    WEB_URL="${WEB_URL:-http://127.0.0.1:${WEB_PORT}}"
+  fi
+fi
+
+if [[ -n "${E2E_DISCOVER_URL:-}" ]]; then
+  DISCOVER_URL="$E2E_DISCOVER_URL"
+elif [[ "$USE_EXISTING_STACK" == "1" ]]; then
+  DISCOVER_URL="http://host.docker.internal:${FEED_PORT}/feed.xml"
+else
+  DISCOVER_URL="http://127.0.0.1:${FEED_PORT}/feed.xml"
+fi
 
 cleanup() {
   for source_id in "${CREATED_SOURCE_IDS[@]:-}"; do
@@ -74,6 +102,7 @@ log "============================================"
 log "P0 前端 E2E（Folo 集成关键路径）开始"
 log "Hub: $HUB_URL"
 log "Web: $WEB_URL"
+log "Mode: $([[ "$USE_EXISTING_STACK" == "1" ]] && echo "existing-stack" || echo "dev-stack")"
 log "============================================"
 echo ""
 
@@ -97,13 +126,22 @@ fi
 # T1: 启动 hub-engine（新代码实例）
 # ------------------------------------------------------------
 log "--- T1: 启动后端实例 ---"
-(cd "$ROOT_DIR/services/hub-engine" && PORT="$HUB_PORT" npm run dev > "$ROOT_DIR/qa/reports/e2e-hub-${TS}.log" 2>&1) &
-ENGINE_PID=$!
-if wait_http_ready "$HUB_URL/health" 40 1; then
-  pass "T1.1: hub-engine 已就绪"
+if [[ "$USE_EXISTING_STACK" == "1" ]]; then
+  if wait_http_ready "$HUB_URL/health" 20 1; then
+    pass "T1.1: 复用已有 hub-engine 成功"
+  else
+    fail "T1.1: 已有 hub-engine 未就绪 ($HUB_URL/health)"
+    exit 1
+  fi
 else
-  fail "T1.1: hub-engine 启动失败（见 qa/reports/e2e-hub-${TS}.log）"
-  exit 1
+  (cd "$ROOT_DIR/services/hub-engine" && PORT="$HUB_PORT" npm run dev > "$ROOT_DIR/qa/reports/e2e-hub-${TS}.log" 2>&1) &
+  ENGINE_PID=$!
+  if wait_http_ready "$HUB_URL/health" 40 1; then
+    pass "T1.1: hub-engine 已就绪"
+  else
+    fail "T1.1: hub-engine 启动失败（见 qa/reports/e2e-hub-${TS}.log）"
+    exit 1
+  fi
 fi
 
 # ------------------------------------------------------------
@@ -138,13 +176,22 @@ else
   exit 1
 fi
 
-(cd "$ROOT_DIR/apps/web" && VITE_API_PROXY_TARGET="$HUB_URL" npm run dev -- --host 127.0.0.1 --port "$WEB_PORT" > "$ROOT_DIR/qa/reports/e2e-web-${TS}.log" 2>&1) &
-WEB_PID=$!
-if wait_http_ready "$WEB_URL/login" 40 1; then
-  pass "T2.2: 前端 dev server 已就绪"
+if [[ "$USE_EXISTING_STACK" == "1" ]]; then
+  if wait_http_ready "$WEB_URL/login" 20 1; then
+    pass "T2.2: 复用已有前端成功"
+  else
+    fail "T2.2: 已有前端未就绪 ($WEB_URL/login)"
+    exit 1
+  fi
 else
-  fail "T2.2: 前端 dev server 启动失败（见 qa/reports/e2e-web-${TS}.log）"
-  exit 1
+  (cd "$ROOT_DIR/apps/web" && VITE_API_PROXY_TARGET="$HUB_URL" npm run dev -- --host 127.0.0.1 --port "$WEB_PORT" > "$ROOT_DIR/qa/reports/e2e-web-${TS}.log" 2>&1) &
+  WEB_PID=$!
+  if wait_http_ready "$WEB_URL/login" 40 1; then
+    pass "T2.2: 前端 dev server 已就绪"
+  else
+    fail "T2.2: 前端 dev server 启动失败（见 qa/reports/e2e-web-${TS}.log）"
+    exit 1
+  fi
 fi
 
 # ------------------------------------------------------------
@@ -160,7 +207,7 @@ fi
 
 SEED_SOURCE_RESP=$(api_curl -X POST "$HUB_URL/api/sources" \
   -H "Content-Type: application/json" \
-  -d "{\"name\":\"E2E Seed Feed ${TS}\",\"sourceType\":\"rss\",\"collectorType\":\"rss\",\"config\":{\"url\":\"http://127.0.0.1:${FEED_PORT}/feed.xml\"},\"category\":\"qa-e2e\"}" 2>/dev/null || echo '{}')
+  -d "{\"name\":\"E2E Seed Feed ${TS}\",\"sourceType\":\"rss\",\"collectorType\":\"rss\",\"config\":{\"url\":\"${DISCOVER_URL}\"},\"category\":\"qa-e2e\"}" 2>/dev/null || echo '{}')
 SEED_SOURCE_ID=$(echo "$SEED_SOURCE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('id',''))" 2>/dev/null || echo "")
 if [[ -n "$SEED_SOURCE_ID" && "$SEED_SOURCE_ID" != "None" ]]; then
   CREATED_SOURCE_IDS+=("$SEED_SOURCE_ID")
@@ -201,7 +248,7 @@ log "--- T4: Playwright 交互回归 ---"
 export E2E_WEB_URL="$WEB_URL"
 export E2E_EMAIL="$QA_EMAIL"
 export E2E_PASSWORD="$QA_PASSWORD"
-export E2E_DISCOVER_URL="http://127.0.0.1:${FEED_PORT}/feed.xml"
+export E2E_DISCOVER_URL="$DISCOVER_URL"
 
 if python3 - <<'PY'
 import os

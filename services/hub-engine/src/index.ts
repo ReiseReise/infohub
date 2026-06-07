@@ -136,6 +136,7 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table hub.items add column if not exists blocked_reason text`);
   await db.execute(sql`alter table hub.items add column if not exists summary_status text default 'pending'`);
   await db.execute(sql`alter table hub.items add column if not exists summary_basis text`);
+  await db.execute(sql`alter table hub.items add column if not exists summary_reason text`);
   await db.execute(sql`alter table hub.items add column if not exists translation_status text default 'pending'`);
   await db.execute(sql`alter table hub.items add column if not exists translation_reason text`);
   await db.execute(sql`alter table hub.items add column if not exists audio_status_reason text`);
@@ -185,6 +186,17 @@ async function ensureSchemaCompatibility() {
   `);
   await db.execute(sql`
     update hub.items
+    set summary_reason = case
+      when processing_profile = 'monitor' then '监控档位默认不做摘要'
+      when ai_score is not null and ai_score < 40 then 'AI 评分过低，跳过摘要'
+      when processing_status = 'summary_failed' then coalesce(summary_reason, '摘要生成失败')
+      else summary_reason
+    end
+    where summary_status in ('skipped', 'failed')
+      and summary_reason is null
+  `);
+  await db.execute(sql`
+    update hub.items
     set translation_status = case
       when coalesce(length(trim(ai_translation)), 0) > 0 then 'ready'
       when processing_status in ('translation_failed') then 'failed'
@@ -193,6 +205,17 @@ async function ensureSchemaCompatibility() {
     end
     where translation_status is null
        or translation_status = 'pending'
+  `);
+  await db.execute(sql`
+    update hub.items
+    set translation_reason = case
+      when summary_status = 'skipped' and summary_reason is not null then summary_reason || '，未进入翻译'
+      when processing_profile = 'monitor' then '监控档位默认不做翻译'
+      when ai_score is not null and ai_score < 50 then 'AI 评分过低，跳过翻译'
+      else translation_reason
+    end
+    where translation_status = 'skipped'
+      and translation_reason is null
   `);
   await db.execute(sql`
     update hub.items

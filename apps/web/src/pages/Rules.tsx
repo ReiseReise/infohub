@@ -712,7 +712,7 @@ export function Rules() {
               </div>
               <Link
                 to="/settings"
-                className="shrink-0 rounded-2xl border border-zinc-200 px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
+                className="inline-flex min-h-9 shrink-0 items-center rounded-2xl border border-zinc-200 px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
               >
                 去设置
               </Link>
@@ -828,7 +828,7 @@ export function Rules() {
                       key={item}
                       type="button"
                       onClick={() => setScope(item)}
-                      className={`rounded-xl px-3 py-1.5 text-xs transition-colors ${
+                      className={`min-h-9 rounded-xl px-3 py-2 text-xs transition-colors ${
                         scope === item ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-900'
                       }`}
                     >
@@ -887,7 +887,7 @@ export function Rules() {
                             key={`${tier}-${preset.key}`}
                             type="button"
                             onClick={() => applyPresetToTier(tier, preset.draft)}
-                            className={`rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                            className={`min-h-9 rounded-full border px-3 py-2 text-xs transition-colors ${
                               active
                                 ? 'border-zinc-900 bg-zinc-900 text-white'
                                 : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-100'
@@ -1019,7 +1019,7 @@ export function Rules() {
                 <button
                   type="button"
                   onClick={() => setSourceOnlyOverrides((prev) => !prev)}
-                  className={`rounded-full border px-3 py-1 transition-colors ${
+                  className={`min-h-9 rounded-full border px-3 py-2 transition-colors ${
                     sourceOnlyOverrides
                       ? 'border-zinc-900 bg-zinc-900 text-white'
                       : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-100'
@@ -1069,7 +1069,7 @@ export function Rules() {
                     )}
                     <Link
                       to={`/filtered?sourceId=${selectedSource.id}`}
-                      className="rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-[10px] text-zinc-700 hover:bg-zinc-100"
+                      className="inline-flex min-h-9 items-center rounded-full border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-100"
                     >
                       查看该源过滤池
                     </Link>
@@ -1084,7 +1084,7 @@ export function Rules() {
                         key={`source-${preset.key}`}
                         type="button"
                         onClick={() => applyPresetToSource(preset.draft)}
-                        className={`rounded-full border px-2.5 py-1 text-[10px] transition-colors ${
+                        className={`min-h-9 rounded-full border px-3 py-2 text-xs transition-colors ${
                           active
                             ? 'border-zinc-900 bg-zinc-900 text-white'
                             : 'border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-100'
@@ -1216,7 +1216,7 @@ export function Rules() {
                         <div className="mt-3">
                           <Link
                             to={`/filtered?sourceId=${override.sourceId}`}
-                            className="text-xs text-zinc-500 hover:text-zinc-900"
+                            className="inline-flex min-h-9 items-center rounded-full border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-100"
                           >
                             查看该源过滤池
                           </Link>
@@ -1337,7 +1337,7 @@ export function Rules() {
                         key={item}
                         type="button"
                         onClick={() => setForm((prev) => ({ ...prev, scope: item }))}
-                        className={`rounded-xl px-3 py-1.5 text-xs transition-colors ${
+                        className={`min-h-9 rounded-xl px-3 py-2 text-xs transition-colors ${
                           form.scope === item ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:text-zinc-900'
                         }`}
                       >

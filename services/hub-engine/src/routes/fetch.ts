@@ -12,6 +12,7 @@ import { computeSourceFreshness, summarizeFreshness } from '../lib/freshness.js'
 import { scoreItemsDetailed } from '../processors/ai-scorer.js';
 import { qualityFilterItemsDetailed } from '../processors/quality-filter.js';
 import { summarizeItemsDetailed, translateItemsDetailed } from '../processors/ai-summarizer.js';
+import { buildSourceQualityFunnel } from '../lib/content-quality.js';
 
 const app = new Hono();
 
@@ -32,6 +33,67 @@ async function getContentStats(userId: string, itemIds: string[]) {
     withContent: Number(rows[0]?.withContent || 0),
     withoutContent: Number(rows[0]?.withoutContent || 0),
   };
+}
+
+function parseLimit(value: string | undefined, fallback: number, max: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(Math.round(parsed), max));
+}
+
+async function getQualityFunnelForItems(userId: string, itemIds: string[], fetched: {
+  itemsFound?: number;
+  itemsNew?: number;
+  itemsDuplicate?: number;
+  itemsFiltered?: number;
+}) {
+  if (itemIds.length === 0) {
+    return buildSourceQualityFunnel({
+      itemsFound: fetched.itemsFound || 0,
+      itemsNew: fetched.itemsNew || 0,
+      itemsDuplicate: fetched.itemsDuplicate || 0,
+      filteredCount: fetched.itemsFiltered || 0,
+    });
+  }
+
+  const rows = await db
+    .select({
+      itemCount: sql<number>`count(*)`,
+      entryCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      filteredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'filtered' or ${schema.items.isFiltered} = true then 1 else 0 end)`,
+      contentReadyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.contentStatus} = 'ready' and coalesce(length(trim(${schema.items.content})), 0) >= 180 then 1 else 0 end)`,
+      contentDegradedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.contentStatus} = 'degraded' or (${schema.items.contentStatus} = 'ready' and coalesce(length(trim(${schema.items.content})), 0) < 180 and coalesce(length(trim(${schema.items.snippet})), 0) >= 24)) then 1 else 0 end)`,
+      contentMissingCount: sql<number>`sum(case when ${schema.items.contentStatus} in ('missing', 'failed', 'unavailable') then 1 else 0 end)`,
+      qualityPassCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'pass' then 1 else 0 end)`,
+      qualityReviewCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'review' then 1 else 0 end)`,
+      qualityFilterCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'filter' then 1 else 0 end)`,
+      scoredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.aiScore} is not null then 1 else 0 end)`,
+      summarizedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.summaryStatus} = 'ready' or coalesce(length(trim(${schema.items.aiSummary})), 0) > 0) then 1 else 0 end)`,
+      translationCompletedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.translationStatus} in ('ready', 'skipped') then 1 else 0 end)`,
+      reportSelectedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (coalesce(${schema.items.aiScore}, 0) >= 70 or coalesce(${schema.items.priorityScore}, 0) >= 0.7) then 1 else 0 end)`,
+    })
+    .from(schema.items)
+    .where(and(eq(schema.items.userId, userId), inArray(schema.items.id, itemIds)));
+
+  const row = rows[0];
+  return buildSourceQualityFunnel({
+    itemsFound: fetched.itemsFound || 0,
+    itemsNew: fetched.itemsNew || 0,
+    itemsDuplicate: fetched.itemsDuplicate || 0,
+    itemCount: Number(row?.itemCount || 0),
+    entryCount: Number(row?.entryCount || 0),
+    filteredCount: Number(row?.filteredCount || 0),
+    contentReadyCount: Number(row?.contentReadyCount || 0),
+    contentDegradedCount: Number(row?.contentDegradedCount || 0),
+    contentMissingCount: Number(row?.contentMissingCount || 0),
+    qualityPassCount: Number(row?.qualityPassCount || 0),
+    qualityReviewCount: Number(row?.qualityReviewCount || 0),
+    qualityFilterCount: Number(row?.qualityFilterCount || 0),
+    scoredCount: Number(row?.scoredCount || 0),
+    summarizedCount: Number(row?.summarizedCount || 0),
+    translationCompletedCount: Number(row?.translationCompletedCount || 0),
+    reportSelectedCount: Number(row?.reportSelectedCount || 0),
+  });
 }
 
 // POST /api/fetch/trigger — 手动触发全量采集
@@ -82,6 +144,9 @@ app.post('/source/:id', async (c) => {
 
   if (mode === 'sync') {
     try {
+      const contentLimit = parseLimit(c.req.query('contentLimit'), 10, 50);
+      const aiLimit = parseLimit(c.req.query('aiLimit'), 10, 100);
+      const translationLimit = parseLimit(c.req.query('translationLimit'), 5, 50);
       const summary = await fetchSourceNow({
         sourceId: source.id,
         sourceName: source.name,
@@ -91,14 +156,14 @@ app.post('/source/:id', async (c) => {
       });
       let aiProcessed = { filtered: 0, scored: 0, summarized: 0, translated: 0 };
       const aiErrors: Record<string, string[]> = {};
-      const itemIds = (summary?.newItemIds || []).slice(0, Math.min(summary?.itemsNew || 0, 10));
+      const itemIds = (summary?.newItemIds || []).slice(0, Math.min(summary?.itemsNew || 0, contentLimit));
       if (itemIds.length > 0) {
         await Promise.all(itemIds.map((itemId) => ensureItemContent(authUser.userId, itemId)));
       }
       const contentStats = await getContentStats(authUser.userId, summary?.newItemIds || []);
       if (summary?.itemsNew && summary.itemsNew > 0) {
         const scenes = await getEffectiveAiSceneAvailability(authUser.userId);
-        const limit = Math.min(summary.itemsNew, 10);
+        const limit = Math.min(summary.itemsNew, aiLimit);
         const itemIds = (summary.newItemIds || []).slice(0, limit);
         if (scenes.has('quality_filter')) {
           const quality = await qualityFilterItemsDetailed(authUser.userId, limit, { itemIds });
@@ -116,12 +181,18 @@ app.post('/source/:id', async (c) => {
           if (summarization.errors.length > 0) aiErrors.summary = summarization.errors;
         }
         if (scenes.has('translation')) {
-          const translation = await translateItemsDetailed(authUser.userId, Math.min(limit, 5), { itemIds });
+          const translation = await translateItemsDetailed(authUser.userId, Math.min(limit, translationLimit), { itemIds });
           aiProcessed.translated = translation.processed;
           if (translation.errors.length > 0) aiErrors.translation = translation.errors;
         }
       }
-      logger.info({ sourceId: source.id, name: source.name, mode: 'sync', summary, aiProcessed, aiErrors, contentStats }, 'Manual fetch finished');
+      const qualityFunnel = await getQualityFunnelForItems(authUser.userId, summary?.newItemIds || [], {
+        itemsFound: summary?.itemsFound || 0,
+        itemsNew: summary?.itemsNew || 0,
+        itemsDuplicate: summary?.itemsDuplicate || 0,
+        itemsFiltered: summary?.itemsFiltered || 0,
+      });
+      logger.info({ sourceId: source.id, name: source.name, mode: 'sync', summary, aiProcessed, aiErrors, contentStats, qualityFunnel }, 'Manual fetch finished');
       return c.json({
         message: 'Fetch finished',
         sourceId: source.id,
@@ -130,6 +201,8 @@ app.post('/source/:id', async (c) => {
         aiProcessed,
         aiErrors,
         contentStats,
+        qualityFunnel,
+        limits: { contentLimit, aiLimit, translationLimit },
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -228,6 +301,57 @@ app.get('/status', async (c) => {
     .orderBy(desc(schema.fetchLogs.startedAt))
     .limit(20);
 
+  const qualityRows = await db
+    .select({
+      itemCount: sql<number>`count(*)`,
+      entryCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      filteredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'filtered' or ${schema.items.isFiltered} = true then 1 else 0 end)`,
+      contentReadyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.contentStatus} = 'ready' then 1 else 0 end)`,
+      contentDegradedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.contentStatus} = 'degraded' then 1 else 0 end)`,
+      contentMissingCount: sql<number>`sum(case when ${schema.items.contentStatus} in ('missing', 'failed', 'unavailable') then 1 else 0 end)`,
+      qualityPassCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'pass' then 1 else 0 end)`,
+      qualityReviewCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'review' then 1 else 0 end)`,
+      qualityFilterCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'filter' then 1 else 0 end)`,
+      scoredCount: sql<number>`sum(case when ${schema.items.aiScore} is not null then 1 else 0 end)`,
+      summarizedCount: sql<number>`sum(case when ${schema.items.summaryStatus} = 'ready' or coalesce(length(trim(${schema.items.aiSummary})), 0) > 0 then 1 else 0 end)`,
+      translationCompletedCount: sql<number>`sum(case when ${schema.items.translationStatus} in ('ready', 'skipped') then 1 else 0 end)`,
+      reportSelectedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (coalesce(${schema.items.aiScore}, 0) >= 70 or coalesce(${schema.items.priorityScore}, 0) >= 0.7) then 1 else 0 end)`,
+    })
+    .from(schema.items)
+    .where(eq(schema.items.userId, authUser.userId));
+
+  const fetchAggregateRows = await db
+    .select({
+      itemsFound: sql<number>`sum(coalesce(${schema.fetchLogs.itemsFound}, 0))`,
+      itemsNew: sql<number>`sum(coalesce(${schema.fetchLogs.itemsNew}, 0))`,
+      itemsDuplicate: sql<number>`sum(coalesce(${schema.fetchLogs.itemsDuplicate}, 0))`,
+      itemsFiltered: sql<number>`sum(coalesce(${schema.fetchLogs.itemsFiltered}, 0))`,
+    })
+    .from(schema.fetchLogs)
+    .leftJoin(schema.sources, eq(schema.fetchLogs.sourceId, schema.sources.id))
+    .where(eq(schema.sources.userId, authUser.userId));
+
+  const qualityRow = qualityRows[0];
+  const fetchAggregate = fetchAggregateRows[0];
+  const qualityFunnel = buildSourceQualityFunnel({
+    itemsFound: Number(fetchAggregate?.itemsFound || 0),
+    itemsNew: Number(fetchAggregate?.itemsNew || 0),
+    itemsDuplicate: Number(fetchAggregate?.itemsDuplicate || 0),
+    itemCount: Number(qualityRow?.itemCount || 0),
+    entryCount: Number(qualityRow?.entryCount || 0),
+    filteredCount: Number(qualityRow?.filteredCount || fetchAggregate?.itemsFiltered || 0),
+    contentReadyCount: Number(qualityRow?.contentReadyCount || 0),
+    contentDegradedCount: Number(qualityRow?.contentDegradedCount || 0),
+    contentMissingCount: Number(qualityRow?.contentMissingCount || 0),
+    qualityPassCount: Number(qualityRow?.qualityPassCount || 0),
+    qualityReviewCount: Number(qualityRow?.qualityReviewCount || 0),
+    qualityFilterCount: Number(qualityRow?.qualityFilterCount || 0),
+    scoredCount: Number(qualityRow?.scoredCount || 0),
+    summarizedCount: Number(qualityRow?.summarizedCount || 0),
+    translationCompletedCount: Number(qualityRow?.translationCompletedCount || 0),
+    reportSelectedCount: Number(qualityRow?.reportSelectedCount || 0),
+  });
+
   const activeSources = userSources.filter((s) => s.status === 'active').length;
   const autoFetchSourceCount = userSources.filter((s) => s.status === 'active' && s.autoFetchEnabled !== false).length;
   const staleSources = freshness.staleSources;
@@ -266,7 +390,9 @@ app.get('/status', async (c) => {
       oldestDueMinutes: freshness.oldestDueMinutes,
       sources: sourcesWithFreshness,
       staleDetails: freshness.staleDetails,
+      qualityFunnel,
     },
+    qualityFunnel,
   });
 });
 

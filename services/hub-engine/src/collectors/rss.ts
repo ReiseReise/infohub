@@ -121,9 +121,10 @@ function shouldPrefetchFullText(source: SourceConfig): boolean {
 
 function fullTextBudget(source: SourceConfig): number {
   const profile = String(source.processingProfile || '').toLowerCase();
-  if (profile === 'full') return 4;
-  if (profile === 'smart') return 2;
-  return String(source.sourceTier || '').toUpperCase() === 'S' ? 3 : 1;
+  const tier = String(source.sourceTier || '').toUpperCase();
+  if (profile === 'full') return tier === 'S' || tier === 'A' ? 8 : 6;
+  if (profile === 'smart') return tier === 'S' || tier === 'A' ? 5 : 3;
+  return tier === 'S' ? 4 : tier === 'A' ? 2 : 1;
 }
 
 function shouldUseExtractedContent(original: string, extracted?: string | null): boolean {

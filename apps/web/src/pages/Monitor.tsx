@@ -49,6 +49,40 @@ function fetchEngineLabel(value?: string | null) {
   }
 }
 
+function displayMonitorTitle(title?: string | null) {
+  const value = title || '未命名变更';
+  return value.replace(
+    /(\d{1,2})\/(\d{1,2})\/(\d{4}),\s*(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)/g,
+    (_, month: string, day: string, year: string, hour: string, minute: string, _second: string, meridiem: string) => {
+      let hh = Number(hour);
+      if (meridiem.toUpperCase() === 'PM' && hh < 12) hh += 12;
+      if (meridiem.toUpperCase() === 'AM' && hh === 12) hh = 0;
+      return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')} ${String(hh).padStart(2, '0')}:${minute}`;
+    },
+  );
+}
+
+function outcomeLabel(outcome?: string | null) {
+  switch ((outcome || '').trim()) {
+    case 'all_duplicate':
+      return '无新增变化';
+    case 'new_items':
+      return '发现新结果';
+    case 'ai_queued':
+      return '已进入 AI 处理';
+    case 'no_items':
+      return '本次无结果';
+    case 'error':
+      return '抓取异常';
+    case 'scheduled':
+      return '已排入调度';
+    case 'paused':
+      return '已暂停';
+    default:
+      return outcome || '待执行';
+  }
+}
+
 export function Monitor() {
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [timeline, setTimeline] = useState<FeedItemRecord[]>([]);
@@ -178,25 +212,25 @@ export function Monitor() {
 
   return (
     <div className="p-6 max-w-7xl">
-      <div className="flex items-center justify-between gap-4 mb-6">
-        <div>
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-zinc-900">网页监控</h1>
           <p className="text-sm text-zinc-500 mt-1">把一次性网页抓取和持续变更监控拆开看，采集管理与结果时间线也分开看。</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           <button
             onClick={() => {
               void loadSources();
               void loadTimeline(selectedSourceId);
             }}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-zinc-200 rounded-xl hover:bg-zinc-50"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-sm border border-zinc-200 rounded-xl hover:bg-zinc-50"
           >
             <RefreshCw size={14} />
             刷新
           </button>
           <button
             onClick={() => setShowAdd((prev) => !prev)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-zinc-900 text-white rounded-xl hover:bg-zinc-800"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-sm bg-zinc-900 text-white rounded-xl hover:bg-zinc-800"
           >
             <Plus size={14} />
             添加监控
@@ -342,37 +376,37 @@ export function Monitor() {
                           <ExternalLink size={10} />
                         </a>
                         <div className="mt-2 text-[11px] text-zinc-500">
-                          最后检查：{timeAgo(source.lastFetchedAt)} · 下次抓取：{timeAgo(source.nextFetchAt || undefined)} · 结果：{source.lastOutcome || '待执行'}
+                          最后检查：{timeAgo(source.lastFetchedAt)} · 下次抓取：{timeAgo(source.nextFetchAt || undefined)} · 结果：{outcomeLabel(source.lastOutcome)}
                         </div>
                         <div className="mt-1 text-[11px] text-zinc-500">
-                          最近变化：{source.lastChangeSummary || source.lastError || '暂无'}
+                          最近变化：{displayMonitorTitle(source.lastChangeSummary || source.lastError || '暂无')}
                         </div>
                         <div className="mt-1 text-[11px] text-zinc-500">
                           阻断原因：{source.blockedReason || '无'}
                         </div>
                       </div>
 
-                      <div className="flex shrink-0 items-center gap-1">
+                      <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:items-center">
                         <button
                           onClick={(event) => {
                             event.stopPropagation();
                             void handleFetch(source);
                           }}
                           disabled={fetchingId === source.id}
-                          className="p-2 rounded-lg hover:bg-zinc-100 disabled:opacity-40"
-                          title="立即抓取"
+                          className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 text-xs text-zinc-600 hover:bg-zinc-50 disabled:opacity-40"
                         >
                           {fetchingId === source.id ? <Loader2 size={14} className="animate-spin text-zinc-400" /> : <Eye size={14} className="text-zinc-400" />}
+                          <span>立即抓取</span>
                         </button>
                         <button
                           onClick={(event) => {
                             event.stopPropagation();
                             void handleDelete(source);
                           }}
-                          className="p-2 rounded-lg hover:bg-red-50"
-                          title="删除"
+                          className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-xl border border-red-100 bg-white px-2.5 text-xs text-red-600 hover:bg-red-50"
                         >
                           <Trash2 size={14} className="text-red-400" />
+                          <span>删除</span>
                         </button>
                       </div>
                     </div>
@@ -427,7 +461,7 @@ export function Monitor() {
                           )}
                           <span className="text-[10px] text-zinc-400">{timeAgo(item.publishedAt)}</span>
                         </div>
-                        <h3 className="mt-1 text-sm font-medium text-zinc-900">{item.title}</h3>
+                        <h3 className="mt-1 text-sm font-medium text-zinc-900">{displayMonitorTitle(item.title)}</h3>
                         {item.aiSummary ? (
                           <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{item.aiSummary}</p>
                         ) : item.snippet ? (
@@ -446,7 +480,7 @@ export function Monitor() {
                       <div className="flex shrink-0 items-center gap-1">
                         <Link
                           to={`/feed?sourceId=${item.sourceId || ''}&category=${encodeURIComponent('监控')}`}
-                          className="px-2.5 py-1.5 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50"
+                          className="inline-flex min-h-9 items-center rounded-xl border border-zinc-200 px-3 py-2 text-xs hover:bg-zinc-50"
                         >
                           去 Feed
                         </Link>
@@ -454,7 +488,9 @@ export function Monitor() {
                           href={item.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="p-2 rounded-lg hover:bg-zinc-100"
+                          aria-label="打开原文"
+                          title="打开原文"
+                          className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 hover:bg-zinc-100"
                         >
                           <ExternalLink size={14} className="text-zinc-400" />
                         </a>

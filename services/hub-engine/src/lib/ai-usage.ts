@@ -323,6 +323,7 @@ export type AiUsageEventsQuery = {
   search?: string | null;
   from?: string | null;
   to?: string | null;
+  userId?: string | null;
 };
 
 export async function getAiUsageEvents(query: AiUsageEventsQuery = {}) {
@@ -332,6 +333,7 @@ export async function getAiUsageEvents(query: AiUsageEventsQuery = {}) {
   if (query.status) conditions.push(eq(schema.aiUsageLogs.status, query.status));
   if (query.sceneType) conditions.push(eq(schema.aiUsageLogs.sceneType, query.sceneType));
   if (query.provider) conditions.push(eq(schema.aiUsageLogs.provider, query.provider));
+  if (query.userId) conditions.push(eq(schema.aiUsageLogs.userId, query.userId));
   if (query.search?.trim()) {
     const pattern = `%${query.search.trim()}%`;
     conditions.push(or(

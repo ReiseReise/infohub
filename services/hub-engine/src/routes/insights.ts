@@ -1,15 +1,18 @@
 import { Hono } from 'hono';
-import { and, eq, or, desc, gte, count, sql } from 'drizzle-orm';
+import { and, eq, or, desc, gte, lt, count, inArray, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { generateDailyReport } from '../outputs/daily-report.js';
-import { pushDailyReport } from '../outputs/push.js';
+import { generateDailyReport, type DailyReportGenerationMode } from '../outputs/daily-report.js';
+import { scheduleDailyReportPush } from '../outputs/push.js';
+import { resolveDailyReportWindow } from '../outputs/daily-report-window.js';
 import { requireAuth } from '../lib/auth.js';
 import { GROWTH_AXES, resolveItemGrowthAxes } from '../lib/growth.js';
 import { getVisibleAiConfigsForUser } from '../lib/ai-configs.js';
 import {
   DEFAULT_DAILY_REPORT_WORKFLOW,
+  normalizeReportSummaryText,
   normalizeDailyReportWorkflowConfig,
   prepareDailyReportCandidates,
+  summarizeDailyReportExcludedCandidates,
   type DailyReportWorkflowConfig,
 } from '../outputs/daily-report-workflow.js';
 
@@ -110,15 +113,15 @@ async function getDailyWorkflowAiScenes(userId: string, role: string) {
 
 async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown) {
   const workflow = normalizeDailyReportWorkflowConfig(workflowInput || await getDailyReportWorkflow(userId));
-  const dayStart = new Date();
-  dayStart.setHours(0, 0, 0, 0);
+  const { dayStart, dayEnd } = resolveDailyReportWindow();
 
   const [newRows, todayRows, auditRows] = await Promise.all([
-    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart))),
+    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart), lt(schema.items.fetchedAt, dayEnd))),
     db.select({
       id: schema.items.id,
       title: schema.items.title,
       url: schema.items.url,
+      snippet: schema.items.snippet,
       aiScore: schema.items.aiScore,
       aiSummary: schema.items.aiSummary,
       aiTranslation: schema.items.aiTranslation,
@@ -133,6 +136,7 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
       sourceType: schema.items.sourceType,
       sourceTier: schema.items.sourceTier,
       sourceKind: schema.sources.sourceKind,
+      clusterId: schema.items.clusterId,
       isFiltered: schema.items.isFiltered,
       filterBucket: schema.items.filterBucket,
       filterReason: schema.items.filterReason,
@@ -144,6 +148,7 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
       .where(and(
         eq(schema.items.userId, userId),
         gte(schema.items.fetchedAt, dayStart),
+        lt(schema.items.fetchedAt, dayEnd),
         or(
           and(eq(schema.items.filterBucket, 'main'), eq(schema.items.isFiltered, false)),
           and(
@@ -163,8 +168,28 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
       contentStatus: schema.items.contentStatus,
     })
       .from(schema.items)
-      .where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart))),
+      .where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart), lt(schema.items.fetchedAt, dayEnd))),
   ]);
+
+  const todayItemIds = todayRows.map((row) => row.id);
+  const scoreRiskRows = todayItemIds.length > 0
+    ? await db
+      .select({
+        itemId: schema.itemScoreBreakdowns.itemId,
+        riskFlags: schema.itemScoreBreakdowns.riskFlags,
+      })
+      .from(schema.itemScoreBreakdowns)
+      .where(and(
+        eq(schema.itemScoreBreakdowns.userId, userId),
+        inArray(schema.itemScoreBreakdowns.itemId, todayItemIds),
+      ))
+    : [];
+  const scoreRiskFlagsByItem = new Map<string, string[]>();
+  for (const row of scoreRiskRows) {
+    const flags = Array.isArray(row.riskFlags) ? row.riskFlags.map((flag) => String(flag)).filter(Boolean) : [];
+    if (flags.length === 0) continue;
+    scoreRiskFlagsByItem.set(row.itemId, [...(scoreRiskFlagsByItem.get(row.itemId) || []), ...flags]);
+  }
 
   const preparation = await prepareDailyReportCandidates(todayRows.map((row) => ({
     id: row.id,
@@ -172,6 +197,7 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
     url: row.url,
     aiScore: row.aiScore,
     aiSummary: row.aiSummary,
+    snippet: row.snippet,
     aiTranslation: row.aiTranslation,
     language: row.language,
     translationStatus: row.translationStatus,
@@ -181,15 +207,17 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
     sourceType: row.sourceType || 'article',
     sourceTier: row.sourceTier,
     sourceKind: row.sourceKind,
+    clusterId: row.clusterId,
     isFiltered: row.isFiltered,
     filterBucket: row.filterBucket,
     filterReason: row.filterReason,
     qualityDecision: row.qualityDecision,
     processingStatus: row.processingStatus,
+    scoreRiskFlags: [...new Set(scoreRiskFlagsByItem.get(row.id) || [])],
     publishedAt: row.publishedAt?.toISOString?.() || null,
     fetchedAt: row.fetchedAt?.toISOString?.() || null,
     aiTags: Array.isArray(row.aiTags) ? row.aiTags.map((tag) => String(tag)) : [],
-  })), workflow);
+  })), workflow, { allowPendingTranslationCandidates: true });
 
   return {
     workflow,
@@ -213,8 +241,10 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
         selectionReason: item.selectionReason,
         reportSummary: item.reportSummary,
         translationStatus: item.translationStatus,
+        chineseReady: item.chineseReady,
       })),
       excluded: preparation.excluded.slice(0, 20),
+      excludedSummary: summarizeDailyReportExcludedCandidates(preparation.excluded),
     },
   };
 }
@@ -330,17 +360,21 @@ app.get('/dashboard', async (c) => {
       .limit(6),
   ]);
 
-  const normalizedItems = itemRows.map((item) => ({
-    ...item,
-    resolvedAxes: resolveItemGrowthAxes({
+  const normalizedItems = itemRows.map((item) => {
+    const cleanSummary = normalizeReportSummaryText(item.aiSummary) || null;
+    return {
+      ...item,
+      aiSummary: cleanSummary,
+      resolvedAxes: resolveItemGrowthAxes({
       growthAxes: item.growthAxes,
       title: item.title,
-      aiSummary: item.aiSummary,
+      aiSummary: cleanSummary,
       aiTags: item.aiTags,
       sourceCategory: item.sourceCategory,
     }),
-    importance: computeImportance(item),
-  }));
+      importance: computeImportance(item),
+    };
+  });
 
   const axisCards = GROWTH_AXES.map((axis) => {
     const axisItems = normalizedItems
@@ -436,17 +470,26 @@ app.post('/generate', async (c) => {
   const topN = c.req.query('topN') ? parseInt(c.req.query('topN')!, 10) : undefined;
   const minScore = c.req.query('minScore') ? parseInt(c.req.query('minScore')!, 10) : undefined;
   const preset = (c.req.query('preset') || undefined) as 'full' | 'decision' | 'research' | 'reading' | undefined;
+  const generationModeQuery = c.req.query('mode') || c.req.query('generationMode') || 'fast';
+  const generationMode: DailyReportGenerationMode = generationModeQuery === 'full' ? 'full' : 'fast';
   const dateParam = c.req.query('date') || undefined;
   const compareWindowDays = c.req.query('compareWindowDays')
     ? parseInt(c.req.query('compareWindowDays')!, 10)
     : undefined;
-  const opts = (topN !== undefined || minScore !== undefined || preset !== undefined || compareWindowDays !== undefined)
-    ? { topN, minScore, preset, compareWindowDays }
+  const opts = (topN !== undefined || minScore !== undefined || preset !== undefined || compareWindowDays !== undefined || generationMode !== 'full')
+    ? { topN, minScore, preset, compareWindowDays, generationMode }
     : {};
 
   try {
-    const targetDate = dateParam ? new Date(`${dateParam}T00:00:00`) : undefined;
-    if (dateParam && Number.isNaN(targetDate!.getTime())) {
+    let targetDate: Date | undefined;
+    if (dateParam) {
+      try {
+        targetDate = resolveDailyReportWindow(dateParam).dayStart;
+      } catch {
+        return c.json({ error: 'Invalid date' }, 400);
+      }
+    }
+    if (targetDate && Number.isNaN(targetDate.getTime())) {
       return c.json({ error: 'Invalid date' }, 400);
     }
     const workflow = await getDailyReportWorkflow(authUser.userId);
@@ -458,12 +501,12 @@ app.post('/generate', async (c) => {
         minScore: minScore ?? workflow.minScore,
       },
     });
-    await pushDailyReport(`信息中枢日报 — ${report.date}`, report.markdown);
+    scheduleDailyReportPush(`信息中枢日报 — ${report.date}`, report.markdown);
 
     return c.json({
       data: report,
       markdown: report.markdown,
-      message: 'Daily report generated and pushed',
+      message: 'Daily report generated; push queued',
     });
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500);

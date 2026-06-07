@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { eq, and, desc, count, ilike, or, gte, sql, type SQL } from 'drizzle-orm';
+import { eq, and, desc, count, ilike, or, gte, lt, inArray, sql, type SQL } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { requireAuth } from '../lib/auth.js';
 import {
@@ -19,6 +19,21 @@ import { getEffectiveAiSceneAvailability } from '../lib/ai-configs.js';
 import { getItemScoreBreakdowns, getLatestItemFeedback } from '../lib/scoring-skills.js';
 import { normalizeGrowthAxes } from '../lib/growth.js';
 import { selectEventClusterLead } from '../lib/event-clustering.js';
+import {
+  buildReprocessResetPatch,
+  isHardRuleFiltered,
+  normalizeReprocessRequest,
+  shouldReprocessItem,
+  type ReprocessStage,
+} from '../lib/reprocess-planner.js';
+import { classifyContentBasisFromLengths } from '../lib/content-status.js';
+import { resolveDailyReportWindow } from '../outputs/daily-report-window.js';
+import { DEFAULT_DAILY_REPORT_WORKFLOW, normalizeDailyReportWorkflowConfig, prepareDailyReportCandidates } from '../outputs/daily-report-workflow.js';
+import {
+  buildDailyReportItemDiagnostic,
+  buildDailyReportItemDiagnosticFromSnapshot,
+  ensureDailyReportDiagnosticTargetRows,
+} from '../outputs/daily-report-item-diagnostic.js';
 
 const app = new Hono();
 
@@ -26,7 +41,15 @@ function deriveContentBasis(item: {
   title?: string | null;
   content?: string | null;
   snippet?: string | null;
+  contentLength?: number | null;
+  snippetLength?: number | null;
 }) {
+  if (item.contentLength != null || item.snippetLength != null) {
+    return classifyContentBasisFromLengths({
+      contentLength: item.contentLength,
+      snippetLength: item.snippetLength,
+    });
+  }
   return resolveItemText({
     title: item.title || '',
     content: item.content,
@@ -76,6 +99,168 @@ function looksTruncatedText(value?: string | null): boolean {
   if (!text) return false;
   if (/[—\-–:：,，、（(]$/.test(text)) return true;
   return /(evidenced|including|such as|for example|例如|比如|包括)$/i.test(text);
+}
+
+async function getDailyReportWorkflowForUser(userId: string) {
+  const rows = await db
+    .select({ dailyReportWorkflow: schema.userSettings.dailyReportWorkflow })
+    .from(schema.userSettings)
+    .where(eq(schema.userSettings.userId, userId))
+    .limit(1);
+  return normalizeDailyReportWorkflowConfig(rows[0]?.dailyReportWorkflow || DEFAULT_DAILY_REPORT_WORKFLOW);
+}
+
+const itemDailyReportCandidateSelection = {
+  id: schema.items.id,
+  title: schema.items.title,
+  url: schema.items.url,
+  snippet: schema.items.snippet,
+  aiScore: schema.items.aiScore,
+  aiSummary: schema.items.aiSummary,
+  aiTranslation: schema.items.aiTranslation,
+  language: schema.items.language,
+  translationStatus: schema.items.translationStatus,
+  translationReason: schema.items.translationReason,
+  aiTags: schema.items.aiTags,
+  publishedAt: schema.items.publishedAt,
+  fetchedAt: schema.items.fetchedAt,
+  sourceName: schema.sources.name,
+  category: schema.sources.category,
+  sourceType: schema.items.sourceType,
+  sourceTier: schema.items.sourceTier,
+  sourceKind: schema.sources.sourceKind,
+  clusterId: schema.items.clusterId,
+  isFiltered: schema.items.isFiltered,
+  filterBucket: schema.items.filterBucket,
+  filterReason: schema.items.filterReason,
+  qualityDecision: schema.items.qualityDecision,
+  processingStatus: schema.items.processingStatus,
+} as const;
+
+function getSnapshotFromInsightPayload(payload: unknown): unknown {
+  return payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>).snapshot
+    : null;
+}
+
+async function buildItemDailyReportSnapshotDiagnostic(userId: string, itemId: string, dateKey: string) {
+  const rows = await db.select({
+    payload: schema.insights.payload,
+    generatedAt: schema.insights.generatedAt,
+  })
+    .from(schema.insights)
+    .where(and(
+      eq(schema.insights.userId, userId),
+      eq(schema.insights.date, dateKey),
+      eq(schema.insights.type, 'daily'),
+    ))
+    .orderBy(desc(schema.insights.generatedAt), desc(schema.insights.id))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return null;
+  const diagnostic = buildDailyReportItemDiagnosticFromSnapshot(itemId, getSnapshotFromInsightPayload(row.payload));
+  if (!diagnostic) return null;
+  return {
+    ...diagnostic,
+    snapshotGeneratedAt: diagnostic.snapshotGeneratedAt || row.generatedAt?.toISOString?.() || null,
+  };
+}
+
+async function buildItemDailyReportDiagnostic(userId: string, itemId: string, fetchedAt?: Date | string | null) {
+  const { dateKey, dayStart, dayEnd } = resolveDailyReportWindow(fetchedAt || new Date());
+  const snapshotDiagnostic = await buildItemDailyReportSnapshotDiagnostic(userId, itemId, dateKey);
+  if (snapshotDiagnostic) return snapshotDiagnostic;
+
+  const workflow = await getDailyReportWorkflowForUser(userId);
+  const samplingLimit = Math.max(workflow.topN * 4, 120);
+  let rows = await db.select(itemDailyReportCandidateSelection)
+    .from(schema.items)
+    .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+    .where(and(
+      eq(schema.items.userId, userId),
+      gte(schema.items.fetchedAt, dayStart),
+      lt(schema.items.fetchedAt, dayEnd),
+      or(
+        eq(schema.items.id, itemId),
+        and(eq(schema.items.filterBucket, 'main'), eq(schema.items.isFiltered, false)),
+        and(
+          eq(schema.items.filterBucket, 'filtered'),
+          eq(schema.items.isFiltered, true),
+          sql`coalesce(${schema.items.filterReason}, '') ~* '^ai score too low:\\s*[0-9]+\\s*<\\s*[0-9]+'`,
+        ),
+        eq(schema.items.processingStatus, 'score_failed'),
+      ),
+    ))
+    .orderBy(desc(schema.items.priorityScore), desc(schema.items.fetchedAt))
+    .limit(samplingLimit);
+
+  if (!rows.some((row) => row.id === itemId)) {
+    const targetRows = await db.select(itemDailyReportCandidateSelection)
+      .from(schema.items)
+      .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+      .where(and(
+        eq(schema.items.userId, userId),
+        eq(schema.items.id, itemId),
+      ))
+      .limit(1);
+    rows = ensureDailyReportDiagnosticTargetRows(rows, targetRows, itemId);
+  }
+
+  const itemIds = rows.map((row) => row.id);
+  const scoreRiskRows = itemIds.length > 0
+    ? await db
+      .select({
+        itemId: schema.itemScoreBreakdowns.itemId,
+        riskFlags: schema.itemScoreBreakdowns.riskFlags,
+      })
+      .from(schema.itemScoreBreakdowns)
+      .where(and(
+        eq(schema.itemScoreBreakdowns.userId, userId),
+        inArray(schema.itemScoreBreakdowns.itemId, itemIds),
+      ))
+    : [];
+  const scoreRiskFlagsByItem = new Map<string, string[]>();
+  for (const row of scoreRiskRows) {
+    const flags = Array.isArray(row.riskFlags) ? row.riskFlags.map((flag) => String(flag)).filter(Boolean) : [];
+    if (flags.length === 0) continue;
+    scoreRiskFlagsByItem.set(row.itemId, [...(scoreRiskFlagsByItem.get(row.itemId) || []), ...flags]);
+  }
+
+  const preparation = await prepareDailyReportCandidates(rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    url: row.url,
+    aiScore: row.aiScore,
+    aiSummary: row.aiSummary,
+    snippet: row.snippet,
+    aiTranslation: row.aiTranslation,
+    language: row.language,
+    translationStatus: row.translationStatus,
+    translationReason: row.translationReason,
+    sourceName: row.sourceName || 'Unknown',
+    category: row.category || 'uncategorized',
+    sourceType: row.sourceType || 'article',
+    sourceTier: row.sourceTier,
+    sourceKind: row.sourceKind,
+    clusterId: row.clusterId,
+    isFiltered: row.isFiltered,
+    filterBucket: row.filterBucket,
+    filterReason: row.filterReason,
+    qualityDecision: row.qualityDecision,
+    processingStatus: row.processingStatus,
+    scoreRiskFlags: [...new Set(scoreRiskFlagsByItem.get(row.id) || [])],
+    publishedAt: row.publishedAt?.toISOString?.() || null,
+    fetchedAt: row.fetchedAt?.toISOString?.() || null,
+    aiTags: Array.isArray(row.aiTags) ? row.aiTags.map((tag) => String(tag)) : [],
+  })), workflow, { allowPendingTranslationCandidates: true });
+
+  return {
+    ...buildDailyReportItemDiagnostic(itemId, preparation),
+    diagnosticBasis: 'current_rules' as const,
+    diagnosticBasisLabel: '依据：当前日报规则预览',
+    snapshotGeneratedAt: null,
+  };
 }
 
 // GET /api/items — 列表（支持过滤/排序/分页/搜索）
@@ -174,6 +359,7 @@ app.get('/', async (c) => {
       blockedReason: schema.items.blockedReason,
       summaryStatus: schema.items.summaryStatus,
       summaryBasis: schema.items.summaryBasis,
+      summaryReason: schema.items.summaryReason,
       translationStatus: schema.items.translationStatus,
       translationReason: schema.items.translationReason,
       sourceName: schema.sources.name,
@@ -182,6 +368,8 @@ app.get('/', async (c) => {
       sourceKind: schema.sources.sourceKind,
       authorityWeight: schema.sources.authorityWeight,
       sourceConfig: schema.sources.config,
+      contentLength: sql<number>`coalesce(length(trim(${schema.items.content})), 0)`,
+      snippetLength: sql<number>`coalesce(length(trim(${schema.items.snippet})), 0)`,
     })
     .from(schema.items)
     .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
@@ -259,6 +447,144 @@ app.post('/mark-all-read', async (c) => {
   return c.json({ message: 'All marked as read' });
 });
 
+// POST /api/items/reprocess — 批量重跑正文/质检/评分/摘要/翻译
+app.post('/reprocess', async (c) => {
+  const authUser = requireAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const request = normalizeReprocessRequest({
+    ...body,
+    stage: body.stage ?? c.req.query('stage'),
+    itemId: body.itemId ?? c.req.query('itemId'),
+    sourceId: body.sourceId ?? c.req.query('sourceId'),
+    date: body.date ?? c.req.query('date'),
+    limit: body.limit ?? c.req.query('limit'),
+  });
+
+  const conditions: SQL<unknown>[] = [eq(schema.items.userId, authUser.userId)];
+  if (request.itemId) conditions.push(eq(schema.items.id, request.itemId));
+  if (request.sourceId) conditions.push(eq(schema.items.sourceId, request.sourceId));
+  if (request.dateStart) conditions.push(gte(schema.items.fetchedAt, request.dateStart));
+  if (request.dateEnd) conditions.push(lt(schema.items.fetchedAt, request.dateEnd));
+
+  const rows = await db
+    .select({
+      id: schema.items.id,
+      sourceId: schema.items.sourceId,
+      fetchedAt: schema.items.fetchedAt,
+      contentStatus: schema.items.contentStatus,
+      contentLength: sql<number>`coalesce(length(trim(${schema.items.content})), 0)`,
+      snippetLength: sql<number>`coalesce(length(trim(${schema.items.snippet})), 0)`,
+      aiScore: schema.items.aiScore,
+      summaryBasis: schema.items.summaryBasis,
+      processingStatus: schema.items.processingStatus,
+      summaryStatus: schema.items.summaryStatus,
+      translationStatus: schema.items.translationStatus,
+      isFiltered: schema.items.isFiltered,
+      filterBucket: schema.items.filterBucket,
+      qualityTags: schema.items.qualityTags,
+    })
+    .from(schema.items)
+    .where(and(...conditions))
+    .orderBy(desc(schema.items.fetchedAt))
+    .limit(Math.max(request.limit * 5, request.limit));
+
+  const candidates = rows
+    .filter((row) => shouldReprocessItem(row, request))
+    .slice(0, request.limit);
+  const itemIds = candidates.map((row) => row.id);
+
+  if (itemIds.length === 0) {
+    return c.json({
+      message: 'No matching items to reprocess',
+      request,
+      matched: 0,
+      content: 0,
+      quality: 0,
+      scored: 0,
+      summarized: 0,
+      translated: 0,
+      skipped: {
+        quality: 0,
+        scoring: 0,
+        summary: 0,
+        translation: 0,
+      },
+      errors: {},
+      itemIds: [],
+    });
+  }
+
+  for (const candidate of candidates) {
+    const patch = buildReprocessResetPatch(request.stage, isHardRuleFiltered(candidate));
+    if (Object.keys(patch).length > 0) {
+      await db.update(schema.items)
+        .set(patch)
+        .where(and(eq(schema.items.id, candidate.id), eq(schema.items.userId, authUser.userId)));
+    }
+  }
+
+  const scenes = await getEffectiveAiSceneAvailability(authUser.userId);
+  const shouldRun = (stage: ReprocessStage) => request.stage === 'all' || request.stage === stage;
+  const errors: Record<string, string[]> = {};
+  let content = 0;
+  let quality = 0;
+  let scored = 0;
+  let summarized = 0;
+  let translated = 0;
+  const skipped = {
+    quality: 0,
+    scoring: 0,
+    summary: 0,
+    translation: 0,
+  };
+
+  if (shouldRun('content')) {
+    for (const itemId of itemIds) {
+      const result = await ensureItemContent(authUser.userId, itemId, { force: true });
+      if (result.contentFetched) content++;
+      if (result.warning) errors.content = [...(errors.content || []), result.warning];
+    }
+  }
+  if (shouldRun('quality') && scenes.has('quality_filter')) {
+    const result = await qualityFilterItemsDetailed(authUser.userId, itemIds.length, { itemIds });
+    quality = result.processed;
+    skipped.quality = result.skipped || 0;
+    if (result.errors.length > 0) errors.quality = result.errors;
+  }
+  if (shouldRun('scoring') && scenes.has('scoring')) {
+    const result = await scoreItemsDetailed(authUser.userId, itemIds.length, { itemIds });
+    scored = result.processed;
+    skipped.scoring = result.skipped || 0;
+    if (result.errors.length > 0) errors.scoring = result.errors;
+  }
+  if (shouldRun('summary') && scenes.has('summary')) {
+    const result = await summarizeItemsDetailed(authUser.userId, itemIds.length, { itemIds });
+    summarized = result.processed;
+    skipped.summary = result.skipped || 0;
+    if (result.errors.length > 0) errors.summary = result.errors;
+  }
+  if (shouldRun('translation') && scenes.has('translation')) {
+    const result = await translateItemsDetailed(authUser.userId, itemIds.length, { itemIds });
+    translated = result.processed;
+    skipped.translation = result.skipped || 0;
+    if (result.errors.length > 0) errors.translation = result.errors;
+  }
+
+  return c.json({
+    message: 'Batch reprocess complete',
+    request,
+    matched: itemIds.length,
+    content,
+    quality,
+    scored,
+    summarized,
+    translated,
+    skipped,
+    errors,
+    itemIds,
+  });
+});
+
 // POST /api/items/:id/reprocess-ai — 单条重跑评分/摘要/翻译
 app.post('/:id/reprocess-ai', async (c) => {
   const authUser = requireAuth(c);
@@ -300,6 +626,7 @@ app.post('/:id/reprocess-ai', async (c) => {
     aiTranslation: null,
     summaryStatus: 'pending',
     summaryBasis: null,
+    summaryReason: null,
     translationStatus: 'pending',
     translationReason: null,
     processingStatus,
@@ -381,6 +708,7 @@ app.post('/:id/enrich', async (c) => {
       aiSummary: schema.items.aiSummary,
       aiTranslation: schema.items.aiTranslation,
       summaryBasis: schema.items.summaryBasis,
+      summaryReason: schema.items.summaryReason,
       processingStatus: schema.items.processingStatus,
       contentStatus: schema.items.contentStatus,
       isFiltered: schema.items.isFiltered,
@@ -459,6 +787,7 @@ app.post('/:id/enrich', async (c) => {
       processingStatus: 'raw',
       isFiltered: false,
       filterReason: null,
+      summaryReason: null,
     }).where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)));
   } else if (shouldSummarize) {
     await db.update(schema.items).set({
@@ -466,6 +795,7 @@ app.post('/:id/enrich', async (c) => {
       aiTags: [],
       summaryStatus: 'pending',
       summaryBasis: null,
+      summaryReason: null,
       processingStatus: 'scored',
     }).where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)));
   } else if (shouldTranslate) {
@@ -824,7 +1154,10 @@ app.get('/:id', async (c) => {
     .where(and(eq(schema.sources.id, item.sourceId), eq(schema.sources.userId, authUser.userId)))
     .limit(1);
 
-  const latestFeedback = await getLatestItemFeedback(authUser.userId, id);
+  const [latestFeedback, dailyReportDiagnostic] = await Promise.all([
+    getLatestItemFeedback(authUser.userId, id),
+    buildItemDailyReportDiagnostic(authUser.userId, id, item.fetchedAt),
+  ]);
   const relatedRows = item.clusterId
     ? await db
       .select({
@@ -865,7 +1198,10 @@ app.get('/:id', async (c) => {
       ...mapFeedItemResponse(item),
       content: content ?? null,
       snippet: cleanPreviewText(snippet || content, 220) ?? null,
-      contentBasis: plainTextLength(content) >= 80 ? 'content' : plainTextLength(snippet) >= 24 ? 'snippet' : 'title',
+      contentBasis: classifyContentBasisFromLengths({
+        contentLength: plainTextLength(content),
+        snippetLength: plainTextLength(snippet),
+      }),
       sourceName: sourceRows[0]?.sourceName || null,
       sourceCategory: sourceRows[0]?.sourceCategory || null,
       sourceCollectorType: sourceRows[0]?.sourceCollectorType || null,
@@ -874,6 +1210,7 @@ app.get('/:id', async (c) => {
       sourceConfig: sourceRows[0]?.sourceConfig || null,
       growthAxes: normalizeGrowthAxes(item.growthAxes, []),
       latestFeedbackType: latestFeedback?.feedbackType || null,
+      dailyReportDiagnostic,
       eventCluster: item.clusterId ? {
         clusterId: item.clusterId,
         leadItemId: clusterLead?.id || item.id,

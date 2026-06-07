@@ -23,6 +23,7 @@ import type {
   DailyReportWorkflowPayload,
   DailyReportWorkflowPreview,
   ExportMutationResult,
+  FallbackScoringRecoverySummary,
   FetchSettings,
   FetchQueueDiagnosticResponse,
   FetchStatusResponse,
@@ -42,6 +43,9 @@ import type {
   QualityPolicySnapshot,
   RetentionRunRecord,
   RetentionSummary,
+  ScoringModelRemediationApplyResult,
+  ScoringModelProbeSummary,
+  ScoringSkillHealthSummary,
   ScoringSkillRecord,
   SourceRecord,
   SourceStats,
@@ -202,12 +206,31 @@ export const api = {
       request<{ data: ItemQualityCheckPayload }>(`/items/${id}/quality-check`),
     restore: (id: string) =>
       request<{ message: string; data: FeedItemRecord | null }>(`/items/${id}/restore`, { method: 'POST' }),
+    reprocessBatch: (data: { stage?: 'content' | 'quality' | 'scoring' | 'summary' | 'translation' | 'all'; itemId?: string; sourceId?: number; date?: string; limit?: number }) =>
+      request<{
+        message: string;
+        matched: number;
+        content: number;
+        quality: number;
+        scored: number;
+        summarized: number;
+        translated: number;
+        skipped?: {
+          quality?: number;
+          scoring?: number;
+          summary?: number;
+          translation?: number;
+        };
+        errors: Record<string, string[]>;
+        itemIds: string[];
+      }>('/items/reprocess', { method: 'POST', body: data }),
   },
 
   fetch: {
     trigger: () => request<FetchTriggerResult>('/fetch/trigger', { method: 'POST' }),
     triggerDue: () => request<FetchTriggerResult>('/fetch/due', { method: 'POST' }),
-    triggerSource: (id: number) => request<FetchTriggerResult>(`/fetch/source/${id}`, { method: 'POST' }),
+    triggerSource: (id: number, params?: { contentLimit?: number; aiLimit?: number; translationLimit?: number }) =>
+      request<FetchTriggerResult>(withQuery(`/fetch/source/${id}`, params), { method: 'POST' }),
     status: () => request<FetchStatusResponse>('/fetch/status'),
   },
 
@@ -241,7 +264,7 @@ export const api = {
     dashboard: (params?: { windowDays?: number; limit?: number }) =>
       request<{ data: GrowthDashboardRecord }>(withQuery('/insights/dashboard', params)),
     get: (date: string) => request<{ data: InsightRecord }>(`/insights/${date}`),
-    generate: (opts?: { date?: string; topN?: number; minScore?: number; preset?: 'full' | 'decision' | 'research' | 'reading'; compareWindowDays?: number }) =>
+    generate: (opts?: { date?: string; topN?: number; minScore?: number; preset?: 'full' | 'decision' | 'research' | 'reading'; compareWindowDays?: number; generationMode?: 'fast' | 'full'; mode?: 'fast' | 'full' }) =>
       request<{ data?: InsightGeneratePayload }>(withQuery('/insights/generate', opts), { method: 'POST' }),
   },
 
@@ -284,7 +307,13 @@ export const api = {
   },
 
   scoringSkills: {
-    list: () => request<{ data: ScoringSkillRecord[]; defaults?: { prompt?: string; rubric?: Record<string, unknown>; presets?: string[]; reasonTags?: string[] } }>('/scoring-skills'),
+    list: () => request<{ data: ScoringSkillRecord[]; health?: ScoringSkillHealthSummary; defaults?: { prompt?: string; rubric?: Record<string, unknown>; presets?: string[]; reasonTags?: string[] } }>('/scoring-skills'),
+    probeModel: (data: { modelConfigId: string; limit?: number }) =>
+      request<{ data: ScoringModelProbeSummary }>('/scoring-skills/model-probe', { method: 'POST', body: data }),
+    applyModelRemediation: (data: { modelConfigId: string; limit?: number }) =>
+      request<{ data: ScoringModelRemediationApplyResult }>('/scoring-skills/model-remediation/apply', { method: 'POST', body: data }),
+    recoverFallbackScoring: (data: { limit?: number }) =>
+      request<{ data: FallbackScoringRecoverySummary }>('/scoring-skills/fallback-recovery/apply', { method: 'POST', body: data }),
     create: (data: Partial<ScoringSkillRecord> & { createDefault?: boolean }) =>
       request<{ data: ScoringSkillRecord | null }>('/scoring-skills', { method: 'POST', body: data }),
     update: (id: number, data: Partial<ScoringSkillRecord>) =>

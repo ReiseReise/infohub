@@ -30,12 +30,12 @@ export function resolveItemText(item: {
   content?: string | null;
   snippet?: string | null;
 }): { text: string; basis: ContentBasis } {
-  const content = (item.content || '').trim();
-  if (plainTextLength(content) >= 80) {
+  const content = (cleanArticleBody(item.content, 50000) || item.content || '').trim();
+  if (plainTextLength(content) >= 180) {
     return { text: content, basis: 'content' };
   }
 
-  const snippet = (item.snippet || '').trim();
+  const snippet = (cleanArticleBody(item.snippet, 2000) || item.snippet || '').trim();
   if (plainTextLength(snippet) >= 24) {
     return { text: snippet, basis: 'snippet' };
   }

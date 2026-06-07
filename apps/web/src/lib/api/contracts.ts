@@ -84,12 +84,43 @@ export interface FetchTriggerResult {
     withContent: number;
     withoutContent: number;
   };
+  qualityFunnel?: SourceQualityFunnel;
+  limits?: {
+    contentLimit: number;
+    aiLimit: number;
+    translationLimit: number;
+  };
   aiErrors?: {
     scoring?: string[];
     summary?: string[];
     translation?: string[];
   };
   newItemIds?: string[];
+}
+
+export interface SourceQualityFunnel {
+  fetched: number;
+  unique: number;
+  duplicate: number;
+  visible: number;
+  filtered: number;
+  contentReady: number;
+  contentDegraded: number;
+  contentMissing: number;
+  qualityPass: number;
+  qualityReview: number;
+  qualityFilter: number;
+  scored: number;
+  summarized: number;
+  translated: number;
+  reportSelected: number;
+  duplicateRate: number;
+  contentReadyRate: number;
+  aiReadyRate: number;
+  noiseRate: number;
+  reportSelectedRate: number;
+  qualityScore: number;
+  grade: 'excellent' | 'good' | 'fair' | 'poor' | 'empty' | string;
 }
 
 export interface DiscoveryCandidate {
@@ -202,6 +233,16 @@ export interface SourceRecord {
   selectedCount?: number;
   selectedHitRate?: number;
   duplicateContribution?: number;
+  contentReadyCount?: number;
+  contentDegradedCount?: number;
+  contentMissingCount?: number;
+  qualityPassCount?: number;
+  qualityReviewCount?: number;
+  qualityFilterCount?: number;
+  scoredCount?: number;
+  summarizedCount?: number;
+  translationCompletedCount?: number;
+  sourceQuality?: SourceQualityFunnel;
   latestItemTitle?: string | null;
   latestItemUrl?: string | null;
   latestItemAt?: string | null;
@@ -361,6 +402,22 @@ export interface BatchSubscriptionResult {
   failed: Array<{ index: number; error: string }>;
 }
 
+export interface DailyReportItemDiagnostic {
+  itemId: string;
+  status: 'selected' | 'review' | 'latest_visible' | 'excluded' | 'not_in_window' | 'not_generated' | string;
+  label: string;
+  reason: string;
+  detail?: string | null;
+  action: string;
+  tone: 'ok' | 'warning' | 'danger' | 'neutral';
+  selectionMode?: string | null;
+  selectionReason?: string | null;
+  excludedReason?: 'translation_failed' | 'not_chinese' | 'not_selected' | 'business_noise' | 'fallback_scored' | string | null;
+  diagnosticBasis?: 'insight_snapshot' | 'current_rules' | string;
+  diagnosticBasisLabel?: string | null;
+  snapshotGeneratedAt?: string | null;
+}
+
 export interface FeedItemRecord {
   id: string;
   sourceId?: number;
@@ -398,6 +455,7 @@ export interface FeedItemRecord {
       fetchedAt?: string | null;
     }>;
   } | null;
+  dailyReportDiagnostic?: DailyReportItemDiagnostic | null;
   sourceName?: string;
   sourceCategory?: string;
   sourceCollectorType?: string;
@@ -436,6 +494,7 @@ export interface FeedItemRecord {
   blockedReason?: string | null;
   summaryStatus?: string;
   summaryBasis?: 'title' | 'snippet' | 'content' | null;
+  summaryReason?: string | null;
   translationStatus?: string;
   translationReason?: string | null;
   latestFeedbackType?: 'like' | 'dislike' | 'must_read' | 'not_for_me' | null;
@@ -456,6 +515,120 @@ export interface ScoringSkillRecord {
   isDefault?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ScoringSkillHealthSummary {
+  status: 'healthy' | 'warning' | 'error';
+  totalSkillCount: number;
+  activeSkillCount: number;
+  recentErrorCount: number;
+  emptyResponseCount: number;
+  deterministicFallbackCount: number;
+  retryRecoveredCount: number;
+  unstableModelCount: number;
+  lastErrorAt?: string | null;
+  activeSkills: Array<{
+    id: number;
+    name: string;
+    presetKey?: string | null;
+    weight: number;
+    modelConfigId?: string | null;
+  }>;
+  recentErrors: Array<{
+    skillName: string;
+    message: string;
+    targetId?: string | null;
+    modelName?: string | null;
+    modelConfigId?: string | null;
+    createdAt?: string | null;
+  }>;
+  unstableModels: Array<{
+    modelKey: string;
+    modelName?: string | null;
+    modelConfigId?: string | null;
+    retryableFailureCount: number;
+    retryRecoveredCount: number;
+    deterministicFallbackCount: number;
+    lastFailureAt?: string | null;
+    circuitBreakerRecommended: boolean;
+  }>;
+  remediation?: {
+    action: 'none' | 'switch_model' | 'repair_config';
+    currentModelConfigId?: string | null;
+    recommendedModelConfigId?: string | null;
+    message: string;
+    candidateModels: Array<{
+      id: string;
+      label: string;
+      provider?: string | null;
+      modelName?: string | null;
+      testStatus?: string | null;
+      isDefault: boolean;
+    }>;
+  };
+  recommendations: string[];
+}
+
+export interface ScoringModelProbeSummary {
+  status: 'passed' | 'failed' | 'empty';
+  canSwitch: boolean;
+  modelConfigId: string;
+  modelLabel: string;
+  probed: number;
+  passed: number;
+  failed: number;
+  firstError?: string | null;
+  message: string;
+  results: Array<{
+    itemId: string;
+    title: string;
+    ok: boolean;
+    score?: number | null;
+    decision?: string | null;
+    confidence?: number | null;
+    error?: string | null;
+  }>;
+}
+
+export interface ScoringModelRepairSummary {
+  status: 'recovered' | 'failed' | 'empty';
+  canContinueBatchRepair: boolean;
+  modelConfigId: string;
+  modelLabel: string;
+  attempted: number;
+  recovered: number;
+  failed: number;
+  skipped: number;
+  recoveryRate: number;
+  firstError?: string | null;
+  itemIds: string[];
+  message: string;
+}
+
+export interface FallbackScoringRecoverySummary {
+  status: 'recovered' | 'partial' | 'failed' | 'empty' | 'blocked';
+  candidateCount: number;
+  attempted: number;
+  recovered: number;
+  failed: number;
+  skipped: number;
+  remainingCandidateCount: number;
+  recoveryRate: number;
+  firstError?: string | null;
+  itemIds: string[];
+  verifiedRecoveredItemIds: string[];
+  message: string;
+}
+
+export interface ScoringModelRemediationApplyResult {
+  switched: boolean;
+  configOwnerUserId?: string | null;
+  scoringConfigId?: number | null;
+  modelConfigId: string;
+  modelLabel: string;
+  probe: ScoringModelProbeSummary;
+  repair: ScoringModelRepairSummary;
+  verifiedRecoveredItemIds?: string[];
 }
 
 export interface ItemFeedbackRecord {
@@ -638,6 +811,7 @@ export interface FetchStatusResponse {
     failed?: number;
     completed?: number;
   };
+  qualityFunnel?: SourceQualityFunnel;
   user?: {
     sourceCount?: number;
     userAutoFetchEnabled?: boolean;
@@ -671,6 +845,7 @@ export interface FetchStatusResponse {
       error?: string | null;
       durationMs?: number | null;
     }>;
+    qualityFunnel?: SourceQualityFunnel;
     [key: string]: unknown;
   };
   [key: string]: unknown;
@@ -727,6 +902,14 @@ export interface InsightRecord {
       workflowConfig?: DailyReportWorkflowConfig;
       candidateFunnel?: DailyReportWorkflowPreview['funnel'];
       excludedCandidates?: DailyReportWorkflowPreview['excluded'];
+      excludedCandidateSummary?: {
+        total: number;
+        byReason: Array<{
+          reason: DailyReportWorkflowPreview['excluded'][number]['reason'];
+          count: number;
+          samples: DailyReportWorkflowPreview['excluded'];
+        }>;
+      };
       byCategory?: Array<{ category: string; count: number; baselineAvg?: number; delta?: number }>;
       topSources?: Array<{ sourceName: string; count: number }>;
       themeClusters?: Array<{ label: string; count: number; sampleTitles: string[] }>;
@@ -753,6 +936,8 @@ export interface InsightRecord {
         estimatedCost?: number | null;
         status: 'ai' | 'fallback';
         error?: string;
+        repaired?: boolean;
+        repairReason?: string;
       };
     }>>;
     cleaning?: {
@@ -772,6 +957,8 @@ export interface InsightRecord {
         estimatedCost?: number | null;
         status: 'ai' | 'fallback';
         error?: string;
+        repaired?: boolean;
+        repairReason?: string;
       };
     };
     final?: {
@@ -785,9 +972,12 @@ export interface InsightRecord {
         estimatedCost?: number | null;
         status: 'ai' | 'fallback';
         error?: string;
+        repaired?: boolean;
+        repairReason?: string;
       };
     };
     preset?: 'full' | 'decision' | 'research' | 'reading';
+    generationMode?: 'fast' | 'full' | string;
   };
   pipelineVersion?: number;
   [key: string]: unknown;
@@ -848,7 +1038,14 @@ export interface InsightGeneratePayload {
   modules?: NonNullable<InsightRecord['payload']>['modules'];
   snapshot?: NonNullable<InsightRecord['payload']>['snapshot'];
   preset?: 'full' | 'decision' | 'research' | 'reading';
+  generationMode?: 'fast' | 'full' | string;
   compareWindowDays?: number;
+  options?: {
+    generationMode?: 'fast' | 'full' | string;
+    preset?: 'full' | 'decision' | 'research' | 'reading';
+    compareWindowDays?: number;
+    [key: string]: unknown;
+  };
   pipelineVersion?: number;
   [key: string]: unknown;
 }
@@ -891,6 +1088,7 @@ export interface DailyReportWorkflowPreview {
     scopeMatched: number;
     scoredCandidates: number;
     reviewCandidates?: number;
+    fallbackScoredCandidates?: number;
     softFilteredRecovered?: number;
     scoreFailedCandidates?: number;
     latestFallbackCandidates: number;
@@ -916,9 +1114,22 @@ export interface DailyReportWorkflowPreview {
   excluded: Array<{
     id: string;
     title: string;
-    reason: string;
+    reason: 'translation_failed' | 'not_chinese' | 'not_selected' | 'business_noise' | string;
     detail?: string | null;
+    url?: string | null;
+    sourceName?: string | null;
+    category?: string | null;
+    aiScore?: number | null;
+    translationStatus?: string | null;
   }>;
+  excludedSummary?: {
+    total: number;
+    byReason: Array<{
+      reason: DailyReportWorkflowPreview['excluded'][number]['reason'];
+      count: number;
+      samples: DailyReportWorkflowPreview['excluded'];
+    }>;
+  };
 }
 
 export interface DailyReportWorkflowPayload {
