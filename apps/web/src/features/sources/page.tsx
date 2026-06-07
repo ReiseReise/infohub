@@ -944,7 +944,7 @@ export function Sources() {
                 key={mode}
                 type="button"
                 onClick={() => setDiscoverMode(mode)}
-                className={`px-3 py-1 text-xs rounded-md transition-colors ${discoverMode === mode ? 'bg-white shadow-sm font-medium' : 'text-zinc-500 hover:text-zinc-700'}`}
+                className={`min-h-9 rounded-md px-3 py-2 text-xs transition-colors ${discoverMode === mode ? 'bg-white shadow-sm font-medium' : 'text-zinc-500 hover:text-zinc-700'}`}
               >
                 {mode === 'search' ? '搜索' : mode === 'rss' ? 'RSS URL' : 'RSSHub 路由'}
               </button>
@@ -1388,7 +1388,7 @@ export function Sources() {
               key={option.value}
               type="button"
               onClick={() => setFocusMode(option.value)}
-              className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
+              className={`min-h-9 rounded-full px-3 py-2 text-xs transition-colors ${
                 focusMode === option.value
                   ? 'bg-zinc-900 text-white'
                   : 'border border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50'
@@ -1406,7 +1406,7 @@ export function Sources() {
                 key={option.value}
                 type="button"
                 onClick={() => setViewMode(option.value)}
-                className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
+                className={`min-h-9 rounded-full px-3 py-2 text-xs transition-colors ${
                   viewMode === option.value ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:bg-white'
                 }`}
               >
@@ -1685,7 +1685,12 @@ export function Sources() {
                           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
                             <span>{formatTimeLabel(source.latestItemAt, { absolute: true })}</span>
                             {source.latestItemUrl && (
-                              <a href={source.latestItemUrl} target="_blank" rel="noreferrer" className="text-teal-700 hover:text-teal-800">
+                              <a
+                                href={source.latestItemUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex min-h-9 items-center rounded-full border border-teal-100 bg-white px-3 py-2 text-xs text-teal-700 hover:bg-teal-50 hover:text-teal-800"
+                              >
                                 打开原文
                               </a>
                             )}
@@ -1714,7 +1719,7 @@ export function Sources() {
                           <button
                             type="button"
                             onClick={() => navigate(`/rules?source=${source.id}`)}
-                            className="rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[10px] text-zinc-700 hover:bg-zinc-100"
+                            className="min-h-9 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-100"
                           >
                             打开过滤策略
                           </button>
@@ -1828,7 +1833,7 @@ export function Sources() {
                                 onClick={() => {
                                   void handleToggleSourceAxis(source, axis);
                                 }}
-                                className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                                className={`min-h-9 rounded-full border px-3 py-2 text-xs transition-colors ${
                                   active
                                     ? 'border-zinc-900 bg-zinc-900 text-white'
                                     : 'border-zinc-200 bg-white text-zinc-500 hover:bg-zinc-50'
@@ -1846,7 +1851,7 @@ export function Sources() {
                   <div className="flex shrink-0 flex-wrap items-center justify-start gap-1.5 xl:flex-col xl:items-stretch">
                     <button
                       onClick={() => openSourceFeed(source, true)}
-                      className="whitespace-nowrap rounded-xl border border-zinc-200 px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
+                      className="min-h-9 whitespace-nowrap rounded-xl border border-zinc-200 px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50"
                       title="查看该来源的阅读流"
                     >
                       查看 Feed
@@ -1874,7 +1879,7 @@ export function Sources() {
                     <button
                       onClick={() => void handleSourceReprocess(source)}
                       disabled={reprocessingSourceId === source.id}
-                      className="whitespace-nowrap rounded-xl border border-teal-200 px-3 py-2 text-xs text-teal-700 hover:bg-teal-50 disabled:opacity-50"
+                      className="min-h-9 whitespace-nowrap rounded-xl border border-teal-200 px-3 py-2 text-xs text-teal-700 hover:bg-teal-50 disabled:opacity-50"
                       title="批量重试正文、质检、评分、摘要和翻译"
                     >
                       {reprocessingSourceId === source.id ? '修复中' : '批量修复'}

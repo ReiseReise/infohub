@@ -151,6 +151,53 @@ def assert_mobile_sources_action_labels(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} missing visible mobile source action labels: {missing}")
 
 
+def assert_mobile_sources_governance_controls_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/sources"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    control_problems = page.evaluate(
+        """() => {
+            const requiredLabels = new Set([
+                '搜索',
+                'RSS URL',
+                'RSSHub 路由',
+                '全部视图',
+                '高价值信源',
+                '网页监控',
+                '待修复',
+                '表格全览',
+                '卡片详情',
+                '打开过滤策略',
+                '认知升级',
+                '技术能力',
+                '商业判断',
+                '表达输出',
+                '打开原文',
+                '查看该来源的阅读流',
+                '批量重试正文、质检、评分、摘要和翻译',
+            ]);
+            return Array.from(document.querySelectorAll('button, a[href]')).filter((node) => !node.closest('nav')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                const text = (node.textContent || '').trim().replace(/\\s+/g, ' ');
+                const label = node.getAttribute('aria-label') || node.getAttribute('title') || text;
+                return {
+                    label,
+                    text,
+                    width: rect.width,
+                    height: rect.height,
+                    x: rect.x,
+                    y: rect.y,
+                    visible: rect.width > 0 && rect.height > 0,
+                };
+            }).filter((item) => item.visible && requiredLabels.has(item.label) && (!item.label || item.width < 36 || item.height < 36)).slice(0, 24);
+        }"""
+    )
+    if control_problems:
+        raise AssertionError(f"{label} source governance controls are too small, missing, or unlabeled on mobile: {control_problems}")
+
+
 def assert_desktop_sources_table_actions_visible(page, route: str, label: str) -> None:
     if not route.startswith("/sources"):
         return
@@ -763,6 +810,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_nav_visible(page, f"{viewport_name} {route}")
     assert_mobile_sources_card_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_sources_action_labels(page, route, f"{viewport_name} {route}")
+    assert_mobile_sources_governance_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_desktop_sources_table_actions_visible(page, route, f"{viewport_name} {route}")
     assert_mobile_filtered_item_budget(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_preview_copy_clean(page, route, f"{viewport_name} {route}")
