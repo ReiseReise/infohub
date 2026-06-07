@@ -559,6 +559,34 @@ def assert_mobile_monitor_actions_touchable(page, route: str, label: str) -> Non
         raise AssertionError(f"{label} monitor actions are too small, missing, or unlabeled on mobile: {action_problems}")
 
 
+def assert_mobile_rules_strategy_controls_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/rules"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    control_problems = page.evaluate(
+        """() => {
+            const labels = new Set(['个人层', '全局层', '个人', '全局', '直通', '轻审', '标准', '严审', '哨兵', '只看已有覆盖', '去设置', '查看该源过滤池']);
+            return Array.from(document.querySelectorAll('button, a[href]')).filter((node) => !node.closest('nav')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                const text = (node.textContent || '').trim().replace(/\\s+/g, ' ');
+                const label = node.getAttribute('aria-label') || node.getAttribute('title') || text;
+                return {
+                    label,
+                    width: rect.width,
+                    height: rect.height,
+                    x: rect.x,
+                    y: rect.y,
+                    visible: rect.width > 0 && rect.height > 0,
+                };
+            }).filter((item) => item.visible && labels.has(item.label) && (!item.label || item.width < 36 || item.height < 36)).slice(0, 20);
+        }"""
+    )
+    if control_problems:
+        raise AssertionError(f"{label} rules strategy controls are too small, missing, or unlabeled on mobile: {control_problems}")
+
+
 def assert_mobile_audio_detail_actions_touchable(page, route: str, label: str) -> None:
     if not route.startswith("/audio"):
         return
@@ -748,6 +776,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_tabs_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_monitor_actions_touchable(page, route, f"{viewport_name} {route}")
+    assert_mobile_rules_strategy_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_audio_detail_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_mode_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
@@ -834,6 +863,15 @@ def main() -> int:
                     "monitor",
                     viewport_name,
                     ["网页监控", "采集目标管理", "结果 / 变更时间线"],
+                )
+            )
+            screenshots.append(
+                visit_and_capture(
+                    page,
+                    "/rules",
+                    "rules",
+                    viewport_name,
+                    ["过滤策略台", "分级质检矩阵", "单源覆盖编辑", "硬规则面板"],
                 )
             )
             screenshots.append(
