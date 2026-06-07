@@ -1328,6 +1328,7 @@ export function Feed() {
                     <div className="mt-2.5 flex items-center gap-2 flex-wrap">
                       <button
                         type="button"
+                        title={`按来源筛选：${item.sourceName || '未知信源'}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           if (!item.sourceId) return;
@@ -1335,9 +1336,9 @@ export function Feed() {
                           setOffset(0);
                           updateListQuery({ sourceId: String(item.sourceId) });
                         }}
-                        className="max-w-[180px] truncate text-[10px] font-medium uppercase tracking-[0.18em] text-zinc-400 hover:text-teal-700"
+                        className="inline-flex min-h-9 max-w-[180px] items-center truncate rounded-full border border-zinc-200 bg-white px-3 py-2 text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500 hover:border-teal-200 hover:bg-teal-50 hover:text-teal-700"
                       >
-                        {item.sourceName}
+                        {item.sourceName || '未知信源'}
                       </button>
                       {item.sourceCategory && item.sourceCategory !== 'uncategorized' && (
                         <span className="text-[10px] bg-zinc-100 text-zinc-500 px-1.5 py-0.5 rounded-full">{item.sourceCategory}</span>

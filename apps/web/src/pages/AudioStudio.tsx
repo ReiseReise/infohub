@@ -640,7 +640,7 @@ export function AudioStudio() {
                   <button
                     onClick={handleReprocess}
                     disabled={reprocessing}
-                    className="inline-flex items-center gap-1 whitespace-nowrap px-2.5 py-1.5 text-xs rounded-md border border-zinc-200 hover:bg-zinc-50 disabled:opacity-40"
+                    className="inline-flex min-h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl border border-zinc-200 px-3 py-2 text-xs hover:bg-zinc-50 disabled:opacity-40"
                   >
                     {reprocessing ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
                     重跑
@@ -648,7 +648,7 @@ export function AudioStudio() {
                   <button
                     onClick={handleDelete}
                     disabled={deleting}
-                    className="inline-flex items-center gap-1 whitespace-nowrap px-2.5 py-1.5 text-xs rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-40"
+                    className="inline-flex min-h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl border border-red-200 px-3 py-2 text-xs text-red-700 hover:bg-red-50 disabled:opacity-40"
                   >
                     {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
                     删除
@@ -688,7 +688,7 @@ export function AudioStudio() {
                       <button
                         type="button"
                         onClick={() => setShowFailureDetail((value) => !value)}
-                        className="shrink-0 whitespace-nowrap rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                        className="inline-flex min-h-9 shrink-0 items-center justify-center whitespace-nowrap rounded-xl border border-red-200 bg-white px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50"
                       >
                         {showFailureDetail ? '收起技术详情' : '查看技术详情'}
                       </button>
@@ -713,7 +713,7 @@ export function AudioStudio() {
                   <button
                     key={key}
                     onClick={() => setDetailTab(key as AudioDetailTab)}
-                    className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
+                    className={`min-h-9 rounded-full px-3 py-2 text-xs transition-colors ${
                       detailTab === key
                         ? 'bg-zinc-900 text-white'
                         : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
