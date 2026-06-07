@@ -604,6 +604,105 @@ def assert_mobile_settings_tabs_touchable(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} settings tabs are too small or missing on mobile: {cramped_tabs}")
 
 
+def assert_mobile_settings_secondary_controls_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/settings"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+
+    problems: list[dict] = []
+
+    def collect_exact_buttons(stage: str, required_labels: list[str]) -> None:
+        stage_problems = page.evaluate(
+            """({ stage, requiredLabels }) => {
+                const buttons = Array.from(document.querySelectorAll('button')).map((node) => {
+                    const rect = node.getBoundingClientRect();
+                    const text = (node.textContent || '').trim().replace(/\\s+/g, ' ');
+                    const label = node.getAttribute('aria-label') || node.getAttribute('title') || text;
+                    return {
+                        stage,
+                        label,
+                        width: rect.width,
+                        height: rect.height,
+                        x: rect.x,
+                        y: rect.y,
+                        visible: rect.width > 0 && rect.height > 0,
+                    };
+                }).filter((item) => item.visible);
+                return requiredLabels.flatMap((requiredLabel) => {
+                    const matched = buttons.filter((button) => button.label === requiredLabel);
+                    if (!matched.length) return [{ stage, error: 'missing-control', label: requiredLabel }];
+                    return matched.filter((button) => button.width < 36 || button.height < 36);
+                });
+            }""",
+            {"stage": stage, "requiredLabels": required_labels},
+        )
+        problems.extend(stage_problems)
+
+    def collect_present_buttons(stage: str, labels: list[str], require_any: bool = False) -> None:
+        stage_problems = page.evaluate(
+            """({ stage, labels, requireAny }) => {
+                const wanted = new Set(labels);
+                const matched = Array.from(document.querySelectorAll('button')).map((node) => {
+                    const rect = node.getBoundingClientRect();
+                    const text = (node.textContent || '').trim().replace(/\\s+/g, ' ');
+                    const label = node.getAttribute('aria-label') || node.getAttribute('title') || text;
+                    return {
+                        stage,
+                        label,
+                        width: rect.width,
+                        height: rect.height,
+                        x: rect.x,
+                        y: rect.y,
+                        visible: rect.width > 0 && rect.height > 0,
+                    };
+                }).filter((item) => item.visible && wanted.has(item.label));
+                if (requireAny && !matched.length) return [{ stage, error: 'missing-any-control', labels }];
+                return matched.filter((button) => button.width < 36 || button.height < 36);
+            }""",
+            {"stage": stage, "labels": labels, "requireAny": require_any},
+        )
+        problems.extend(stage_problems)
+
+    ai_center = page.get_by_role("button", name="AI 管理中心", exact=True).first
+    if ai_center.count() == 0:
+        raise AssertionError(f"{label} settings page is missing the AI management center tab")
+    ai_center.click()
+    page.wait_for_timeout(200)
+    collect_exact_buttons("AI 管理中心", ["场景控制台", "模型仓库", "评分 Skills", "使用日志"])
+    collect_exact_buttons("提示词模板库", ["编辑", "预览"])
+
+    model_tab = page.get_by_role("button", name="模型仓库", exact=True).first
+    if model_tab.count() > 0:
+        model_tab.click()
+        page.wait_for_timeout(200)
+        if page.get_by_text("Base URL：").count() > 0:
+            collect_exact_buttons("模型仓库", ["编辑", "测试", "删除"])
+
+    admin_tab = page.get_by_role("button", name="管理后台", exact=True).first
+    if admin_tab.count() > 0:
+        admin_tab.click()
+        page.wait_for_timeout(200)
+        collect_exact_buttons("管理后台", ["总览看板", "任务管理", "用户管理", "邀请码管理"])
+        tasks_tab = page.get_by_role("button", name="任务管理", exact=True).first
+        if tasks_tab.count() > 0:
+            tasks_tab.click()
+            page.wait_for_timeout(200)
+            if page.get_by_text("共 ", exact=False).count() > 0:
+                collect_exact_buttons("任务管理", ["搜索", "重跑"])
+        users_tab = page.get_by_role("button", name="用户管理", exact=True).first
+        if users_tab.count() > 0:
+            users_tab.click()
+            page.wait_for_timeout(200)
+            if page.get_by_text("role:", exact=False).count() > 0:
+                collect_present_buttons("用户管理", ["禁用", "启用"], require_any=True)
+                collect_exact_buttons("用户管理", ["切换角色", "删除"])
+
+    if problems:
+        raise AssertionError(f"{label} settings secondary controls are too small or missing on mobile: {problems}")
+
+
 def assert_mobile_monitor_actions_touchable(page, route: str, label: str) -> None:
     if not route.startswith("/monitor"):
         return
@@ -862,6 +961,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_feed_feedback_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_tabs_touchable(page, route, f"{viewport_name} {route}")
+    assert_mobile_settings_secondary_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_monitor_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_rules_strategy_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_audio_detail_actions_touchable(page, route, f"{viewport_name} {route}")

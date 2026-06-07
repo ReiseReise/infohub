@@ -1675,7 +1675,7 @@ export function Settings() {
                       <button
                         key={tab.key}
                         onClick={() => setActiveAiCenterTab(tab.key)}
-                        className={`rounded-full px-3 py-1.5 text-xs border ${activeAiCenterTab === tab.key ? 'bg-zinc-900 text-white border-zinc-900' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
+                        className={`min-h-9 rounded-full border px-3 py-2 text-xs transition-colors ${activeAiCenterTab === tab.key ? 'bg-zinc-900 text-white border-zinc-900' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
                       >
                         {tab.label}
                       </button>
@@ -1879,11 +1879,11 @@ export function Settings() {
                                 .map((item) => item.title)
                                 .join('、') || '未绑定'}
                             </div>
-                            <div className="mt-2 flex gap-2">
-                              <button onClick={() => editPromptTemplate(template)} className="text-zinc-700 hover:text-zinc-900">编辑</button>
-                              <button onClick={() => void previewPromptTemplate(template.id)} className="text-zinc-700 hover:text-zinc-900">预览</button>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              <button onClick={() => editPromptTemplate(template)} className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-900">编辑</button>
+                              <button onClick={() => void previewPromptTemplate(template.id)} className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-900">预览</button>
                               {!template.is_system && isAdmin && (
-                                <button onClick={() => void deletePromptTemplate(template)} className="text-red-600 hover:text-red-700">删除</button>
+                                <button onClick={() => void deletePromptTemplate(template)} className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-lg border border-red-200 px-3 py-2 text-xs text-red-700 transition-colors hover:bg-red-50 hover:text-red-800">删除</button>
                               )}
                             </div>
                           </div>
@@ -2067,10 +2067,10 @@ export function Settings() {
                                 <div className="mt-1 text-zinc-400">使用场景：{model.usageScenes.join('、')}</div>
                               )}
                               <div className="mt-1 text-zinc-400">Base URL：{model.base_url || '默认'}</div>
-                              <div className="mt-2 flex gap-2">
-                                <button onClick={() => editModelConfig(model)} className="text-zinc-700 hover:text-zinc-900">编辑</button>
-                                <button onClick={() => void testModelConfig(model.id)} className="text-zinc-700 hover:text-zinc-900">测试</button>
-                                <button onClick={() => void deleteModelConfig(model)} className="text-red-600 hover:text-red-700">删除</button>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <button onClick={() => editModelConfig(model)} className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-900">编辑</button>
+                                <button onClick={() => void testModelConfig(model.id)} className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-900">测试</button>
+                                <button onClick={() => void deleteModelConfig(model)} className="inline-flex min-h-9 min-w-9 items-center justify-center rounded-lg border border-red-200 px-3 py-2 text-xs text-red-700 transition-colors hover:bg-red-50 hover:text-red-800">删除</button>
                               </div>
                             </div>
                           ))}
@@ -3106,7 +3106,7 @@ export function Settings() {
                   <button
                     key={tab.key}
                     onClick={() => setActiveAdminTab(tab.key)}
-                    className={`px-3 py-1.5 text-sm rounded-lg border ${activeAdminTab === tab.key ? 'bg-zinc-900 text-white border-zinc-900' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
+                    className={`min-h-9 px-3 py-2 text-sm rounded-lg border transition-colors ${activeAdminTab === tab.key ? 'bg-zinc-900 text-white border-zinc-900' : 'border-zinc-200 text-zinc-600 hover:bg-zinc-50'}`}
                   >
                     {tab.label}
                   </button>
@@ -3157,12 +3157,12 @@ export function Settings() {
                   <p className="text-xs text-zinc-500">共 {adminTaskTotal} 条</p>
                   <div className="space-y-2 max-h-[420px] overflow-y-auto">
                     {adminTasks.map((task) => (
-                      <div key={task.id} className="border border-zinc-100 rounded-lg px-3 py-2 flex items-center justify-between gap-3">
+                      <div key={task.id} className="border border-zinc-100 rounded-lg px-3 py-2 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
                         <div className="min-w-0">
                           <div className="text-sm font-medium text-zinc-800 truncate">{task.title}</div>
                           <div className="text-xs text-zinc-500">{task.user?.email || '-'} · {task.status} · {task.created_at}</div>
                         </div>
-                        <button onClick={() => void reprocessTask(task.id)} className="px-2 py-1 text-xs rounded border border-zinc-200 hover:bg-zinc-50">重跑</button>
+                        <button onClick={() => void reprocessTask(task.id)} className="inline-flex min-h-9 min-w-9 items-center justify-center whitespace-nowrap rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-700 transition-colors hover:bg-zinc-50">重跑</button>
                       </div>
                     ))}
                   </div>
@@ -3173,19 +3173,19 @@ export function Settings() {
                 <div className="space-y-2 max-h-[460px] overflow-y-auto">
                   {adminUsers.map((u) => (
                     <div key={u.id} className="border border-zinc-100 rounded-lg px-3 py-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
                           <div className="text-sm font-medium text-zinc-800">{u.username} <span className="text-zinc-500">({u.email})</span></div>
                           <div className="text-xs text-zinc-500">role: {u.role} · active: {String(u.is_active)}</div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <button onClick={() => void updateAdminUser(u, { is_active: !u.is_active })} className="px-2 py-1 text-xs rounded border border-zinc-200 hover:bg-zinc-50">
+                        <div className="flex flex-wrap gap-2">
+                          <button onClick={() => void updateAdminUser(u, { is_active: !u.is_active })} className="inline-flex min-h-9 min-w-9 items-center justify-center whitespace-nowrap rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-700 transition-colors hover:bg-zinc-50">
                             {u.is_active ? '禁用' : '启用'}
                           </button>
-                          <button onClick={() => void updateAdminUser(u, { role: u.role === 'admin' ? 'user' : 'admin' })} className="px-2 py-1 text-xs rounded border border-zinc-200 hover:bg-zinc-50">
+                          <button onClick={() => void updateAdminUser(u, { role: u.role === 'admin' ? 'user' : 'admin' })} className="inline-flex min-h-9 min-w-9 items-center justify-center whitespace-nowrap rounded-lg border border-zinc-200 px-3 py-2 text-xs text-zinc-700 transition-colors hover:bg-zinc-50">
                             切换角色
                           </button>
-                          <button onClick={() => void removeAdminUser(u)} className="px-2 py-1 text-xs rounded border border-red-200 text-red-700 hover:bg-red-50">
+                          <button onClick={() => void removeAdminUser(u)} className="inline-flex min-h-9 min-w-9 items-center justify-center whitespace-nowrap rounded-lg border border-red-200 px-3 py-2 text-xs text-red-700 transition-colors hover:bg-red-50">
                             删除
                           </button>
                         </div>
