@@ -386,27 +386,27 @@ export function Monitor() {
                         </div>
                       </div>
 
-                      <div className="flex shrink-0 items-center gap-1">
+                      <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:items-center">
                         <button
                           onClick={(event) => {
                             event.stopPropagation();
                             void handleFetch(source);
                           }}
                           disabled={fetchingId === source.id}
-                          className="p-2 rounded-lg hover:bg-zinc-100 disabled:opacity-40"
-                          title="立即抓取"
+                          className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-2.5 text-xs text-zinc-600 hover:bg-zinc-50 disabled:opacity-40"
                         >
                           {fetchingId === source.id ? <Loader2 size={14} className="animate-spin text-zinc-400" /> : <Eye size={14} className="text-zinc-400" />}
+                          <span>立即抓取</span>
                         </button>
                         <button
                           onClick={(event) => {
                             event.stopPropagation();
                             void handleDelete(source);
                           }}
-                          className="p-2 rounded-lg hover:bg-red-50"
-                          title="删除"
+                          className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-xl border border-red-100 bg-white px-2.5 text-xs text-red-600 hover:bg-red-50"
                         >
                           <Trash2 size={14} className="text-red-400" />
+                          <span>删除</span>
                         </button>
                       </div>
                     </div>
@@ -480,7 +480,7 @@ export function Monitor() {
                       <div className="flex shrink-0 items-center gap-1">
                         <Link
                           to={`/feed?sourceId=${item.sourceId || ''}&category=${encodeURIComponent('监控')}`}
-                          className="px-2.5 py-1.5 text-xs rounded-lg border border-zinc-200 hover:bg-zinc-50"
+                          className="inline-flex min-h-9 items-center rounded-xl border border-zinc-200 px-3 py-2 text-xs hover:bg-zinc-50"
                         >
                           去 Feed
                         </Link>
@@ -488,7 +488,9 @@ export function Monitor() {
                           href={item.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="p-2 rounded-lg hover:bg-zinc-100"
+                          aria-label="打开原文"
+                          title="打开原文"
+                          className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 hover:bg-zinc-100"
                         >
                           <ExternalLink size={14} className="text-zinc-400" />
                         </a>

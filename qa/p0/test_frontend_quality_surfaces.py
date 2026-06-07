@@ -489,6 +489,46 @@ def assert_mobile_settings_tabs_touchable(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} settings tabs are too small or missing on mobile: {cramped_tabs}")
 
 
+def assert_mobile_monitor_actions_touchable(page, route: str, label: str) -> None:
+    if not route.startswith("/monitor"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+    action_problems = page.evaluate(
+        """() => {
+            if (document.body.innerText.includes('暂无网页监控源')) return [];
+            const requiredLabels = ['立即抓取', '删除'];
+            if (document.body.innerText.includes('去 Feed')) {
+                requiredLabels.push('去 Feed', '打开原文');
+            }
+            const actions = Array.from(document.querySelectorAll('button, a[href]')).filter((node) => !node.closest('nav')).map((node) => {
+                const rect = node.getBoundingClientRect();
+                const label = (
+                    node.getAttribute('aria-label') ||
+                    node.getAttribute('title') ||
+                    (node.textContent || '').trim().replace(/\\s+/g, ' ')
+                );
+                return {
+                    label,
+                    width: rect.width,
+                    height: rect.height,
+                    x: rect.x,
+                    y: rect.y,
+                    visible: rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.top <= window.innerHeight,
+                };
+            }).filter((action) => action.visible);
+            return requiredLabels.flatMap((requiredLabel) => {
+                const matched = actions.filter((action) => action.label === requiredLabel);
+                if (!matched.length) return [{ error: 'missing-monitor-action', label: requiredLabel }];
+                return matched.filter((action) => action.width < 36 || action.height < 36);
+            });
+        }"""
+    )
+    if action_problems:
+        raise AssertionError(f"{label} monitor actions are too small, missing, or unlabeled on mobile: {action_problems}")
+
+
 def assert_report_heading_date_not_split(page, label: str) -> None:
     date_layout = page.evaluate(
         """() => {
@@ -637,6 +677,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_feed_feedback_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_tabs_touchable(page, route, f"{viewport_name} {route}")
+    assert_mobile_monitor_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_mode_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -713,6 +754,15 @@ def main() -> int:
                     "settings",
                     viewport_name,
                     ["设置中心", "通用偏好", "自动抓取"],
+                )
+            )
+            screenshots.append(
+                visit_and_capture(
+                    page,
+                    "/monitor",
+                    "monitor",
+                    viewport_name,
+                    ["网页监控", "采集目标管理", "结果 / 变更时间线"],
                 )
             )
             screenshots.append(
