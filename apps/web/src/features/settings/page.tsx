@@ -172,6 +172,43 @@ function freshnessBadge(status?: FetchStatusResponse['freshnessStatus']) {
   return { label: '数据新鲜度正常', className: 'bg-emerald-100 text-emerald-700 border-emerald-200' };
 }
 
+const QUEUE_STATE_LABELS: Record<string, string> = {
+  waiting: '等待',
+  active: '执行中',
+  completed: '已完成',
+  failed: '失败',
+  delayed: '延迟',
+  prioritized: '优先队列',
+  paused: '暂停',
+};
+
+function queueStateLabel(state?: string | null) {
+  const normalized = String(state || '').trim().toLowerCase();
+  return QUEUE_STATE_LABELS[normalized] || '状态待确认';
+}
+
+const FETCH_OUTCOME_LABELS: Record<string, string> = {
+  success: '成功',
+  done: '完成',
+  ok: '成功',
+  running: '抓取中',
+  pending: '等待中',
+  error: '失败',
+  failed: '失败',
+  partial: '部分完成',
+  new_items: '有新增',
+  all_duplicate: '全部重复',
+  no_new: '无新增',
+  no_items: '无结果',
+  skipped: '已跳过',
+  filtered: '已过滤',
+};
+
+function fetchOutcomeLabel(outcome?: unknown, status?: unknown) {
+  const normalized = String(outcome || status || '').trim().toLowerCase();
+  return FETCH_OUTCOME_LABELS[normalized] || '状态待确认';
+}
+
 type IntegrationPrefs = {
   ntfyTopic: string;
   feishuWebhook: string;
@@ -2958,10 +2995,10 @@ export function Settings() {
                   <div className="text-xs text-zinc-500 mb-3">仅管理员可查看队列作业详情。</div>
                 )}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
-                  <div className="text-xs border border-zinc-100 rounded px-2 py-1.5">waiting: {fetchQueueDiagnostics?.queue?.waiting ?? 0}</div>
-                  <div className="text-xs border border-zinc-100 rounded px-2 py-1.5">active: {fetchQueueDiagnostics?.queue?.active ?? 0}</div>
-                  <div className="text-xs border border-zinc-100 rounded px-2 py-1.5">completed: {fetchQueueDiagnostics?.queue?.completed ?? 0}</div>
-                  <div className="text-xs border border-zinc-100 rounded px-2 py-1.5">failed: {fetchQueueDiagnostics?.queue?.failed ?? 0}</div>
+                  <div className="text-xs border border-zinc-100 rounded px-2 py-1.5">等待：{fetchQueueDiagnostics?.queue?.waiting ?? 0}</div>
+                  <div className="text-xs border border-zinc-100 rounded px-2 py-1.5">执行中：{fetchQueueDiagnostics?.queue?.active ?? 0}</div>
+                  <div className="text-xs border border-zinc-100 rounded px-2 py-1.5">已完成：{fetchQueueDiagnostics?.queue?.completed ?? 0}</div>
+                  <div className="text-xs border border-zinc-100 rounded px-2 py-1.5">失败：{fetchQueueDiagnostics?.queue?.failed ?? 0}</div>
                 </div>
                 <div className="space-y-2 max-h-[320px] overflow-y-auto">
                   {(fetchQueueDiagnostics?.jobs || []).length === 0 && (
@@ -2972,11 +3009,11 @@ export function Settings() {
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-sm text-zinc-700 truncate">{job.sourceName || job.name}</span>
                         <span className={`text-[10px] px-1.5 py-0.5 rounded ${job.state === 'failed' ? 'bg-red-100 text-red-700' : 'bg-zinc-100 text-zinc-600'}`}>
-                          {job.state}
+                          {queueStateLabel(job.state)}
                         </span>
                       </div>
                       <div className="text-xs text-zinc-500 mt-1">
-                        sourceId: {job.sourceId ?? '-'} · attempts: {job.attemptsMade}
+                        信源：{job.sourceId ?? '-'} · 尝试次数：{job.attemptsMade}
                       </div>
                       {job.failedReason && (
                         <div className="text-xs text-red-600 mt-1 flex items-start gap-1">
@@ -3000,11 +3037,11 @@ export function Settings() {
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate text-sm text-zinc-700">{String(fetch.sourceName || `source-${fetch.sourceId || '-'}`)}</span>
                         <span className={`text-[10px] px-1.5 py-0.5 rounded ${fetch.status === 'success' ? 'bg-emerald-100 text-emerald-700' : fetch.status === 'error' ? 'bg-red-100 text-red-700' : 'bg-zinc-100 text-zinc-600'}`}>
-                          {String(fetch.outcome || fetch.status || '-')}
+                          {fetchOutcomeLabel(fetch.outcome, fetch.status)}
                         </span>
                       </div>
                       <div className="mt-1 text-xs text-zinc-500">
-                        found {Number(fetch.itemsFound || 0)} · new {Number(fetch.itemsNew || 0)} · filtered {Number(fetch.itemsFiltered || 0)} · duplicate {Number(fetch.itemsDuplicate || 0)} · ai {Number(fetch.itemsQueuedAi || 0)}
+                        发现 {Number(fetch.itemsFound || 0)} · 新增 {Number(fetch.itemsNew || 0)} · 过滤 {Number(fetch.itemsFiltered || 0)} · 重复 {Number(fetch.itemsDuplicate || 0)} · AI 队列 {Number(fetch.itemsQueuedAi || 0)}
                       </div>
                       {fetch.error ? (
                         <div className="mt-1 text-xs text-red-600 line-clamp-2">{String(fetch.error)}</div>

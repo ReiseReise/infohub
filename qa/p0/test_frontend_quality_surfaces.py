@@ -703,6 +703,53 @@ def assert_mobile_settings_secondary_controls_touchable(page, route: str, label:
         raise AssertionError(f"{label} settings secondary controls are too small or missing on mobile: {problems}")
 
 
+def assert_mobile_settings_diagnostics_copy_clean(page, route: str, label: str) -> None:
+    if not route.startswith("/settings"):
+        return
+    is_mobile = page.evaluate("() => window.innerWidth < 768")
+    if not is_mobile:
+        return
+
+    diagnostics_tab = page.get_by_role("button", name="诊断中心", exact=True).first
+    if diagnostics_tab.count() == 0:
+        raise AssertionError(f"{label} settings page is missing the diagnostics tab")
+    diagnostics_tab.click()
+    page.wait_for_timeout(300)
+
+    raw_labels = page.evaluate(
+        """() => {
+            const sections = Array.from(document.querySelectorAll('*')).filter((node) => {
+                const text = (node.textContent || '').trim();
+                return text === '抓取队列诊断' || text === '最近抓取结果';
+            }).map((heading) => heading.closest('.rounded-xl') || heading.parentElement).filter(Boolean);
+            if (!sections.length) return [{ error: 'missing-diagnostics-sections' }];
+            const rawPatterns = [
+                /\\bwaiting\\s*:/i,
+                /\\bactive\\s*:/i,
+                /\\bcompleted\\s*:/i,
+                /\\bfailed\\s*:/i,
+                /\\bfound\\s+\\d+/i,
+                /\\bnew\\s+\\d+/i,
+                /\\bfiltered\\s+\\d+/i,
+                /\\bduplicate\\s+\\d+/i,
+                /\\bai\\s+\\d+/i,
+                /\\bsourceId\\s*:/i,
+                /\\battempts\\s*:/i,
+                /\\ball_duplicate\\b/i,
+                /\\bprioritized\\b/i,
+            ];
+            return sections.flatMap((section) => {
+                const text = (section.textContent || '').replace(/\\s+/g, ' ').trim();
+                return rawPatterns
+                    .filter((pattern) => pattern.test(text))
+                    .map((pattern) => ({ pattern: String(pattern), text: text.slice(0, 260) }));
+            });
+        }"""
+    )
+    if raw_labels:
+        raise AssertionError(f"{label} diagnostics copy exposes raw backend labels on mobile: {raw_labels}")
+
+
 def assert_mobile_monitor_actions_touchable(page, route: str, label: str) -> None:
     if not route.startswith("/monitor"):
         return
@@ -962,6 +1009,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_settings_header_action(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_tabs_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_secondary_controls_touchable(page, route, f"{viewport_name} {route}")
+    assert_mobile_settings_diagnostics_copy_clean(page, route, f"{viewport_name} {route}")
     assert_mobile_monitor_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_rules_strategy_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_audio_detail_actions_touchable(page, route, f"{viewport_name} {route}")
