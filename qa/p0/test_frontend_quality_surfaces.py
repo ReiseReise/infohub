@@ -759,6 +759,20 @@ def assert_mobile_settings_diagnostics_copy_clean(page, route: str, label: str) 
         raise AssertionError(f"{label} diagnostics copy exposes raw backend labels on mobile: {raw_labels}")
 
 
+def assert_insights_copy_clean(page, route: str, label: str) -> None:
+    if route != "/insights":
+        return
+    text = page.locator("body").inner_text(timeout=15000)
+    raw_patterns = [
+        "请您提供待改写的摘要原文",
+        "作为 AI",
+        "我无法",
+    ]
+    hits = [pattern for pattern in raw_patterns if pattern in text]
+    if hits:
+        raise AssertionError(f"{label} insights copy exposes model boilerplate: {hits}")
+
+
 def assert_mobile_monitor_actions_touchable(page, route: str, label: str) -> None:
     if not route.startswith("/monitor"):
         return
@@ -1019,6 +1033,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_settings_tabs_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_secondary_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_diagnostics_copy_clean(page, route, f"{viewport_name} {route}")
+    assert_insights_copy_clean(page, route, f"{viewport_name} {route}")
     assert_mobile_monitor_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_rules_strategy_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_audio_detail_actions_touchable(page, route, f"{viewport_name} {route}")

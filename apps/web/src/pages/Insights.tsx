@@ -141,6 +141,21 @@ function cloneWorkflow(workflow: DailyReportWorkflowConfig): DailyReportWorkflow
   return JSON.parse(JSON.stringify(workflow));
 }
 
+function cleanGrowthSummary(summary?: string | null) {
+  const text = String(summary || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const modelBoilerplatePatterns = [
+    /请您?提供.*?(摘要原文|原文|内容)/i,
+    /作为\s*AI/i,
+    /我无法(根据|访问|浏览|确认)/i,
+    /无法完成.*?(改写|摘要|总结)/i,
+  ];
+  if (modelBoilerplatePatterns.some((pattern) => pattern.test(text))) {
+    return '摘要暂不可用，建议打开原文或进入详情重跑摘要后再判断。';
+  }
+  return text;
+}
+
 const REPORT_SECTION_HEADINGS = new Set([
   '生成口径',
   '今日结论',
@@ -721,6 +736,18 @@ export function Insights() {
               </button>
               <button
                 type="button"
+                onClick={() => {
+                  setWorkflowOpen(true);
+                  void handleWorkflowPreview();
+                }}
+                disabled={workflowPreviewing}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2 text-sm text-sky-800 hover:bg-sky-100 disabled:opacity-50"
+              >
+                <Eye size={14} />
+                {workflowPreviewing ? '预览中...' : '预览候选池'}
+              </button>
+              <button
+                type="button"
                 onClick={handleJumpToLatestReport}
                 disabled={!selectedInsight}
                 className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
@@ -1091,8 +1118,8 @@ export function Insights() {
                         </Link>
                         <ArrowUpRight size={15} className="mt-1 shrink-0 text-zinc-300" />
                       </div>
-                      {item.summary && (
-                        <p className="mt-2 line-clamp-2 text-sm leading-6 text-zinc-600">{item.summary}</p>
+                      {cleanGrowthSummary(item.summary) && (
+                        <p className="mt-2 line-clamp-2 text-sm leading-6 text-zinc-600">{cleanGrowthSummary(item.summary)}</p>
                       )}
                       <div className="mt-3 rounded-2xl bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
                         下一步：{item.actionSuggestion}
