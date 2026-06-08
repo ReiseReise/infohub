@@ -1177,8 +1177,8 @@ export function Insights() {
             </div>
           </section>
 
-          <section id="daily-report-section" className="scroll-mt-4 rounded-[28px] border border-zinc-200 bg-white p-5 shadow-[0_16px_48px_-40px_rgba(15,23,42,0.35)]">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <section id="daily-report-section" className="scroll-mt-4 overflow-hidden rounded-[28px] border border-zinc-200 bg-white shadow-[0_16px_48px_-40px_rgba(15,23,42,0.35)] xl:max-h-[calc(100vh-2rem)]">
+            <div className="sticky top-0 z-30 flex flex-col gap-3 border-b border-zinc-100 bg-white/95 px-5 py-4 backdrop-blur md:flex-row md:items-center md:justify-between">
               <div>
                 <div className="text-sm font-semibold text-zinc-900">日报档案</div>
                 <div className="mt-1 text-xs text-zinc-500">保留日常总结能力，但首页优先展示成长四象限。</div>
@@ -1192,8 +1192,8 @@ export function Insights() {
               </button>
             </div>
 
-            <div className="mt-4 grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
-              <aside className="space-y-2">
+            <div className="grid gap-4 p-5 lg:grid-cols-[220px_minmax(0,1fr)] xl:h-[calc(100vh-8.5rem)] xl:min-h-0">
+              <aside data-report-date-rail className="space-y-2 xl:max-h-full xl:overflow-y-auto xl:pr-1">
                 {insights.map((insight) => (
                   <button
                     key={String(insight.id)}
@@ -1212,12 +1212,12 @@ export function Insights() {
                 ))}
               </aside>
 
-              <div className="min-w-0 rounded-2xl border border-zinc-100 bg-zinc-50/60 p-5">
-                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-900">
+              <div data-report-reader className="min-w-0 rounded-2xl border border-zinc-100 bg-zinc-50/60 p-5 xl:max-h-full xl:overflow-y-auto xl:overscroll-contain xl:pr-4">
+                <div className="sticky top-0 z-20 -mx-5 -mt-5 mb-3 flex items-center gap-2 border-b border-zinc-100 bg-zinc-50/95 px-5 py-4 text-sm font-semibold text-zinc-900 backdrop-blur">
                   <FileText size={16} />
                   {selectedInsight ? `${selectedInsight.date} 日报` : '暂无日报'}
                 </div>
-                <div id="report-local-navigation" className="scroll-mt-4 mb-4 rounded-2xl border border-zinc-200 bg-white px-3 py-3">
+                <div id="report-local-navigation" className="sticky top-[52px] z-20 scroll-mt-24 mb-4 rounded-2xl border border-zinc-200 bg-white/95 px-3 py-3 shadow-sm backdrop-blur">
                   <div className="text-xs font-semibold text-zinc-900">日报导航</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {[

@@ -773,6 +773,59 @@ def assert_insights_copy_clean(page, route: str, label: str) -> None:
         raise AssertionError(f"{label} insights copy exposes model boilerplate: {hits}")
 
 
+def assert_desktop_insights_report_reader_sticky(page, route: str, label: str) -> None:
+    if route != "/insights":
+        return
+    is_desktop = page.evaluate("() => window.innerWidth >= 1024")
+    if not is_desktop:
+        return
+    jump_button = page.get_by_role("button", name="查看最新日报", exact=True).first
+    if jump_button.count() == 0:
+        raise AssertionError(f"{label} insights page is missing latest-report jump")
+    jump_button.click()
+    page.wait_for_timeout(200)
+    problems = page.evaluate(
+        """() => {
+            const reader = document.querySelector('[data-report-reader]');
+            const dateRail = document.querySelector('[data-report-date-rail]');
+            const nav = document.querySelector('#report-local-navigation');
+            if (!reader || !dateRail || !nav) return [{ error: 'missing-report-reading-surfaces' }];
+            const before = {
+                reader: reader.getBoundingClientRect(),
+                dateRail: dateRail.getBoundingClientRect(),
+                nav: nav.getBoundingClientRect(),
+                scrollHeight: reader.scrollHeight,
+                clientHeight: reader.clientHeight,
+            };
+            reader.scrollTop = Math.min(1400, Math.max(0, reader.scrollHeight - reader.clientHeight));
+            const after = {
+                reader: reader.getBoundingClientRect(),
+                dateRail: dateRail.getBoundingClientRect(),
+                nav: nav.getBoundingClientRect(),
+                scrollTop: reader.scrollTop,
+                scrollHeight: reader.scrollHeight,
+                clientHeight: reader.clientHeight,
+            };
+            const issues = [];
+            if (after.scrollHeight <= after.clientHeight + 24) {
+                issues.push({ error: 'report-reader-is-not-scrollable', scrollHeight: after.scrollHeight, clientHeight: after.clientHeight });
+            }
+            if (after.scrollTop <= 0) {
+                issues.push({ error: 'report-reader-did-not-scroll', scrollTop: after.scrollTop });
+            }
+            if (after.nav.y < after.reader.y - 2 || after.nav.y > after.reader.y + 96) {
+                issues.push({ error: 'report-navigation-not-sticky', before, after });
+            }
+            if (after.dateRail.y < -2 || after.dateRail.y > window.innerHeight) {
+                issues.push({ error: 'report-date-rail-not-visible', before, after });
+            }
+            return issues;
+        }"""
+    )
+    if problems:
+        raise AssertionError(f"{label} insights report reader is not stable for long reading: {problems}")
+
+
 def assert_mobile_monitor_actions_touchable(page, route: str, label: str) -> None:
     if not route.startswith("/monitor"):
         return
@@ -1034,6 +1087,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_settings_secondary_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_settings_diagnostics_copy_clean(page, route, f"{viewport_name} {route}")
     assert_insights_copy_clean(page, route, f"{viewport_name} {route}")
+    assert_desktop_insights_report_reader_sticky(page, route, f"{viewport_name} {route}")
     assert_mobile_monitor_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_rules_strategy_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_audio_detail_actions_touchable(page, route, f"{viewport_name} {route}")
