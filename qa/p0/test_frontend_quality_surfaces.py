@@ -476,6 +476,62 @@ def assert_mobile_feed_detail_header_actions_touchable(page, route: str, label: 
         raise AssertionError(f"{label} feed detail header actions are too small or unlabeled on mobile: {cramped_actions}")
 
 
+def assert_desktop_feed_detail_reader_sticky(page, route: str, label: str) -> None:
+    if not route.startswith("/feed/"):
+        return
+    is_desktop = page.evaluate("() => window.innerWidth >= 1024")
+    if not is_desktop:
+        return
+    problems = page.evaluate(
+        """() => {
+            const rectOf = (node) => {
+                const rect = node.getBoundingClientRect();
+                return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, bottom: rect.bottom };
+            };
+            const header = document.querySelector('[data-feed-detail-header]');
+            const reader = document.querySelector('[data-feed-detail-reader]');
+            const tabs = document.querySelector('[data-feed-detail-tabs]');
+            if (!header || !reader || !tabs) return [{ error: 'missing-feed-detail-reading-surfaces' }];
+            const before = {
+                header: rectOf(header),
+                reader: rectOf(reader),
+                tabs: rectOf(tabs),
+                windowScrollY: window.scrollY,
+                scrollHeight: reader.scrollHeight,
+                clientHeight: reader.clientHeight,
+            };
+            const maxScroll = Math.max(0, reader.scrollHeight - reader.clientHeight);
+            if (maxScroll <= 24) return [];
+            reader.scrollTop = Math.min(maxScroll, Math.max(220, tabs.offsetTop + 320));
+            const after = {
+                header: rectOf(header),
+                reader: rectOf(reader),
+                tabs: rectOf(tabs),
+                windowScrollY: window.scrollY,
+                scrollTop: reader.scrollTop,
+                scrollHeight: reader.scrollHeight,
+                clientHeight: reader.clientHeight,
+            };
+            const issues = [];
+            if (after.scrollTop <= 0) {
+                issues.push({ error: 'feed-reader-did-not-scroll', before, after });
+            }
+            if (Math.abs(after.windowScrollY - before.windowScrollY) > 2) {
+                issues.push({ error: 'feed-reader-scroll-moved-page', before, after });
+            }
+            if (Math.abs(after.header.y - before.header.y) > 2 || after.header.y < -2 || after.header.y > window.innerHeight) {
+                issues.push({ error: 'feed-detail-header-not-fixed', before, after });
+            }
+            if (after.scrollTop >= tabs.offsetTop - 4 && (after.tabs.y < after.reader.y - 2 || after.tabs.y > after.reader.y + 80)) {
+                issues.push({ error: 'feed-detail-tabs-not-sticky', before, after });
+            }
+            return issues;
+        }"""
+    )
+    if problems:
+        raise AssertionError(f"{label} feed detail reader is not stable for long reading: {problems}")
+
+
 def assert_mobile_feed_stage_repair_actions_touchable(page, route: str, label: str) -> None:
     if not route.startswith("/feed/"):
         return
@@ -933,6 +989,63 @@ def assert_mobile_audio_detail_actions_touchable(page, route: str, label: str) -
         raise AssertionError(f"{label} audio detail actions are too small, missing, or unlabeled on mobile: {action_problems}")
 
 
+def assert_desktop_audio_detail_reader_sticky(page, route: str, label: str) -> None:
+    if not route.startswith("/audio"):
+        return
+    is_desktop = page.evaluate("() => window.innerWidth >= 1024")
+    if not is_desktop:
+        return
+    problems = page.evaluate(
+        """() => {
+            if ((document.body.innerText || '').includes('暂无任务')) return [];
+            const rectOf = (node) => {
+                const rect = node.getBoundingClientRect();
+                return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, bottom: rect.bottom };
+            };
+            const header = document.querySelector('[data-audio-detail-header]');
+            const reader = document.querySelector('[data-audio-detail-reader]');
+            const tabs = document.querySelector('[data-audio-detail-tabs]');
+            if (!header || !reader || !tabs) return [{ error: 'missing-audio-detail-reading-surfaces' }];
+            const before = {
+                header: rectOf(header),
+                reader: rectOf(reader),
+                tabs: rectOf(tabs),
+                windowScrollY: window.scrollY,
+                scrollHeight: reader.scrollHeight,
+                clientHeight: reader.clientHeight,
+            };
+            const maxScroll = Math.max(0, reader.scrollHeight - reader.clientHeight);
+            if (maxScroll <= 24) return [];
+            reader.scrollTop = Math.min(maxScroll, Math.max(220, tabs.offsetTop + 260));
+            const after = {
+                header: rectOf(header),
+                reader: rectOf(reader),
+                tabs: rectOf(tabs),
+                windowScrollY: window.scrollY,
+                scrollTop: reader.scrollTop,
+                scrollHeight: reader.scrollHeight,
+                clientHeight: reader.clientHeight,
+            };
+            const issues = [];
+            if (after.scrollTop <= 0) {
+                issues.push({ error: 'audio-reader-did-not-scroll', before, after });
+            }
+            if (Math.abs(after.windowScrollY - before.windowScrollY) > 2) {
+                issues.push({ error: 'audio-reader-scroll-moved-page', before, after });
+            }
+            if (Math.abs(after.header.y - before.header.y) > 2 || after.header.y < -2 || after.header.y > window.innerHeight) {
+                issues.push({ error: 'audio-detail-header-not-fixed', before, after });
+            }
+            if (after.scrollTop >= tabs.offsetTop - 4 && (after.tabs.y < after.reader.y - 2 || after.tabs.y > after.reader.y + 80)) {
+                issues.push({ error: 'audio-detail-tabs-not-sticky', before, after });
+            }
+            return issues;
+        }"""
+    )
+    if problems:
+        raise AssertionError(f"{label} audio detail reader is not stable for long reading: {problems}")
+
+
 def assert_report_heading_date_not_split(page, label: str) -> None:
     date_layout = page.evaluate(
         """() => {
@@ -1079,6 +1192,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_feed_source_filter_buttons_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_list_actions_discoverable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_detail_header_actions_touchable(page, route, f"{viewport_name} {route}")
+    assert_desktop_feed_detail_reader_sticky(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_detail_has_return_to_list(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_stage_repair_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_feed_feedback_actions_touchable(page, route, f"{viewport_name} {route}")
@@ -1091,6 +1205,7 @@ def visit_and_capture(page, route: str, slug: str, viewport_name: str, needles: 
     assert_mobile_monitor_actions_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_rules_strategy_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_audio_detail_actions_touchable(page, route, f"{viewport_name} {route}")
+    assert_desktop_audio_detail_reader_sticky(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_mode_controls_touchable(page, route, f"{viewport_name} {route}")
     assert_mobile_insights_report_shortcut(page, route, f"{viewport_name} {route}")
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)

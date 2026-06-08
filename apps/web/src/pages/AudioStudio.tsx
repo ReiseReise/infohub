@@ -622,11 +622,12 @@ export function AudioStudio() {
           </div>
         </div>
 
-        <div className="border border-zinc-200 rounded-xl bg-white p-4 xl:max-h-[76vh] xl:overflow-y-auto">
+        <div className="border border-zinc-200 rounded-xl bg-white xl:flex xl:max-h-[calc(100vh-2rem)] xl:min-h-0 xl:flex-col xl:overflow-hidden">
           {detailLoading ? (
-            <div className="text-center py-20 text-zinc-400">加载详情...</div>
+            <div className="p-4 text-center py-20 text-zinc-400">加载详情...</div>
           ) : selectedTask ? (
             <>
+              <div data-audio-detail-header className="border-b border-zinc-100 bg-white/95 px-4 py-4 backdrop-blur xl:shrink-0">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div className="min-w-0">
                   <h2 className="text-lg font-semibold text-zinc-900">{selectedTask.title}</h2>
@@ -655,6 +656,9 @@ export function AudioStudio() {
                   </button>
                 </div>
               </div>
+              </div>
+
+              <div data-audio-detail-reader className="px-4 pb-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain xl:pr-4">
 
               <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2 text-xs text-zinc-600">
                 <div className="px-3 py-2 rounded-lg bg-zinc-50 border border-zinc-100">创建时间：{selectedTask.created_at ? new Date(selectedTask.created_at).toLocaleString('zh-CN') : '—'}</div>
@@ -702,7 +706,7 @@ export function AudioStudio() {
                 </div>
               )}
 
-              <div className="mt-5 flex gap-2 flex-wrap">
+              <div data-audio-detail-tabs className="sticky top-0 z-20 -mx-4 mt-5 flex flex-wrap gap-2 border-y border-zinc-100 bg-white/95 px-4 py-3 backdrop-blur">
                 {[
                   ['overview', '概览'],
                   ['summary', '摘要'],
@@ -769,13 +773,14 @@ export function AudioStudio() {
 
                 {detailTab === 'raw' && (
                   <pre className="overflow-x-auto rounded-2xl border border-zinc-200 bg-zinc-950 px-4 py-4 text-xs leading-6 text-zinc-100">
-                    {rawPayload}
-                  </pre>
-                )}
+                  {rawPayload}
+                </pre>
+              )}
+              </div>
               </div>
             </>
           ) : (
-            <div className="text-zinc-400 h-full flex flex-col items-center justify-center text-center">
+            <div className="text-zinc-400 h-full flex flex-col items-center justify-center p-4 text-center">
               <FileAudio size={28} />
               <p className="mt-2 text-sm">从左侧选择一个音频任务查看详情</p>
             </div>

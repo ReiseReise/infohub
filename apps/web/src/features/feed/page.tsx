@@ -1416,17 +1416,17 @@ export function Feed() {
           )}
         </div>
 
-        <div ref={detailPanelRef} className={`rounded-[32px] border border-zinc-200/80 bg-white p-5 shadow-[0_24px_80px_-52px_rgba(15,23,42,0.45)] xl:max-h-[72vh] xl:overflow-y-auto ${resolveFeedDetailOrderClassName(Boolean(selectedItem))}`}>
+        <div ref={detailPanelRef} className={`rounded-[32px] border border-zinc-200/80 bg-white shadow-[0_24px_80px_-52px_rgba(15,23,42,0.45)] xl:flex xl:max-h-[calc(100vh-2rem)] xl:min-h-0 xl:flex-col xl:overflow-hidden ${resolveFeedDetailOrderClassName(Boolean(selectedItem))}`}>
           {detailLoading ? (
-            <div className="text-center py-20 text-zinc-400">加载详情...</div>
+            <div className="p-5 text-center py-20 text-zinc-400">加载详情...</div>
           ) : selectedItem ? (
             <>
               {detailError && (
-                <div className="mb-3 px-3 py-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg">
+                <div className="mx-5 mt-5 px-3 py-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg">
                   {detailError}
                 </div>
               )}
-              <div data-feed-detail-header className="sticky top-0 z-10 -mx-5 -mt-5 mb-5 border-b border-zinc-100 bg-white/92 px-5 py-4 backdrop-blur">
+              <div data-feed-detail-header className="sticky top-0 z-30 border-b border-zinc-100 bg-white/95 px-5 py-4 backdrop-blur xl:shrink-0">
                 <button
                   type="button"
                   onClick={handleReturnToList}
@@ -1516,8 +1516,10 @@ export function Feed() {
               </div>
               </div>
 
+              <div data-feed-detail-reader className="px-5 pb-5 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:overscroll-contain xl:pr-4">
+
               {detailActionNoticeMessage && (
-                <div className={`mb-3 rounded-xl border px-3 py-2 text-xs leading-5 ${NOTICE_CLASS_NAMES[detailActionNoticeTone]}`}>
+                <div className={`mt-4 rounded-xl border px-3 py-2 text-xs leading-5 ${NOTICE_CLASS_NAMES[detailActionNoticeTone]}`}>
                   {detailActionNoticeMessage}
                 </div>
               )}
@@ -1867,7 +1869,7 @@ export function Feed() {
                 </div>
               )}
 
-              <div className="mt-5 flex gap-2 flex-wrap">
+              <div data-feed-detail-tabs className="sticky top-0 z-20 -mx-5 mt-5 flex flex-wrap gap-2 border-y border-zinc-100 bg-white/95 px-5 py-3 backdrop-blur">
                 {detailSections.map((section) => (
                   <button
                     key={section.key}
@@ -1909,9 +1911,10 @@ export function Feed() {
                   </a>
                 )}
               </div>
+              </div>
             </>
           ) : (
-            <div className="text-zinc-400 h-full flex flex-col items-center justify-center text-center">
+            <div className="text-zinc-400 h-full flex flex-col items-center justify-center p-5 text-center">
               <FileText size={28} />
               <p className="mt-2 text-sm">从左侧选择一篇文章查看详情与预览</p>
             </div>
