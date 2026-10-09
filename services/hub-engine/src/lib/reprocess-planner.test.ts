@@ -116,6 +116,34 @@ test('matches content retries for short excerpt rows that were previously marked
   }, contentRequest), false);
 });
 
+test('matches content retries for curated index rows that still need original article fetch', () => {
+  const contentRequest = normalizeReprocessRequest({ stage: 'content' });
+
+  assert.equal(shouldReprocessItem({
+    ...candidate,
+    contentStatus: 'ready',
+    contentLength: 620,
+    snippetLength: 180,
+    sourceType: 'curated_index',
+    sourceCollectorType: 'webpage_index',
+    originalUrl: 'https://www.anthropic.com/news/claude-fable-5-mythos-5',
+    fetchEngine: 'webpage-index',
+    renderMode: 'index',
+  }, contentRequest), true);
+
+  assert.equal(shouldReprocessItem({
+    ...candidate,
+    contentStatus: 'ready',
+    contentLength: 4200,
+    snippetLength: 180,
+    sourceType: 'curated_index',
+    sourceCollectorType: 'webpage_index',
+    originalUrl: 'https://www.anthropic.com/news/claude-fable-5-mythos-5',
+    fetchEngine: 'readability',
+    renderMode: 'article',
+  }, contentRequest), false);
+});
+
 test('matches summary retries when full content replaces a snippet-based summary', () => {
   const summaryRequest = normalizeReprocessRequest({ stage: 'summary' });
 
@@ -175,6 +203,7 @@ test('builds stage-specific reset patches without unfiltering hard rule items', 
   assert.equal(allPatch.processingStatus, 'raw');
   assert.equal(allPatch.aiScore, null);
   assert.equal(allPatch.aiSummary, null);
-  assert.equal(allPatch.aiTranslation, null);
+  assert.equal(Object.hasOwn(allPatch, 'aiTranslation'), false);
+  assert.equal(Object.hasOwn(allPatch, 'translatedTitle'), false);
   assert.equal(Object.hasOwn(allPatch, 'isFiltered'), false);
 });

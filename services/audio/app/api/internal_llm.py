@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.model_config import ModelConfig
 from app.services.crypto_service import decrypt_api_key
 from app.services.llm_service import LLMService
+from app.services.llm_errors import llm_error_response
 
 router = APIRouter(prefix="/internal/llm", tags=["internal-llm"])
 
@@ -20,6 +21,8 @@ class InternalCompleteRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     temperature: float = 0.3
     max_tokens: int = 1024
+    response_format: dict | None = None
+    thinking: dict | None = None
 
 
 @router.post("/complete")
@@ -35,16 +38,25 @@ async def complete_with_model_config(
 
     api_key = decrypt_api_key(model.api_key_encrypted) if model.api_key_encrypted else ""
     service = LLMService()
-    completion = await service.complete(
-        model=model.model_name,
-        prompt=req.prompt,
-        api_key=api_key,
-        base_url=model.base_url,
-        provider=model.provider,
-        extra_config=model.extra_config,
-        temperature=req.temperature,
-        max_tokens=req.max_tokens,
-    )
+    try:
+        completion = await service.complete(
+            model=model.model_name,
+            prompt=req.prompt,
+            api_key=api_key,
+            base_url=model.base_url,
+            provider=model.provider,
+            extra_config=model.extra_config,
+            temperature=req.temperature,
+            max_tokens=req.max_tokens,
+            response_format=req.response_format,
+            thinking=req.thinking,
+        )
+    except Exception as error:
+        response = llm_error_response(error)
+        if response is None:
+            raise
+        status, detail = response
+        raise HTTPException(status_code=status, detail=detail) from None
     return {
         "text": completion.text,
         "model": completion.model,

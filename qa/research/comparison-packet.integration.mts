@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {readFile,writeFile,mkdir,mkdtemp} from 'node:fs/promises';
+import {resolve,join} from 'node:path';
+import {execFileSync} from 'node:child_process';
+const root=await mkdtemp('/private/tmp/infohub-packet-test-');const input=join(root,'input'),output=join(root,'review');await mkdir(input);
+const manifest=JSON.parse(await readFile('qa/research/manifest.json','utf8'));
+const arms=['legacy','structured_once','pi_research'];
+const files=arms.map(engine=>({engine,model:'deepseek-flash',fixtureSha256:manifest.frozenSha256,unit:'single_event',totalCostMicros:1,runs:[{id:engine,state:'review',totalCostMicros:1,reservedMicros:0}],events:Array.from({length:20},(_,i)=>({eventKey:'synthetic-'+i,window:'2026-09-06',materialIds:['synthetic-source-'+i],markdown:'明确合成单元测试文本',elapsedMs:1}))}));
+for(const file of files)await writeFile(join(input,file.engine+'.json'),JSON.stringify(file));
+const run=()=>execFileSync(process.execPath,['--import',resolve('services/hub-engine/node_modules/tsx/dist/loader.mjs'),resolve('qa/research/compare.mts'),input,output],{encoding:'utf8'});
+run();const packetPath=join(output,'blind-review.json'),packet=JSON.parse(await readFile(packetPath,'utf8'));packet.events[0].chosen='B';await writeFile(packetPath,JSON.stringify(packet));run();assert.equal(JSON.parse(await readFile(packetPath,'utf8')).events[0].chosen,'B');
+files[1].events[0].materialIds=['different-source'];await writeFile(join(input,'structured_once.json'),JSON.stringify(files[1]));assert.throws(run,/different_material_scope/);
+assert.equal(JSON.parse(await readFile(packetPath,'utf8')).events[0].chosen,'B');
+console.log('PASS: 20-case synthetic packet, matching scope, deterministic rerun preserves human choices, mismatched material rejected. Synthetic files remain only in temporary test directory.');

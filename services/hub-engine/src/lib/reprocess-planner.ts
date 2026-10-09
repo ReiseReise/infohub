@@ -18,6 +18,11 @@ export type ReprocessCandidate = {
   contentStatus?: string | null;
   contentLength?: number | null;
   snippetLength?: number | null;
+  sourceType?: string | null;
+  sourceCollectorType?: string | null;
+  originalUrl?: string | null;
+  fetchEngine?: string | null;
+  renderMode?: string | null;
   aiScore?: number | null;
   summaryBasis?: string | null;
   processingStatus?: string | null;
@@ -81,6 +86,12 @@ function stageMatches(candidate: ReprocessCandidate, stage: ReprocessStage): boo
   }
   if (stage === 'content') {
     if (candidate.contentStatus !== 'ready') return true;
+    const isCuratedIndex = String(candidate.sourceType || '').toLowerCase() === 'curated_index'
+      || String(candidate.sourceCollectorType || '').toLowerCase() === 'webpage_index';
+    const hasOriginalUrl = /^https?:\/\//i.test(String(candidate.originalUrl || '').trim());
+    const stillIndexRendered = String(candidate.fetchEngine || '').toLowerCase() === 'webpage-index'
+      || String(candidate.renderMode || '').toLowerCase() === 'index';
+    if (isCuratedIndex && hasOriginalUrl && stillIndexRendered) return true;
     const contentLength = Number(candidate.contentLength ?? 0);
     const snippetLength = Number(candidate.snippetLength ?? 0);
     return contentLength > 0 && contentLength < 180 && snippetLength >= 24;
@@ -144,7 +155,6 @@ export function buildReprocessResetPatch(stage: ReprocessStage, hardRuleFiltered
     if (stage === 'summary') patch.processingStatus = 'scored';
   }
   if (stage === 'translation' || stage === 'all') {
-    patch.aiTranslation = null;
     patch.translationStatus = 'pending';
     patch.translationReason = null;
     if (stage === 'translation') patch.processingStatus = 'summarized';

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config as loadDotenv } from 'dotenv';
+import { isExplicitlyEnabled } from '../lib/runtime-security-policy.js';
 
 const dotenvCandidates = [
   resolve(process.cwd(), '.env'),
@@ -68,7 +69,7 @@ export const config = {
   },
 
   auth: {
-    allowRegistration: process.env.ALLOW_REGISTRATION !== 'false',
+    allowRegistration: isExplicitlyEnabled(process.env.ALLOW_REGISTRATION),
   },
 
   rsshub: {
@@ -133,9 +134,16 @@ export const config = {
   },
 
   ai: {
-    enabled: process.env.AI_PROCESSING_ENABLED !== 'false',
-    scoringEnabled: process.env.AI_SCORING_ENABLED !== 'false',
-    summaryEnabled: process.env.AI_SUMMARY_ENABLED !== 'false',
-    translationEnabled: process.env.AI_TRANSLATION_ENABLED !== 'false',
+    enabled: isExplicitlyEnabled(process.env.AI_PROCESSING_ENABLED),
+    scoringEnabled: isExplicitlyEnabled(process.env.AI_SCORING_ENABLED),
+    summaryEnabled: isExplicitlyEnabled(process.env.AI_SUMMARY_ENABLED),
+    translationEnabled: isExplicitlyEnabled(process.env.AI_TRANSLATION_ENABLED),
+  },
+
+  cors: {
+    origins: (process.env.CORS_ORIGINS || 'http://localhost,http://localhost:5173')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean),
   },
 } as const;

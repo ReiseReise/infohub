@@ -6,6 +6,21 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 docker compose exec -T postgres psql -U postgres -d infohub <<'SQL'
+ALTER TABLE hub.user_settings
+  ADD COLUMN IF NOT EXISTS auto_summary_enabled BOOLEAN,
+  ADD COLUMN IF NOT EXISTS auto_translation_enabled BOOLEAN;
+
+UPDATE hub.user_settings
+SET
+  auto_summary_enabled = COALESCE(auto_summary_enabled, true),
+  auto_translation_enabled = COALESCE(auto_translation_enabled, true);
+
+ALTER TABLE hub.user_settings
+  ALTER COLUMN auto_summary_enabled SET DEFAULT true,
+  ALTER COLUMN auto_summary_enabled SET NOT NULL,
+  ALTER COLUMN auto_translation_enabled SET DEFAULT true,
+  ALTER COLUMN auto_translation_enabled SET NOT NULL;
+
 ALTER TABLE hub.filter_rules
   ALTER COLUMN user_id DROP NOT NULL;
 
@@ -112,8 +127,35 @@ BEGIN
   END LOOP;
 END $$;
 
+DO $$
+DECLARE
+  con_name TEXT;
+BEGIN
+  FOR con_name IN
+    SELECT c.conname
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = 'hub'
+      AND t.relname = 'sources'
+      AND c.contype = 'c'
+      AND pg_get_constraintdef(c.oid) ILIKE '%source_type%'
+  LOOP
+    EXECUTE format('ALTER TABLE hub.sources DROP CONSTRAINT %I', con_name);
+  END LOOP;
+END $$;
+
 ALTER TABLE hub.sources
-  ADD CONSTRAINT sources_collector_type_check CHECK (collector_type IN ('rss', 'rsshub', 'changedetection', 'newsletter', 'youtube', 'custom', 'webpage'));
+  ADD CONSTRAINT sources_source_type_check CHECK (source_type IN ('rss', 'podcast', 'audio', 'rsshub', 'webpage', 'newsletter', 'custom', 'email', 'curated_index'));
+
+ALTER TABLE hub.sources
+  ADD CONSTRAINT sources_collector_type_check CHECK (collector_type IN ('rss', 'rsshub', 'changedetection', 'newsletter', 'youtube', 'custom', 'webpage', 'webpage_index'));
+
+ALTER TABLE hub.items
+  ADD COLUMN IF NOT EXISTS original_url TEXT,
+  ADD COLUMN IF NOT EXISTS curation_url TEXT,
+  ADD COLUMN IF NOT EXISTS curation_source TEXT,
+  ADD COLUMN IF NOT EXISTS curation_meta JSONB DEFAULT '{}';
 
 DO $$
 DECLARE

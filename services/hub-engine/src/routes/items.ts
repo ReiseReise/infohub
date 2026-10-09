@@ -12,13 +12,22 @@ import {
 } from '../lib/content-extractor.js';
 import { ensureItemContent, resolveItemText } from '../lib/item-enrichment.js';
 import { startAudioTaskForItem } from '../services/audio.js';
-import { scoreItems, scoreItemsDetailed } from '../processors/ai-scorer.js';
+import { callLLM, getActiveAiConfig, scoreItems, scoreItemsDetailed } from '../processors/ai-scorer.js';
 import { qualityFilterItemsDetailed } from '../processors/quality-filter.js';
-import { summarizeItems, summarizeItemsDetailed, translateItemsDetailed, translateItemsWithOptions } from '../processors/ai-summarizer.js';
+import {
+  cleanTranslationChunkOutput,
+  summarizeItems,
+  summarizeItemsDetailed,
+} from '../processors/ai-summarizer.js';
 import { getEffectiveAiSceneAvailability } from '../lib/ai-configs.js';
+import { logAiUsage } from '../lib/ai-usage.js';
 import { getItemScoreBreakdowns, getLatestItemFeedback } from '../lib/scoring-skills.js';
 import { normalizeGrowthAxes } from '../lib/growth.js';
-import { selectEventClusterLead } from '../lib/event-clustering.js';
+import {
+  buildEventContext,
+  collapseEventClusterItems,
+  selectEventClusterLead,
+} from '../lib/event-clustering.js';
 import {
   buildReprocessResetPatch,
   isHardRuleFiltered,
@@ -26,7 +35,9 @@ import {
   shouldReprocessItem,
   type ReprocessStage,
 } from '../lib/reprocess-planner.js';
+import { normalizeItemListQuery, shouldExcludeSnapshotLikeItemsFromDefaultFeed } from '../lib/item-list-query.js';
 import { classifyContentBasisFromLengths } from '../lib/content-status.js';
+import { deriveSourceContentStrategy } from '../lib/source-content-strategy.js';
 import { resolveDailyReportWindow } from '../outputs/daily-report-window.js';
 import { DEFAULT_DAILY_REPORT_WORKFLOW, normalizeDailyReportWorkflowConfig, prepareDailyReportCandidates } from '../outputs/daily-report-workflow.js';
 import {
@@ -34,12 +45,62 @@ import {
   buildDailyReportItemDiagnosticFromSnapshot,
   ensureDailyReportDiagnosticTargetRows,
 } from '../outputs/daily-report-item-diagnostic.js';
+import { buildReadingItemContext } from '../lib/reading-context.js';
+import {
+  buildArticleAssetPrompt,
+  buildReadingAssetRecords,
+  normalizeArticleAssetGenerationRequest,
+  previewText,
+  resolveArticleAssetPromptLabel,
+  resolveArticleAssetSource,
+} from '../lib/article-assets.js';
+import { AI_TOKEN_BUDGETS } from '../lib/ai-token-budgets.js';
+import { itemTranslationQueue } from '../scheduler/queue.js';
+import { enqueueItemTranslationJob } from '../scheduler/item-translation-jobs.js';
+import { resolveItemTranslationJobProgress } from '../lib/item-translation-progress.js';
+import { buildSourceReadingTierCondition } from '../lib/source-reading-tier-sql.js';
+import { mainReadingSourceCondition } from '../lib/reference-source-visibility.js';
+import {
+  eventCollapseFeatureEnabled,
+  resolveEventCollapsePreference,
+} from '../lib/event-collapse-policy.js';
 
 const app = new Hono();
+
+async function serializeItemTranslationJob(job: Awaited<ReturnType<typeof itemTranslationQueue.getJob>>) {
+  if (!job) return null;
+  const state = await job.getState();
+  const progress = resolveItemTranslationJobProgress(state, job.progress, {
+    failedReason: job.failedReason || null,
+    result: job.returnvalue && typeof job.returnvalue === 'object'
+      ? job.returnvalue as Record<string, unknown>
+      : null,
+  });
+  return {
+    jobId: String(job.id || ''),
+    state,
+    status: state,
+    itemId: job.data?.itemId || null,
+    progress,
+    stage: progress.stage,
+    label: progress.label,
+    percent: progress.percent,
+    message: progress.message,
+    attemptsMade: job.attemptsMade,
+    timestamp: job.timestamp || null,
+    processedOn: job.processedOn || null,
+    finishedOn: job.finishedOn || null,
+    failedReason: job.failedReason || null,
+    result: job.returnvalue || null,
+  };
+}
 
 function deriveContentBasis(item: {
   title?: string | null;
   content?: string | null;
+  readabilityContent?: string | null;
+  readabilityStatus?: string | null;
+  readabilityReason?: string | null;
   snippet?: string | null;
   contentLength?: number | null;
   snippetLength?: number | null;
@@ -58,22 +119,67 @@ function deriveContentBasis(item: {
 }
 
 function mapFeedItemResponse<T extends {
+  sourceId?: number | null;
+  sourceName?: string | null;
+  sourceType?: string | null;
+  sourceCollectorType?: string | null;
+  sourceRole?: string | null;
+  originalUrl?: string | null;
+  curationUrl?: string | null;
+  curationSource?: string | null;
   title?: string | null;
   content?: string | null;
   snippet?: string | null;
+  aiScore?: number | null;
+  priorityScore?: number | null;
+  sourceTier?: string | null;
+  qualityDecision?: string | null;
   contentStatus?: string | null;
+  contentError?: string | null;
+  contentBasis?: string | null;
+  contentLength?: number | null;
+  snippetLength?: number | null;
+  aiSummary?: string | null;
+  aiTranslation?: string | null;
+  translatedTitle?: string | null;
+  summaryStatus?: string | null;
+  summaryBasis?: string | null;
+  summaryReason?: string | null;
+  translationStatus?: string | null;
+  translationReason?: string | null;
+  transcript?: string | null;
+  knowledge?: string | null;
+  latestFeedbackType?: string | null;
+  dailyReportDiagnostic?: {
+    status?: string | null;
+    label?: string | null;
+    reason?: string | null;
+    action?: string | null;
+    selectionMode?: string | null;
+  } | null;
   sourceConfig?: unknown;
   fetchEngine?: string | null;
   renderMode?: string | null;
   blockedReason?: string | null;
-}>(row: T) {
+}>(row: T, options: { view?: string | null; sortBy?: string | null; date?: string | null } = {}) {
   const contentBasis = deriveContentBasis(row);
   const sourceConfig = (row.sourceConfig && typeof row.sourceConfig === 'object')
     ? row.sourceConfig as Record<string, unknown>
     : {};
-  return {
+  const sourceContentStrategy = deriveSourceContentStrategy({
+    contentStrategy: sourceConfig.contentStrategy,
+    collectorType: row.sourceCollectorType,
+    sourceType: row.sourceType,
+    sourceRole: row.sourceRole,
+    processingProfile: (row as { processingProfile?: string | null }).processingProfile,
+  });
+  const normalized = {
     ...row,
+    aiTranslation: typeof (row as { aiTranslation?: unknown }).aiTranslation === 'string'
+      ? cleanTranslationChunkOutput((row as { aiTranslation: string }).aiTranslation)
+      : (row as { aiTranslation?: unknown }).aiTranslation,
     growthAxes: normalizeGrowthAxes((row as { growthAxes?: unknown }).growthAxes, []),
+    sourceContentStrategy,
     contentBasis,
     contentStatus: row.contentStatus === 'ready' && contentBasis !== 'content'
       ? 'degraded'
@@ -81,6 +187,173 @@ function mapFeedItemResponse<T extends {
     fetchEngine: row.fetchEngine || (typeof sourceConfig.lastFetchEngine === 'string' ? sourceConfig.lastFetchEngine : null),
     renderMode: row.renderMode || (typeof sourceConfig.renderMode === 'string' ? sourceConfig.renderMode : null),
     blockedReason: row.blockedReason || (typeof sourceConfig.lastBlockedReason === 'string' ? sourceConfig.lastBlockedReason : null),
+  };
+  const readingContext = buildReadingItemContext({
+    ...normalized,
+    view: options.view,
+    sortBy: options.sortBy,
+    date: options.date,
+  });
+  if (readingContext.translationUsability === 'invalid') {
+    const qualityReason = readingContext.translationCompleteness?.reason || '现有译文未通过完整性校验。';
+    const safeNormalized = {
+      ...normalized,
+      aiTranslation: null,
+      translatedTitle: null,
+      translationStatus: 'failed',
+      translationReason: qualityReason,
+    };
+    const safeContext = buildReadingItemContext({
+      ...safeNormalized,
+      view: options.view,
+      sortBy: options.sortBy,
+      date: options.date,
+    });
+    return {
+      ...normalized,
+      aiTranslation: null,
+      translatedTitle: null,
+      translationReason: qualityReason,
+      ...safeContext,
+      translationCompleteness: readingContext.translationCompleteness,
+      translationUsability: readingContext.translationUsability,
+    };
+  }
+  return {
+    ...normalized,
+    ...readingContext,
+  };
+}
+
+const feedPriorityRankSql = sql<number>`
+  coalesce(${schema.items.priorityScore}, 0)
+  - case
+    when ${schema.items.sourceType} = 'webpage' then 100
+    when ${schema.items.title} ~* 'newsroom\\s*(\\\\|\\|)\\s*anthropic' then 100
+    when ${schema.sources.collectorType} = 'webpage'
+      and concat_ws(' ', ${schema.items.title}, coalesce(${schema.items.snippet}, '')) ~* '(newsroom|\\mpress\\M|\\msupport\\M|download\\s+press\\s+kit)'
+      then 100
+    else 0
+  end
+`;
+
+const feedItemListSelection = {
+  id: schema.items.id,
+  sourceId: schema.items.sourceId,
+  sourceType: schema.items.sourceType,
+  sourceTier: schema.items.sourceTier,
+  processingProfile: schema.items.processingProfile,
+  growthAxes: schema.items.growthAxes,
+  clusterId: schema.items.clusterId,
+  title: schema.items.title,
+  url: schema.items.url,
+  originalUrl: schema.items.originalUrl,
+  curationUrl: schema.items.curationUrl,
+  curationSource: schema.items.curationSource,
+  curationMeta: schema.items.curationMeta,
+  author: schema.items.author,
+  snippet: schema.items.snippet,
+  publishedAt: schema.items.publishedAt,
+  fetchedAt: schema.items.fetchedAt,
+  aiScore: schema.items.aiScore,
+  aiSummary: schema.items.aiSummary,
+  translatedTitle: schema.items.translatedTitle,
+  aiTags: schema.items.aiTags,
+  priorityScore: schema.items.priorityScore,
+  mediaUrl: schema.items.mediaUrl,
+  mediaType: schema.items.mediaType,
+  audioStatus: schema.items.audioStatus,
+  audioStatusReason: schema.items.audioStatusReason,
+  audioTaskId: schema.items.audioTaskId,
+  isRead: schema.items.isRead,
+  isFavorite: schema.items.isFavorite,
+  isLater: schema.items.isLater,
+  processingStatus: schema.items.processingStatus,
+  isFiltered: schema.items.isFiltered,
+  filterReason: schema.items.filterReason,
+  qualityDecision: schema.items.qualityDecision,
+  qualitySummary: schema.items.qualitySummary,
+  qualityReason: schema.items.qualityReason,
+  qualityTags: schema.items.qualityTags,
+  qualityRiskFlags: schema.items.qualityRiskFlags,
+  qualityScore: schema.items.qualityScore,
+  qualityConfidence: schema.items.qualityConfidence,
+  qualityCheckedAt: schema.items.qualityCheckedAt,
+  filterBucket: schema.items.filterBucket,
+  restoredAt: schema.items.restoredAt,
+  restoredFromFilter: schema.items.restoredFromFilter,
+  contentStatus: schema.items.contentStatus,
+  contentError: schema.items.contentError,
+  readabilityContent: schema.items.readabilityContent,
+  readabilityStatus: schema.items.readabilityStatus,
+  readabilityReason: schema.items.readabilityReason,
+  fetchEngine: schema.items.fetchEngine,
+  renderMode: schema.items.renderMode,
+  blockedReason: schema.items.blockedReason,
+  summaryStatus: schema.items.summaryStatus,
+  summaryBasis: schema.items.summaryBasis,
+  summaryReason: schema.items.summaryReason,
+  translationStatus: schema.items.translationStatus,
+  translationReason: schema.items.translationReason,
+  sourceName: schema.sources.name,
+  sourceCategory: schema.sources.category,
+  sourceCollectorType: schema.sources.collectorType,
+  sourceRole: schema.sources.sourceRole,
+  sourceKind: schema.sources.sourceKind,
+  authorityWeight: schema.sources.authorityWeight,
+  sourceConfig: schema.sources.config,
+  contentLength: sql<number>`coalesce(length(trim(${schema.items.content})), 0)`,
+  snippetLength: sql<number>`coalesce(length(trim(${schema.items.snippet})), 0)`,
+} as const;
+
+const feedEventIndexSelection = {
+  id: schema.items.id,
+  sourceId: schema.items.sourceId,
+  sourceType: schema.items.sourceType,
+  sourceTier: schema.items.sourceTier,
+  clusterId: schema.items.clusterId,
+  title: schema.items.title,
+  translatedTitle: schema.items.translatedTitle,
+  aiTags: schema.items.aiTags,
+  url: schema.items.url,
+  originalUrl: schema.items.originalUrl,
+  curationUrl: schema.items.curationUrl,
+  curationSource: schema.items.curationSource,
+  curationMeta: schema.items.curationMeta,
+  publishedAt: schema.items.publishedAt,
+  fetchedAt: schema.items.fetchedAt,
+  aiScore: schema.items.aiScore,
+  priorityScore: schema.items.priorityScore,
+  sourceName: schema.sources.name,
+  sourceCategory: schema.sources.category,
+  sourceCollectorType: schema.sources.collectorType,
+  sourceConfig: schema.sources.config,
+  sourceRole: schema.sources.sourceRole,
+  sourceKind: schema.sources.sourceKind,
+  authorityWeight: schema.sources.authorityWeight,
+} as const;
+
+async function getSavedReadingAssets(userId: string, itemId: string) {
+  const rows = await db
+    .select()
+    .from(schema.itemReadingAssets)
+    .where(and(eq(schema.itemReadingAssets.userId, userId), eq(schema.itemReadingAssets.itemId, itemId)))
+    .orderBy(desc(schema.itemReadingAssets.updatedAt));
+  return buildReadingAssetRecords(rows);
+}
+
+function mergeSavedReadingAssets<T extends { readingAssets?: unknown }>(item: T, savedAssets: ReturnType<typeof buildReadingAssetRecords>) {
+  const baseAssets = Array.isArray(item.readingAssets) ? item.readingAssets : [];
+  const seen = new Set<string>();
+  const merged = [...savedAssets, ...baseAssets].filter((asset: any) => {
+    const key = `${asset.type || ''}:${asset.promptKey || asset.label || ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return {
+    ...item,
+    readingAssets: merged,
   };
 }
 
@@ -274,10 +547,31 @@ app.get('/', async (c) => {
   const collectorType = c.req.query('collectorType');
   const category = c.req.query('category');
   const sourceTier = c.req.query('sourceTier');
+  const readingTier = c.req.query('readingTier');
+  const growthAxis = c.req.query('growthAxis');
   const monitorOnly = c.req.query('monitorOnly') === 'true';
   const search = c.req.query('search');
-  const sortBy = c.req.query('sortBy') || 'publishedAt';
+  const viewParam = c.req.query('view');
+  const view = viewParam === 'recommended' || viewParam === 'latest' ? viewParam : null;
+  const requestedSortBy = c.req.query('sortBy') || (view === 'recommended' ? 'priority' : 'publishedAt');
+  const eventCollapseEnabled = eventCollapseFeatureEnabled();
+  const requestedCollapseEvents = resolveEventCollapsePreference({
+    enabled: eventCollapseEnabled,
+    requested: c.req.query('collapseEvents'),
+    view,
+  });
+  const listQuery = normalizeItemListQuery({
+    minScore: c.req.query('minScore'),
+    maxScore: c.req.query('maxScore'),
+    sourceTier,
+    readingTier,
+    growthAxis,
+    sortBy: requestedSortBy,
+    collapseEvents: requestedCollapseEvents,
+  });
   const sourceId = c.req.query('sourceId');
+  const includeArchivedSources = c.req.query('includeArchivedSources') === 'true';
+  const includeReferenceSources = c.req.query('includeReferenceSources') === 'true';
   const includeFiltered = c.req.query('includeFiltered') === 'true';
   const bucket = c.req.query('bucket');
   const qualityDecision = c.req.query('qualityDecision');
@@ -285,6 +579,8 @@ app.get('/', async (c) => {
   const restored = c.req.query('restored');
 
   const conditions: SQL<unknown>[] = [eq(schema.items.userId, authUser.userId)];
+  if (!includeArchivedSources) conditions.push(eq(schema.sources.status, 'active'));
+  if (!includeReferenceSources) conditions.push(mainReadingSourceCondition());
   if (bucket === 'filtered') {
     conditions.push(eq(schema.items.filterBucket, 'filtered'));
   } else {
@@ -294,7 +590,11 @@ app.get('/', async (c) => {
   if (isRead !== undefined) conditions.push(eq(schema.items.isRead, isRead === 'true'));
   if (isFavorite !== undefined) conditions.push(eq(schema.items.isFavorite, isFavorite === 'true'));
   if (sourceType) conditions.push(eq(schema.items.sourceType, sourceType));
-  if (sourceTier) conditions.push(eq(schema.items.sourceTier, sourceTier));
+  if (listQuery.sourceTier) conditions.push(eq(schema.items.sourceTier, listQuery.sourceTier));
+  if (listQuery.readingTier) conditions.push(buildSourceReadingTierCondition(listQuery.readingTier));
+  if (listQuery.growthAxis) conditions.push(sql`coalesce(${schema.items.growthAxes}, '[]'::jsonb) ? ${listQuery.growthAxis}`);
+  if (listQuery.minScore != null) conditions.push(gte(schema.items.aiScore, listQuery.minScore));
+  if (listQuery.maxScore != null) conditions.push(sql`${schema.items.aiScore} <= ${listQuery.maxScore}`);
   if (collectorType) conditions.push(eq(schema.sources.collectorType, collectorType));
   if (category) conditions.push(eq(schema.sources.category, category));
   if (monitorOnly) conditions.push(eq(schema.sources.sourceRole, 'monitor'));
@@ -310,93 +610,104 @@ app.get('/', async (c) => {
     );
     if (searchCondition) conditions.push(searchCondition);
   }
+  if (shouldExcludeSnapshotLikeItemsFromDefaultFeed({
+    sourceId,
+    sourceType,
+    collectorType,
+    search,
+    category,
+    monitorOnly,
+  })) {
+    conditions.push(sql`not (
+      ${schema.items.sourceType} = 'webpage'
+      or ${schema.sources.collectorType} = 'webpage'
+      or coalesce(${schema.items.url}, '') ilike '%#snapshot-%'
+      or ${schema.items.title} ~* 'newsroom\\s*(\\\\|\\|)\\s*anthropic'
+    )`);
+  }
 
-  const rows = await db
-    .select({
-      id: schema.items.id,
-      sourceId: schema.items.sourceId,
-      sourceType: schema.items.sourceType,
-      sourceTier: schema.items.sourceTier,
-      processingProfile: schema.items.processingProfile,
-      growthAxes: schema.items.growthAxes,
-      clusterId: schema.items.clusterId,
-      title: schema.items.title,
-      url: schema.items.url,
-      author: schema.items.author,
-      snippet: schema.items.snippet,
-      publishedAt: schema.items.publishedAt,
-      fetchedAt: schema.items.fetchedAt,
-      aiScore: schema.items.aiScore,
-      aiSummary: schema.items.aiSummary,
-      aiTags: schema.items.aiTags,
-      priorityScore: schema.items.priorityScore,
-      mediaUrl: schema.items.mediaUrl,
-      mediaType: schema.items.mediaType,
-      audioStatus: schema.items.audioStatus,
-      audioStatusReason: schema.items.audioStatusReason,
-      audioTaskId: schema.items.audioTaskId,
-      isRead: schema.items.isRead,
-      isFavorite: schema.items.isFavorite,
-      isLater: schema.items.isLater,
-      processingStatus: schema.items.processingStatus,
-      isFiltered: schema.items.isFiltered,
-      filterReason: schema.items.filterReason,
-      qualityDecision: schema.items.qualityDecision,
-      qualitySummary: schema.items.qualitySummary,
-      qualityReason: schema.items.qualityReason,
-      qualityTags: schema.items.qualityTags,
-      qualityRiskFlags: schema.items.qualityRiskFlags,
-      qualityScore: schema.items.qualityScore,
-      qualityConfidence: schema.items.qualityConfidence,
-      qualityCheckedAt: schema.items.qualityCheckedAt,
-      filterBucket: schema.items.filterBucket,
-      restoredAt: schema.items.restoredAt,
-      restoredFromFilter: schema.items.restoredFromFilter,
-      contentStatus: schema.items.contentStatus,
-      contentError: schema.items.contentError,
-      fetchEngine: schema.items.fetchEngine,
-      renderMode: schema.items.renderMode,
-      blockedReason: schema.items.blockedReason,
-      summaryStatus: schema.items.summaryStatus,
-      summaryBasis: schema.items.summaryBasis,
-      summaryReason: schema.items.summaryReason,
-      translationStatus: schema.items.translationStatus,
-      translationReason: schema.items.translationReason,
-      sourceName: schema.sources.name,
-      sourceCategory: schema.sources.category,
-      sourceCollectorType: schema.sources.collectorType,
-      sourceKind: schema.sources.sourceKind,
-      authorityWeight: schema.sources.authorityWeight,
-      sourceConfig: schema.sources.config,
-      contentLength: sql<number>`coalesce(length(trim(${schema.items.content})), 0)`,
-      snippetLength: sql<number>`coalesce(length(trim(${schema.items.snippet})), 0)`,
-    })
-    .from(schema.items)
-    .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
-    .where(and(...conditions))
-    .orderBy(
-      sortBy === 'priority'
-        ? desc(schema.items.priorityScore)
-        : desc(sql`coalesce(${schema.items.publishedAt}, ${schema.items.fetchedAt})`),
-    )
-    .limit(limit)
-    .offset(offset);
+  const primaryOrder = listQuery.sortBy === 'score'
+    ? desc(sql`coalesce(${schema.items.aiScore}, -1)`)
+    : listQuery.sortBy === 'priority'
+      ? desc(feedPriorityRankSql)
+      : desc(sql`coalesce(${schema.items.publishedAt}, ${schema.items.fetchedAt})`);
+  const recencyOrder = desc(sql`coalesce(${schema.items.publishedAt}, ${schema.items.fetchedAt})`);
 
-  const totalResult = await db
-    .select({ count: count() })
-    .from(schema.items)
-    .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
-    .where(and(...conditions));
-  const total = totalResult[0]?.count || 0;
+  let rows: Array<Record<string, any>> = [];
+  let total = 0;
+
+  if (listQuery.collapseEvents) {
+    const eventIndexRows = await db
+      .select(feedEventIndexSelection)
+      .from(schema.items)
+      .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+      .where(and(...conditions))
+      .orderBy(primaryOrder, recencyOrder);
+    const clusterIds = [...new Set(
+      eventIndexRows.map((row) => row.clusterId).filter((value): value is string => Boolean(value)),
+    )];
+    const evidenceConditions: SQL<unknown>[] = [
+      eq(schema.items.userId, authUser.userId),
+      eq(schema.items.filterBucket, 'main'),
+      eq(schema.items.isFiltered, false),
+      sql`coalesce(${schema.sources.config}->>'integrationStatus', 'active') not in ('shadow', 'paused', 'removed')`,
+    ];
+    if (!includeArchivedSources) evidenceConditions.push(eq(schema.sources.status, 'active'));
+    if (clusterIds.length > 0) evidenceConditions.push(inArray(schema.items.clusterId, clusterIds));
+    const evidenceRows = clusterIds.length > 0
+      ? await db
+        .select(feedEventIndexSelection)
+        .from(schema.items)
+        .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+        .where(and(...evidenceConditions))
+        .orderBy(primaryOrder, recencyOrder)
+      : eventIndexRows;
+    const collapsedRows = collapseEventClusterItems(eventIndexRows, evidenceRows);
+    const pageRows = collapsedRows.slice(offset, offset + limit);
+    const pageIds = pageRows.map((row) => row.id);
+    const selectedRows = pageIds.length > 0
+      ? await db
+        .select(feedItemListSelection)
+        .from(schema.items)
+        .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+        .where(and(...conditions, inArray(schema.items.id, pageIds)))
+      : [];
+    const selectedById = new Map(selectedRows.map((row) => [row.id, row]));
+    rows = pageRows
+      .map((row) => {
+        const selected = selectedById.get(row.id);
+        return selected ? { ...selected, eventContext: row.eventContext } : null;
+      })
+      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+    total = collapsedRows.length;
+  } else {
+    rows = await db
+      .select(feedItemListSelection)
+      .from(schema.items)
+      .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+      .where(and(...conditions))
+      .orderBy(primaryOrder, recencyOrder)
+      .limit(limit)
+      .offset(offset);
+    const totalResult = await db
+      .select({ count: count() })
+      .from(schema.items)
+      .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+      .where(and(...conditions));
+    total = totalResult[0]?.count || 0;
+  }
 
   return c.json({
     data: rows.map((row) => mapFeedItemResponse({
       ...row,
       snippet: cleanPreviewText(row.snippet, 220) ?? null,
-    })),
+    }, { view, sortBy: listQuery.sortBy })),
     total,
     hasMore: offset + limit < total,
     nextOffset: offset + limit < total ? offset + limit : null,
+    eventCollapseEnabled,
+    collapsedEvents: listQuery.collapseEvents,
+    eventCountOnPage: listQuery.collapseEvents ? rows.length : null,
   });
 });
 
@@ -408,6 +719,15 @@ app.get('/stats', async (c) => {
     eq(schema.items.userId, authUser.userId),
     eq(schema.items.filterBucket, 'main'),
     eq(schema.items.isFiltered, false),
+    sql`exists (
+      select 1
+      from hub.sources active_source
+      where active_source.id = ${schema.items.sourceId}
+        and active_source.user_id = ${authUser.userId}::uuid
+        and active_source.status = 'active'
+        and coalesce(active_source.source_role, 'normal') not in ('radar', 'reference')
+        and coalesce(active_source.config->>'integrationStatus', 'active') not in ('shadow', 'paused', 'removed')
+    )`,
   );
   const [total, unread, favorites, today, allRows, filteredRows, mismatchedRows] = await Promise.all([
     db.select({ count: count() }).from(schema.items).where(visibleCondition),
@@ -470,10 +790,15 @@ app.post('/reprocess', async (c) => {
     .select({
       id: schema.items.id,
       sourceId: schema.items.sourceId,
+      sourceType: schema.items.sourceType,
+      sourceCollectorType: schema.sources.collectorType,
+      originalUrl: schema.items.originalUrl,
       fetchedAt: schema.items.fetchedAt,
       contentStatus: schema.items.contentStatus,
       contentLength: sql<number>`coalesce(length(trim(${schema.items.content})), 0)`,
       snippetLength: sql<number>`coalesce(length(trim(${schema.items.snippet})), 0)`,
+      fetchEngine: schema.items.fetchEngine,
+      renderMode: schema.items.renderMode,
       aiScore: schema.items.aiScore,
       summaryBasis: schema.items.summaryBasis,
       processingStatus: schema.items.processingStatus,
@@ -484,6 +809,7 @@ app.post('/reprocess', async (c) => {
       qualityTags: schema.items.qualityTags,
     })
     .from(schema.items)
+    .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
     .where(and(...conditions))
     .orderBy(desc(schema.items.fetchedAt))
     .limit(Math.max(request.limit * 5, request.limit));
@@ -564,14 +890,20 @@ app.post('/reprocess', async (c) => {
     if (result.errors.length > 0) errors.summary = result.errors;
   }
   if (shouldRun('translation') && scenes.has('translation')) {
-    const result = await translateItemsDetailed(authUser.userId, itemIds.length, { itemIds });
-    translated = result.processed;
-    skipped.translation = result.skipped || 0;
-    if (result.errors.length > 0) errors.translation = result.errors;
+    for (const itemId of itemIds) {
+      const queued = await enqueueItemTranslationJob({
+        userId: authUser.userId,
+        itemId,
+        mode: 'manual',
+        trigger: 'manual',
+        force: true,
+      });
+      if (queued.enqueued) translated++;
+    }
   }
 
   return c.json({
-    message: 'Batch reprocess complete',
+    message: shouldRun('translation') ? 'Batch reprocess complete; translation jobs queued' : 'Batch reprocess complete',
     request,
     matched: itemIds.length,
     content,
@@ -623,7 +955,6 @@ app.post('/:id/reprocess-ai', async (c) => {
     aiScore: null,
     aiSummary: null,
     aiTags: [],
-    aiTranslation: null,
     summaryStatus: 'pending',
     summaryBasis: null,
     summaryReason: null,
@@ -666,7 +997,14 @@ app.post('/:id/reprocess-ai', async (c) => {
     summarized = await summarizeItems(authUser.userId, 1, { itemId: id });
   }
   if (hasTranslation) {
-    translated = await translateItemsWithOptions(authUser.userId, 1, { itemId: id });
+    const queued = await enqueueItemTranslationJob({
+      userId: authUser.userId,
+      itemId: id,
+      mode: 'manual',
+      trigger: 'manual',
+      force: true,
+    });
+    translated = queued.enqueued ? 1 : 0;
   }
 
   const refreshed = await db.select()
@@ -800,7 +1138,6 @@ app.post('/:id/enrich', async (c) => {
     }).where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)));
   } else if (shouldTranslate) {
     await db.update(schema.items).set({
-      aiTranslation: null,
       translationStatus: 'pending',
       translationReason: null,
       processingStatus: 'summarized',
@@ -829,9 +1166,15 @@ app.post('/:id/enrich', async (c) => {
     if (summarization.errors.length > 0) warnings.push(...summarization.errors);
   }
   if (shouldTranslate) {
-    const translation = await translateItemsDetailed(authUser.userId, 1, { itemId: id });
-    translated = translation.processed;
-    if (translation.errors.length > 0) warnings.push(...translation.errors);
+    const queued = await enqueueItemTranslationJob({
+      userId: authUser.userId,
+      itemId: id,
+      mode: 'manual',
+      trigger: 'manual',
+      force: true,
+    });
+    translated = queued.enqueued ? 1 : 0;
+    warnings.push(queued.enqueued ? '翻译任务已进入队列' : '翻译任务已在队列中');
   }
 
   const refreshed = await db.select()
@@ -1116,6 +1459,288 @@ app.post('/:id/restore', async (c) => {
   });
 });
 
+// GET /api/items/translate-full/jobs/:jobId — 全文翻译任务状态
+app.get('/translate-full/jobs/:jobId', async (c) => {
+  const authUser = requireAuth(c);
+  const jobId = c.req.param('jobId');
+  const job = await itemTranslationQueue.getJob(jobId);
+  if (!job || job.data?.userId !== authUser.userId) {
+    return c.json({ error: 'Full translation job not found', jobId }, 404);
+  }
+  return c.json({ data: await serializeItemTranslationJob(job) });
+});
+
+// POST /api/items/:id/translate-full — 显式按全文重跑翻译
+app.post('/:id/translate-full', async (c) => {
+  const authUser = requireAuth(c);
+  const id = c.req.param('id');
+  await c.req.json().catch(() => ({}));
+  const exists = await db.select({ id: schema.items.id })
+    .from(schema.items)
+    .where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)))
+    .limit(1);
+  if (exists.length === 0) return c.json({ error: 'Item not found' }, 404);
+
+  const queued = await enqueueItemTranslationJob({
+    userId: authUser.userId,
+    itemId: id,
+    mode: 'manual',
+    trigger: 'manual',
+    force: true,
+  });
+  const status = await serializeItemTranslationJob(queued.job);
+  return c.json({
+    data: status,
+    jobId: status?.jobId || String(queued.job.id || ''),
+    pollUrl: `/api/items/translate-full/jobs/${encodeURIComponent(String(queued.job.id || ''))}`,
+    enqueued: queued.enqueued,
+    status: status?.state || 'waiting',
+    message: queued.enqueued ? '全文翻译任务已创建。' : '全文翻译任务已在运行。',
+  });
+});
+
+// POST /api/items/:id/assets — 生成并保存文章级阅读资产
+app.post('/:id/assets', async (c) => {
+  const authUser = requireAuth(c);
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  let request;
+  try {
+    request = normalizeArticleAssetGenerationRequest(body);
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 400);
+  }
+
+  const itemRows = await db
+    .select({
+      id: schema.items.id,
+      userId: schema.items.userId,
+      title: schema.items.title,
+      url: schema.items.url,
+      aiSummary: schema.items.aiSummary,
+      aiTranslation: schema.items.aiTranslation,
+      content: schema.items.content,
+      snippet: schema.items.snippet,
+      contentStatus: schema.items.contentStatus,
+      sourceName: schema.sources.name,
+      sourceCategory: schema.sources.category,
+    })
+    .from(schema.items)
+    .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+    .where(and(eq(schema.items.id, id), eq(schema.items.userId, authUser.userId)))
+    .limit(1);
+
+  const item = itemRows[0];
+  if (!item) return c.json({ error: 'Item not found' }, 404);
+
+  const existingRows = await db
+    .select()
+    .from(schema.itemReadingAssets)
+    .where(and(
+      eq(schema.itemReadingAssets.userId, authUser.userId),
+      eq(schema.itemReadingAssets.itemId, id),
+      eq(schema.itemReadingAssets.assetType, request.assetType),
+      eq(schema.itemReadingAssets.promptKey, request.promptKey),
+    ))
+    .limit(1);
+  if (existingRows[0]?.status === 'ready' && existingRows[0].content && !request.force) {
+    const savedAssets = await getSavedReadingAssets(authUser.userId, id);
+    return c.json({
+      data: {
+        asset: buildReadingAssetRecords(existingRows)[0],
+        item: mergeSavedReadingAssets(mapFeedItemResponse(item), savedAssets),
+      },
+    });
+  }
+
+  const source = resolveArticleAssetSource(item);
+  const label = resolveArticleAssetPromptLabel(request.promptKey);
+  if (!source.canGenerate) {
+    const now = new Date();
+    const rows = await db.insert(schema.itemReadingAssets).values({
+      itemId: id,
+      userId: authUser.userId,
+      assetType: request.assetType,
+      promptKey: request.promptKey,
+      label,
+      status: 'failed',
+      basis: source.basis,
+      content: null,
+      preview: source.reason || null,
+      source: 'ai',
+      metadata: { reason: source.reason },
+      errorReason: source.reason || '内容不足，无法生成文章资产',
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [
+        schema.itemReadingAssets.userId,
+        schema.itemReadingAssets.itemId,
+        schema.itemReadingAssets.assetType,
+        schema.itemReadingAssets.promptKey,
+      ],
+      set: {
+        status: 'failed',
+        basis: source.basis,
+        content: null,
+        preview: source.reason || null,
+        metadata: { reason: source.reason },
+        errorReason: source.reason || '内容不足，无法生成文章资产',
+        updatedAt: now,
+      },
+    }).returning();
+    return c.json({ error: source.reason || '内容不足，无法生成文章资产', data: { asset: buildReadingAssetRecords(rows)[0] } }, 422);
+  }
+
+  const config = await getActiveAiConfig(authUser.userId, 'summary');
+  if (!config) {
+    return c.json({ error: '缺少文章资产模型配置：请先启用摘要模型。' }, 400);
+  }
+
+  const prompt = buildArticleAssetPrompt({
+    promptKey: request.promptKey,
+    title: item.title,
+    url: item.url,
+    sourceName: item.sourceName || null,
+    source,
+  });
+
+  try {
+    const result = await callLLM(config, prompt, { maxTokens: AI_TOKEN_BUDGETS.articleAsset });
+    const content = result.text.trim();
+    if (!content) throw new Error('模型没有返回可保存内容');
+    const now = new Date();
+    const rows = await db.insert(schema.itemReadingAssets).values({
+      itemId: id,
+      userId: authUser.userId,
+      assetType: request.assetType,
+      promptKey: request.promptKey,
+      label,
+      status: 'ready',
+      basis: source.basis,
+      content,
+      preview: previewText(content),
+      source: 'ai',
+      provider: result.provider || config.provider,
+      modelName: result.model || config.model,
+      modelConfigId: config.modelConfigId || null,
+      promptTemplateId: config.promptTemplateId || null,
+      metadata: { force: request.force },
+      errorReason: null,
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [
+        schema.itemReadingAssets.userId,
+        schema.itemReadingAssets.itemId,
+        schema.itemReadingAssets.assetType,
+        schema.itemReadingAssets.promptKey,
+      ],
+      set: {
+        label,
+        status: 'ready',
+        basis: source.basis,
+        content,
+        preview: previewText(content),
+        source: 'ai',
+        provider: result.provider || config.provider,
+        modelName: result.model || config.model,
+        modelConfigId: config.modelConfigId || null,
+        promptTemplateId: config.promptTemplateId || null,
+        metadata: { force: request.force },
+        errorReason: null,
+        updatedAt: now,
+      },
+    }).returning();
+
+    await logAiUsage({
+      userId: authUser.userId,
+      sceneType: 'article_asset',
+      status: 'success',
+      provider: result.provider || config.provider,
+      modelName: result.model || config.model,
+      endpointId: result.endpointId || null,
+      modelConfigId: config.modelConfigId || null,
+      promptTemplateId: config.promptTemplateId || null,
+      targetType: 'item_asset',
+      targetId: `${id}:${request.promptKey}`,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      totalTokens: result.totalTokens,
+      estimatedCost: result.estimatedCost,
+      latencyMs: result.latencyMs,
+      providerRequestId: result.providerRequestId,
+      apiKind: result.apiKind,
+      promptPreview: prompt,
+      responsePreview: content,
+      label: `${label} · ${item.title}`,
+    });
+
+    const savedAssets = await getSavedReadingAssets(authUser.userId, id);
+    return c.json({
+      data: {
+        asset: buildReadingAssetRecords(rows)[0],
+        item: mergeSavedReadingAssets(mapFeedItemResponse(item), savedAssets),
+      },
+    });
+  } catch (err) {
+    const message = (err as Error).message;
+    const now = new Date();
+    const rows = await db.insert(schema.itemReadingAssets).values({
+      itemId: id,
+      userId: authUser.userId,
+      assetType: request.assetType,
+      promptKey: request.promptKey,
+      label,
+      status: 'failed',
+      basis: source.basis,
+      content: null,
+      preview: message,
+      source: 'ai',
+      provider: config.provider,
+      modelName: config.model,
+      modelConfigId: config.modelConfigId || null,
+      promptTemplateId: config.promptTemplateId || null,
+      metadata: { force: request.force },
+      errorReason: message,
+      updatedAt: now,
+    }).onConflictDoUpdate({
+      target: [
+        schema.itemReadingAssets.userId,
+        schema.itemReadingAssets.itemId,
+        schema.itemReadingAssets.assetType,
+        schema.itemReadingAssets.promptKey,
+      ],
+      set: {
+        label,
+        status: 'failed',
+        basis: source.basis,
+        content: null,
+        preview: message,
+        provider: config.provider,
+        modelName: config.model,
+        modelConfigId: config.modelConfigId || null,
+        promptTemplateId: config.promptTemplateId || null,
+        metadata: { force: request.force },
+        errorReason: message,
+        updatedAt: now,
+      },
+    }).returning();
+    await logAiUsage({
+      userId: authUser.userId,
+      sceneType: 'article_asset',
+      status: 'error',
+      provider: config.provider,
+      modelName: config.model,
+      modelConfigId: config.modelConfigId || null,
+      promptTemplateId: config.promptTemplateId || null,
+      targetType: 'item_asset',
+      targetId: `${id}:${request.promptKey}`,
+      label: `${label} · ${item.title}`,
+      errorMessage: message,
+    });
+    return c.json({ error: message, data: { asset: buildReadingAssetRecords(rows)[0] } }, 500);
+  }
+});
+
 // GET /api/items/:id — 详情
 app.get('/:id', async (c) => {
   const authUser = requireAuth(c);
@@ -1146,6 +1771,7 @@ app.get('/:id', async (c) => {
       sourceName: schema.sources.name,
       sourceCategory: schema.sources.category,
       sourceCollectorType: schema.sources.collectorType,
+      sourceRole: schema.sources.sourceRole,
       sourceKind: schema.sources.sourceKind,
       authorityWeight: schema.sources.authorityWeight,
       sourceConfig: schema.sources.config,
@@ -1154,23 +1780,38 @@ app.get('/:id', async (c) => {
     .where(and(eq(schema.sources.id, item.sourceId), eq(schema.sources.userId, authUser.userId)))
     .limit(1);
 
-  const [latestFeedback, dailyReportDiagnostic] = await Promise.all([
+  const { dateKey: reportDateKey } = resolveDailyReportWindow(item.fetchedAt || new Date());
+  const [latestFeedback, dailyReportDiagnostic, savedReadingAssets] = await Promise.all([
     getLatestItemFeedback(authUser.userId, id),
     buildItemDailyReportDiagnostic(authUser.userId, id, item.fetchedAt),
+    getSavedReadingAssets(authUser.userId, id),
   ]);
   const relatedRows = item.clusterId
     ? await db
       .select({
         id: schema.items.id,
+        clusterId: schema.items.clusterId,
+        sourceId: schema.items.sourceId,
         title: schema.items.title,
+        translatedTitle: schema.items.translatedTitle,
+        aiTags: schema.items.aiTags,
         url: schema.items.url,
+        originalUrl: schema.items.originalUrl,
+        curationUrl: schema.items.curationUrl,
+        curationSource: schema.items.curationSource,
+        curationMeta: schema.items.curationMeta,
         aiScore: schema.items.aiScore,
         priorityScore: schema.items.priorityScore,
         publishedAt: schema.items.publishedAt,
         fetchedAt: schema.items.fetchedAt,
         sourceName: schema.sources.name,
+        sourceCategory: schema.sources.category,
+        sourceType: schema.items.sourceType,
+        sourceCollectorType: schema.sources.collectorType,
+        sourceConfig: schema.sources.config,
         sourceTier: schema.items.sourceTier,
         sourceKind: schema.sources.sourceKind,
+        sourceRole: schema.sources.sourceRole,
         authorityWeight: schema.sources.authorityWeight,
       })
       .from(schema.items)
@@ -1179,23 +1820,50 @@ app.get('/:id', async (c) => {
         eq(schema.items.userId, authUser.userId),
         eq(schema.items.clusterId, item.clusterId),
         eq(schema.items.isFiltered, false),
+        eq(schema.items.filterBucket, 'main'),
+        eq(schema.sources.status, 'active'),
+        sql`coalesce(${schema.sources.config}->>'integrationStatus', 'active') not in ('shadow', 'paused', 'removed')`,
       ))
       .orderBy(desc(schema.items.priorityScore), desc(sql`coalesce(${schema.items.publishedAt}, ${schema.items.fetchedAt})`))
-      .limit(10)
+      .limit(30)
     : [];
   const clusterLead = selectEventClusterLead(relatedRows.map((row) => ({
     id: row.id,
     sourceTier: row.sourceTier,
+    sourceName: row.sourceName,
+    sourceCategory: row.sourceCategory,
+    sourceType: row.sourceType,
+    sourceCollectorType: row.sourceCollectorType,
+    sourceRole: row.sourceRole,
+    sourceConfig: row.sourceConfig,
     sourceKind: row.sourceKind,
     authorityWeight: row.authorityWeight,
     aiScore: row.aiScore,
     priorityScore: row.priorityScore,
     publishedAt: row.publishedAt || row.fetchedAt,
   })));
+  const eventContext = item.clusterId
+    ? buildEventContext(relatedRows, clusterLead?.id || item.id)
+    : null;
+
+  const mappedItem = mergeSavedReadingAssets(mapFeedItemResponse({
+    ...item,
+    content,
+    snippet,
+    sourceName: sourceRows[0]?.sourceName || null,
+    sourceCategory: sourceRows[0]?.sourceCategory || null,
+    sourceCollectorType: sourceRows[0]?.sourceCollectorType || null,
+    sourceRole: sourceRows[0]?.sourceRole || null,
+    sourceKind: sourceRows[0]?.sourceKind || null,
+    authorityWeight: sourceRows[0]?.authorityWeight || null,
+    sourceConfig: sourceRows[0]?.sourceConfig || null,
+    latestFeedbackType: latestFeedback?.feedbackType || null,
+    dailyReportDiagnostic,
+  }, { view: 'recommended', sortBy: 'priority', date: reportDateKey }), savedReadingAssets);
 
   return c.json({
     data: {
-      ...mapFeedItemResponse(item),
+      ...mappedItem,
       content: content ?? null,
       snippet: cleanPreviewText(snippet || content, 220) ?? null,
       contentBasis: classifyContentBasisFromLengths({
@@ -1205,12 +1873,14 @@ app.get('/:id', async (c) => {
       sourceName: sourceRows[0]?.sourceName || null,
       sourceCategory: sourceRows[0]?.sourceCategory || null,
       sourceCollectorType: sourceRows[0]?.sourceCollectorType || null,
+      sourceRole: sourceRows[0]?.sourceRole || null,
       sourceKind: sourceRows[0]?.sourceKind || null,
       authorityWeight: sourceRows[0]?.authorityWeight || null,
       sourceConfig: sourceRows[0]?.sourceConfig || null,
       growthAxes: normalizeGrowthAxes(item.growthAxes, []),
       latestFeedbackType: latestFeedback?.feedbackType || null,
       dailyReportDiagnostic,
+      eventContext,
       eventCluster: item.clusterId ? {
         clusterId: item.clusterId,
         leadItemId: clusterLead?.id || item.id,

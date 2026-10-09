@@ -1,3 +1,8 @@
+import { Buffer } from 'node:buffer';
+import chardet from 'chardet';
+import DOMPurify from 'dompurify';
+import { parseHTML } from 'linkedom/worker';
+import { Readability } from '@mozilla/readability';
 import { fetch } from 'undici';
 import { fetchBrowserAssist } from './browser-assist-client.js';
 import {
@@ -8,6 +13,7 @@ import {
 
 export type FetchEngine =
   | 'native'
+  | 'readability'
   | 'scrapling-http'
   | 'scrapling-dynamic'
   | 'scrapling-stealth'
@@ -16,17 +22,47 @@ export type FetchEngine =
 export interface ExtractedArticleResult {
   title: string | null;
   content: string | null;
+  readabilityContent?: string | null;
   fetchEngine: FetchEngine | null;
   renderMode: string | null;
   blockedReason: string | null;
 }
 
 interface ExtractionPreference {
+  beforeDynamicFetch?: () => void;
   renderMode?: string | null;
   browserProvider?: string | null;
+  fetchImpl?: FetchImpl;
 }
 
 const USER_AGENT = 'InfoHub/3.1 (+content-extractor)';
+const BROWSER_LIKE_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36';
+
+type FetchResponseLike = {
+  ok: boolean;
+  status: number;
+  url?: string;
+  headers: { get: (name: string) => string | null };
+  arrayBuffer: () => Promise<ArrayBuffer>;
+  body?: {
+    getReader: () => {
+      read: () => Promise<{ done: boolean; value?: Uint8Array }>;
+      cancel?: () => Promise<void> | void;
+    };
+  } | null;
+};
+
+type FetchImpl = (url: string, init?: Record<string, unknown>) => Promise<FetchResponseLike>;
+
+export type HtmlDocumentFetchResult = {
+  ok: boolean;
+  status: number;
+  url: string;
+  contentType: string;
+  html: string;
+};
+
+export const DEFAULT_MAX_CONTENT_RESPONSE_BYTES = 5 * 1024 * 1024;
 
 const MAIN_BLOCK_PATTERNS: RegExp[] = [
   /<article\b[^>]*>([\s\S]*?)<\/article>/i,
@@ -71,6 +107,16 @@ function decodeHtmlEntities(input: string): string {
     });
 }
 
+function decodeHtmlEntitiesDeep(input: string): string {
+  let previous = input;
+  for (let i = 0; i < 3; i += 1) {
+    const next = decodeHtmlEntities(previous);
+    if (next === previous) return next;
+    previous = next;
+  }
+  return previous;
+}
+
 function stripTagsToText(input: string): string {
   return decodeHtmlEntities(
     input
@@ -87,6 +133,247 @@ function stripTagsToText(input: string): string {
       .replace(/\n{3,}/g, '\n\n')
       .trim(),
   );
+}
+
+function sanitizeHTMLString(dirtyDocumentString: string): string {
+  const parser = parseHTML(dirtyDocumentString) as any;
+  const purify = (DOMPurify as unknown as (window: unknown) => { sanitize: (value: string) => string })(parser.window || parser);
+  return purify.sanitize(dirtyDocumentString);
+}
+
+function resolveRelativeUrl(rawUrl: string, baseUrl: string): string {
+  if (!rawUrl) return '';
+  try {
+    return new URL(rawUrl, baseUrl).toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+function absolutizeDocumentUrls(document: any, baseUrl: string) {
+  document.querySelectorAll('a').forEach((anchor: any) => {
+    const href = anchor.getAttribute('href') || '';
+    if (href) anchor.setAttribute('href', resolveRelativeUrl(href, baseUrl));
+  });
+  (['img', 'audio', 'video', 'source'] as const).forEach((tag) => {
+    document.querySelectorAll(tag).forEach((node: any) => {
+      const src = node.getAttribute('src') || '';
+      if (src) node.setAttribute('src', resolveRelativeUrl(src, baseUrl));
+    });
+  });
+}
+
+function removeReadabilityNoise(document: any) {
+  document.querySelectorAll('.mobile-date-eyebrow, .entryFooter, .edit-page-link').forEach((element: any) => element.remove());
+  const noisePattern = /(?:^|[-_\s])(?:sponsor(?:ed|ship)?|advert(?:isement|ising)?|promo(?:tion)?)(?:$|[-_\s])/i;
+  document.querySelectorAll('*').forEach((element: any) => {
+    const marker = [
+      element.getAttribute?.('id'),
+      element.getAttribute?.('class'),
+      element.getAttribute?.('aria-label'),
+      element.getAttribute?.('data-testid'),
+    ].filter(Boolean).join(' ');
+    if (noisePattern.test(marker)) element.remove();
+  });
+}
+
+function extractPreferredArticleMarkdown(document: any, baseUrl: string): string {
+  const selectors = [
+    '[itemprop="articleBody"]',
+    '.article-content',
+    '.post-content',
+    '.entry-content',
+    '.content-body',
+    'article',
+    '.entryPage',
+  ];
+  for (const selector of selectors) {
+    const candidates = Array.from(document.querySelectorAll(selector) as any[])
+      .map((node: any) => htmlFragmentToMarkdown(node.innerHTML || '', baseUrl).trim())
+      .filter((value) => plainTextLength(value) >= 80)
+      .sort((left, right) => plainTextLength(right) - plainTextLength(left));
+    if (candidates[0]) return candidates[0];
+  }
+  return '';
+}
+
+function textFromNode(node: any): string {
+  return decodeHtmlEntitiesDeep(node.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function markdownFromNode(node: any, depth = 0): string {
+  if (node.nodeType === 3) {
+    return decodeHtmlEntitiesDeep(node.textContent || '').replace(/\s+/g, ' ');
+  }
+  if (node.nodeType !== 1) return '';
+
+  const element = node;
+  const tag = element.tagName.toLowerCase();
+  if (['script', 'style', 'noscript', 'svg', 'button', 'form', 'iframe'].includes(tag)) return '';
+
+  const children = () => Array.from(element.childNodes)
+    .map((child) => markdownFromNode(child, depth))
+    .join('')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (/^h[1-6]$/.test(tag)) {
+    const level = Number(tag.slice(1));
+    const text = children() || textFromNode(element);
+    return text ? `\n\n${'#'.repeat(level)} ${text}\n\n` : '';
+  }
+  if (tag === 'p') {
+    const text = children() || textFromNode(element);
+    return text ? `\n\n${text}\n\n` : '';
+  }
+  if (tag === 'br') return '\n';
+  if (tag === 'ul' || tag === 'ol') {
+    const items = Array.from(element.children as any[])
+      .filter((child: any) => child.tagName.toLowerCase() === 'li')
+      .map((child: any, index) => {
+        const prefix = tag === 'ol' ? `${index + 1}.` : '-';
+        const item = markdownFromNode(child, depth + 1)
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+        return item ? `${prefix} ${item.replace(/\n/g, '\n  ')}` : '';
+      })
+      .filter(Boolean)
+      .join('\n');
+    return items ? `\n\n${items}\n\n` : '';
+  }
+  if (tag === 'li') return children() || textFromNode(element);
+  if (tag === 'blockquote') {
+    const quote = (children() || textFromNode(element))
+      .split('\n')
+      .map((line) => line.trim() ? `> ${line.trim()}` : '>')
+      .join('\n');
+    return quote ? `\n\n${quote}\n\n` : '';
+  }
+  if (tag === 'pre') {
+    const code = element.textContent || '';
+    return code.trim() ? `\n\n\`\`\`\n${decodeHtmlEntitiesDeep(code).trim()}\n\`\`\`\n\n` : '';
+  }
+  if (tag === 'code') {
+    const code = decodeHtmlEntitiesDeep(element.textContent || '').trim();
+    return code ? `\`${code.replace(/`/g, '\\`')}\`` : '';
+  }
+  if (tag === 'a') {
+    const text = children() || textFromNode(element);
+    const href = element.getAttribute('href') || '';
+    if (!text) return '';
+    return href ? `[${text}](${href})` : text;
+  }
+  if (tag === 'img') {
+    const src = element.getAttribute('src') || '';
+    if (!src) return '';
+    const alt = element.getAttribute('alt') || '';
+    return `\n\n![${alt}](${src})\n\n`;
+  }
+  if (tag === 'hr') return '\n\n---\n\n';
+
+  return children();
+}
+
+export function htmlFragmentToMarkdown(html: string, baseUrl: string): string {
+  const { document } = parseHTML(`<main>${html}</main>`) as any;
+  absolutizeDocumentUrls(document, baseUrl);
+  const root = document.querySelector('main') || document.body || document;
+  return Array.from(root.childNodes)
+    .map((node) => markdownFromNode(node))
+    .join('\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function extractReadabilityArticleFromHtml(html: string, url: string): ExtractedArticleResult | null {
+  if (!html.trim()) return null;
+  const sanitizedDocumentString = sanitizeHTMLString(html);
+  const { document } = parseHTML(sanitizedDocumentString) as any;
+  absolutizeDocumentUrls(document, url);
+  removeReadabilityNoise(document);
+  const preferredArticle = extractPreferredArticleMarkdown(document, url);
+  const reader = new Readability(document as any, {
+    keepClasses: true,
+  });
+  const article = reader.parse();
+  if (!article?.content && !article?.textContent) return null;
+
+  const markdown = article.content
+    ? htmlFragmentToMarkdown(article.content, url)
+    : cleanArticleBody(article.textContent, 50000) || article.textContent || '';
+  const readabilityContent = markdown.trim();
+  const readabilityHasTrailingChrome = /(?:^|\n)#{1,3}\s+Recent articles\b|This is a (?:quotation|article) collected by|(?:^|\n)\[[^\]]+\s+\d{2,}\]\([^)]*\/tags\//i
+    .test(readabilityContent);
+  const content = preferredArticle && (
+    readabilityHasTrailingChrome
+    || plainTextLength(preferredArticle) >= plainTextLength(readabilityContent) * 0.65
+  )
+    ? preferredArticle
+    : readabilityContent;
+  if (plainTextLength(content) < 80) return null;
+
+  return {
+    title: article.title || extractTitleFromHtml(html),
+    content: content.slice(0, 50000),
+    readabilityContent: content.slice(0, 50000),
+    fetchEngine: 'readability',
+    renderMode: 'article',
+    blockedReason: null,
+  };
+}
+
+async function readResponseBodyBytes(
+  resp: Pick<FetchResponseLike, 'arrayBuffer' | 'body' | 'headers'>,
+  maxBytes: number,
+): Promise<Uint8Array | null> {
+  const declaredLength = Number.parseInt(resp.headers.get('content-length') || '', 10);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) return null;
+
+  if (resp.body?.getReader) {
+    const reader = resp.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel?.();
+        return null;
+      }
+      chunks.push(value);
+    }
+
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return merged;
+  }
+
+  const buffer = await resp.arrayBuffer();
+  return buffer.byteLength <= maxBytes ? new Uint8Array(buffer) : null;
+}
+
+async function decodeResponseBodyChars(
+  resp: Pick<FetchResponseLike, 'arrayBuffer' | 'body' | 'headers'>,
+  maxBytes = DEFAULT_MAX_CONTENT_RESPONSE_BYTES,
+): Promise<string | null> {
+  const bytes = await readResponseBodyBytes(resp, maxBytes);
+  if (!bytes) return null;
+  const contentType = resp.headers.get('content-type') || '';
+  const httpCharset = contentType.match(/charset=([\w-]+)/i)?.[1];
+  const detectedCharset = httpCharset || chardet.detect(Buffer.from(bytes)) || 'utf-8';
+  try {
+    return new TextDecoder(detectedCharset, { fatal: false }).decode(bytes);
+  } catch {
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  }
 }
 
 function removeBoilerplateLines(input: string): string {
@@ -200,13 +487,21 @@ function pickReadableLines(input: string): string[] {
   return picked;
 }
 
+export function trimMalformedFeedContinuation(input: string): string {
+  return input
+    .replace(/\r\n/g, '\n')
+    .replace(/\n?```#{1,6}[\s\S]*$/m, '')
+    .trim();
+}
+
 function extractReadableText(input: string): string {
-  const picked = pickReadableLines(input);
+  const trimmed = trimMalformedFeedContinuation(input);
+  const picked = pickReadableLines(trimmed);
   if (picked.length > 0) {
     const body = picked.join('\n');
     return removeBoilerplateLines(body) || body;
   }
-  return removeBoilerplateLines(input) || input;
+  return removeBoilerplateLines(trimmed) || trimmed;
 }
 
 function selectMainHtmlBlock(html: string): string {
@@ -244,7 +539,7 @@ async function fetchPlainText(url: string, timeoutMs: number): Promise<string | 
       redirect: 'follow',
     });
     if (!resp.ok) return null;
-    const text = (await resp.text()).trim();
+    const text = (await decodeResponseBodyChars(resp, DEFAULT_MAX_CONTENT_RESPONSE_BYTES))?.trim() || '';
     return text || null;
   } catch {
     return null;
@@ -391,6 +686,76 @@ function mapScraplingEngine(renderMode?: string | null): FetchEngine {
   }
 }
 
+function buildDefaultFetchHeaders(): Record<string, string> {
+  return {
+    'User-Agent': USER_AGENT,
+    Accept: 'text/html,application/xhtml+xml',
+  };
+}
+
+function buildBrowserLikeFetchHeaders(): Record<string, string> {
+  return {
+    'User-Agent': BROWSER_LIKE_USER_AGENT,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Dest': 'document',
+    'Upgrade-Insecure-Requests': '1',
+  };
+}
+
+function shouldRetryWithBrowserHeaders(response: FetchResponseLike): boolean {
+  return response.status === 401 || response.status === 403 || response.status === 429;
+}
+
+export async function fetchHtmlDocumentWithFallback(
+  url: string,
+  timeoutMs = 8000,
+  options: { fetchImpl?: FetchImpl; maxResponseBytes?: number } = {},
+): Promise<HtmlDocumentFetchResult | null> {
+  const fetchImpl = options.fetchImpl || (fetch as unknown as FetchImpl);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    let response = await fetchImpl(url, {
+      signal: controller.signal,
+      headers: buildDefaultFetchHeaders(),
+      redirect: 'follow',
+    });
+
+    if (shouldRetryWithBrowserHeaders(response)) {
+      response = await fetchImpl(url, {
+        signal: controller.signal,
+        headers: buildBrowserLikeFetchHeaders(),
+        redirect: 'follow',
+      });
+    }
+
+    if (!response.ok) return null;
+
+    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('text/html')) return null;
+
+    const html = await decodeResponseBodyChars(
+      response,
+      options.maxResponseBytes || DEFAULT_MAX_CONTENT_RESPONSE_BYTES,
+    );
+    if (!html) return null;
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      url: response.url || url,
+      contentType,
+      html,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function normalizeRequestedRenderMode(renderMode?: string | null): 'auto' | 'native' | 'dynamic' | 'stealth' | 'browser-assist' {
   switch ((renderMode || '').trim()) {
     case 'native':
@@ -419,6 +784,7 @@ function normalizeRenderedArticle(
   return {
     title: rendered.title || null,
     content: content.slice(0, 50000),
+    readabilityContent: null,
     fetchEngine: mapScraplingEngine(rendered.renderMode),
     renderMode: rendered.renderMode || null,
     blockedReason: rendered.blockedReason || null,
@@ -437,6 +803,7 @@ function normalizeBrowserAssistArticle(
   return {
     title: assisted.title || null,
     content: content.slice(0, 50000),
+    readabilityContent: null,
     fetchEngine: 'browser-assist',
     renderMode: assisted.renderMode || 'browser-assist',
     blockedReason: assisted.blockedReason || null,
@@ -457,6 +824,7 @@ export async function fetchArticleResult(
     : resolvePreferredScraplingMode(url);
 
   if (requestedRenderMode === 'browser-assist') {
+    options.beforeDynamicFetch?.();
     const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article', { provider: browserProvider }));
     if (assisted?.content && plainTextLength(assisted.content) >= 80) {
       return assisted;
@@ -464,32 +832,29 @@ export async function fetchArticleResult(
   }
 
   if (preferredScraplingMode === 'dynamic' || preferredScraplingMode === 'stealth') {
+    options.beforeDynamicFetch?.();
     const rendered = normalizeRenderedArticle(await fetchScraplingArticle(url, preferredScraplingMode));
     if (rendered?.content && plainTextLength(rendered.content) >= 80) {
       return rendered;
     }
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const resp = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': USER_AGENT,
-        Accept: 'text/html,application/xhtml+xml',
-      },
-      redirect: 'follow',
+    const htmlDocument = await fetchHtmlDocumentWithFallback(url, timeoutMs, {
+      fetchImpl: options.fetchImpl,
     });
-
-    if (!resp.ok) return null;
-    const contentType = (resp.headers.get('content-type') || '').toLowerCase();
-    if (!contentType.includes('text/html')) return null;
-
-    const html = await resp.text();
+    if (!htmlDocument) return null;
+    const html = htmlDocument.html;
     if (!html) return null;
     const title = extractTitleFromHtml(html);
+
+    const readabilityArticle = extractReadabilityArticleFromHtml(html, url);
+    if (readabilityArticle?.content && plainTextLength(readabilityArticle.content) >= 80) {
+      return {
+        ...readabilityArticle,
+        title: readabilityArticle.title || title,
+      };
+    }
 
     const preloadMarkdownUrl = extractObsidianPreloadMarkdownUrl(html);
     if (preloadMarkdownUrl) {
@@ -499,6 +864,7 @@ export async function fetchArticleResult(
         return {
           title,
           content: cleanedPreload.slice(0, 50000),
+          readabilityContent: null,
           fetchEngine: 'native',
           renderMode: 'native',
           blockedReason: null,
@@ -524,12 +890,14 @@ export async function fetchArticleResult(
       return {
         title,
         content: best.slice(0, 50000),
+        readabilityContent: null,
         fetchEngine: 'native',
         renderMode: 'native',
         blockedReason: null,
       };
     }
 
+    options.beforeDynamicFetch?.();
     const rendered = normalizeRenderedArticle(await fetchScraplingArticle(url, 'auto'));
     if (rendered?.content && plainTextLength(rendered.content) >= 80) {
       return rendered;
@@ -542,14 +910,13 @@ export async function fetchArticleResult(
 
     return rendered || assisted;
   } catch {
+    options.beforeDynamicFetch?.();
     const rendered = normalizeRenderedArticle(await fetchScraplingArticle(url, preferredScraplingMode));
     if (rendered?.content && plainTextLength(rendered.content) >= 80) {
       return rendered;
     }
     const assisted = normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'article', { provider: browserProvider }));
     return assisted || rendered;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -585,24 +952,12 @@ export async function fetchPageSnapshot(
     }
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const resp = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': USER_AGENT,
-        Accept: 'text/html,application/xhtml+xml',
-      },
-      redirect: 'follow',
+    const htmlDocument = await fetchHtmlDocumentWithFallback(url, timeoutMs, {
+      fetchImpl: options.fetchImpl,
     });
-
-    if (!resp.ok) return null;
-    const contentType = (resp.headers.get('content-type') || '').toLowerCase();
-    if (!contentType.includes('text/html')) return null;
-
-    const html = await resp.text();
+    if (!htmlDocument) return null;
+    const html = htmlDocument.html;
     if (!html) return null;
 
     const preloadMarkdownUrl = extractObsidianPreloadMarkdownUrl(html);
@@ -662,7 +1017,5 @@ export async function fetchPageSnapshot(
     const rendered = normalizeRenderedArticle(await fetchScraplingSnapshot(url, preferredScraplingMode));
     if (rendered?.content) return rendered;
     return normalizeBrowserAssistArticle(await fetchBrowserAssist(url, 'snapshot', { provider: browserProvider }));
-  } finally {
-    clearTimeout(timeout);
   }
 }

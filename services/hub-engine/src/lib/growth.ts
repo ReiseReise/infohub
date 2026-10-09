@@ -1,7 +1,7 @@
 export const GROWTH_AXES = ['认知升级', '技术能力', '商业判断', '表达输出'] as const;
 export type GrowthAxis = typeof GROWTH_AXES[number];
 
-export const SOURCE_TIERS = ['T1', 'T1.5', 'T2', 'S', 'A', 'B', 'C', 'D'] as const;
+export const SOURCE_TIERS = ['S', 'A', 'B', 'C', 'D'] as const;
 export type SourceTier = typeof SOURCE_TIERS[number];
 
 export const PROCESSING_PROFILES = ['full', 'smart', 'brief', 'monitor'] as const;
@@ -9,10 +9,23 @@ export type ProcessingProfile = typeof PROCESSING_PROFILES[number];
 
 const DEFAULT_GROWTH_AXES: GrowthAxis[] = ['认知升级'];
 
+const GROWTH_AXIS_KEYWORDS: Record<GrowthAxis, RegExp[]> = {
+  '认知升级': [/研究/i, /认知/i, /学习/i, /决策/i, /方法/i, /框架/i, /思维/i, /哲学/i, /productivity/i, /workflow/i, /systems thinking/i, /strategy/i],
+  '技术能力': [/技术/i, /模型/i, /工程/i, /代码/i, /开发/i, /agent/i, /api/i, /开源/i, /infra/i, /framework/i, /benchmark/i, /deployment/i, /prompt/i, /llm/i],
+  '商业判断': [/商业/i, /市场/i, /增长/i, /融资/i, /资本/i, /营收/i, /创业/i, /竞争/i, /公司/i, /战略/i, /定价/i, /监管/i, /business/i, /startup/i, /funding/i, /revenue/i, /policy/i],
+  '表达输出': [/写作/i, /表达/i, /内容/i, /传播/i, /叙事/i, /品牌/i, /演讲/i, /营销/i, /播客/i, /newsletter/i, /storytelling/i, /communication/i, /creator/i],
+};
+
+export type GrowthAxisMappingSource = 'explicit' | 'inferred' | 'fallback';
+
+export type GrowthAxisResolution = {
+  primaryAxis: GrowthAxis;
+  secondaryAxes: GrowthAxis[];
+  allAxes: GrowthAxis[];
+  mappingSource: GrowthAxisMappingSource;
+};
+
 const SOURCE_TIER_DEFAULTS: Record<SourceTier, { trust: number; noise: number; processingProfile: ProcessingProfile }> = {
-  T1: { trust: 94, noise: 10, processingProfile: 'full' },
-  'T1.5': { trust: 84, noise: 22, processingProfile: 'smart' },
-  T2: { trust: 64, noise: 45, processingProfile: 'brief' },
   S: { trust: 92, noise: 12, processingProfile: 'full' },
   A: { trust: 78, noise: 24, processingProfile: 'smart' },
   B: { trust: 62, noise: 42, processingProfile: 'brief' },
@@ -36,6 +49,9 @@ export function normalizeGrowthAxes(value: unknown, fallback: GrowthAxis[] = DEF
 
 export function normalizeSourceTier(value: unknown, fallback: SourceTier = 'B'): SourceTier {
   const candidate = String(value || '').trim().toUpperCase();
+  if (candidate === 'T1') return 'S';
+  if (candidate === 'T1.5') return 'A';
+  if (candidate === 'T2') return 'B';
   return SOURCE_TIERS.includes(candidate as SourceTier) ? (candidate as SourceTier) : fallback;
 }
 
@@ -69,6 +85,9 @@ export function defaultSourceTierForContext(input: {
     return 'D';
   }
   if (sourceType === 'podcast' || sourceType === 'audio' || sourceType === 'newsletter') {
+    return 'A';
+  }
+  if (sourceType === 'curated_index' || collectorType === 'webpage_index') {
     return 'A';
   }
   if (collectorType === 'custom') {
@@ -155,24 +174,34 @@ export function deriveSourceProfile(input: {
   };
 }
 
-function inferAxisByKeyword(text: string): GrowthAxis[] {
-  const normalized = text.toLowerCase();
-  const axes = new Set<GrowthAxis>();
+function scoreAxisText(axis: GrowthAxis, text: string, weight: number) {
+  return GROWTH_AXIS_KEYWORDS[axis].reduce(
+    (score, keyword) => score + (keyword.test(text) ? weight : 0),
+    0,
+  );
+}
 
-  if (/(研究|认知|学习|决策|方法|框架|思维|哲学|productivity|workflow|systems thinking|strategy)/i.test(normalized)) {
-    axes.add('认知升级');
-  }
-  if (/(技术|模型|工程|代码|开发|agent|api|开源|infra|framework|benchmark|deployment|prompt|llm)/i.test(normalized)) {
-    axes.add('技术能力');
-  }
-  if (/(商业|市场|增长|融资|资本|营收|创业|竞争|公司|战略|定价|监管|business|startup|funding|revenue|policy)/i.test(normalized)) {
-    axes.add('商业判断');
-  }
-  if (/(写作|表达|内容|传播|叙事|品牌|演讲|营销|播客|newsletter|storytelling|communication|creator)/i.test(normalized)) {
-    axes.add('表达输出');
-  }
-
-  return axes.size > 0 ? Array.from(axes) : [...DEFAULT_GROWTH_AXES];
+function inferAxisByKeyword(input: {
+  title?: string | null;
+  summary?: string | null;
+  tags?: unknown;
+  category?: string | null;
+}): GrowthAxis[] {
+  const title = String(input.title || '');
+  const summary = String(input.summary || '');
+  const tags = normalizeStringArray(input.tags, 8).join(' ');
+  const category = String(input.category || '');
+  return GROWTH_AXES.map((axis, order) => ({
+    axis,
+    order,
+    score: scoreAxisText(axis, title, 4)
+      + scoreAxisText(axis, tags, 3)
+      + scoreAxisText(axis, category, 2)
+      + scoreAxisText(axis, summary, 1),
+  }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score || left.order - right.order)
+    .map((entry) => entry.axis);
 }
 
 export function inferGrowthAxesFromText(input: {
@@ -181,14 +210,56 @@ export function inferGrowthAxesFromText(input: {
   tags?: unknown;
   category?: string | null;
 }): GrowthAxis[] {
-  const tags = normalizeStringArray(input.tags, 8).join(' ');
-  const merged = [
-    input.title || '',
-    input.summary || '',
-    input.category || '',
-    tags,
-  ].join(' \n ');
-  return inferAxisByKeyword(merged);
+  const inferred = inferAxisByKeyword(input);
+  return inferred.length > 0 ? inferred : [...DEFAULT_GROWTH_AXES];
+}
+
+export function resolveItemGrowthAxis(input: {
+  growthAxes?: unknown;
+  title?: string | null;
+  aiSummary?: string | null;
+  aiTags?: unknown;
+  sourceCategory?: string | null;
+}): GrowthAxisResolution {
+  const explicitAxes = normalizeGrowthAxes(input.growthAxes, []);
+  const inferredAxes = inferAxisByKeyword({
+    title: input.title,
+    summary: input.aiSummary,
+    tags: input.aiTags,
+    category: input.sourceCategory,
+  });
+  // Historical imports assigned every source the same cognitive default. Treat
+  // that single legacy value as weak evidence so content can recover a useful
+  // primary axis; multi-axis or non-default manual mappings still win.
+  if (
+    explicitAxes.length === 1
+    && explicitAxes[0] === DEFAULT_GROWTH_AXES[0]
+    && inferredAxes.length > 0
+    && inferredAxes[0] !== DEFAULT_GROWTH_AXES[0]
+  ) {
+    const allAxes = Array.from(new Set([...inferredAxes, ...explicitAxes]));
+    return {
+      primaryAxis: allAxes[0],
+      secondaryAxes: allAxes.slice(1),
+      allAxes,
+      mappingSource: 'inferred',
+    };
+  }
+  if (explicitAxes.length > 0) {
+    return {
+      primaryAxis: explicitAxes[0],
+      secondaryAxes: explicitAxes.slice(1),
+      allAxes: explicitAxes,
+      mappingSource: 'explicit',
+    };
+  }
+  const allAxes = inferredAxes.length > 0 ? inferredAxes : [...DEFAULT_GROWTH_AXES];
+  return {
+    primaryAxis: allAxes[0],
+    secondaryAxes: allAxes.slice(1),
+    allAxes,
+    mappingSource: inferredAxes.length > 0 ? 'inferred' : 'fallback',
+  };
 }
 
 export function resolveItemGrowthAxes(input: {
@@ -198,12 +269,5 @@ export function resolveItemGrowthAxes(input: {
   aiTags?: unknown;
   sourceCategory?: string | null;
 }): GrowthAxis[] {
-  const explicitAxes = normalizeGrowthAxes(input.growthAxes, []);
-  if (explicitAxes.length > 0) return explicitAxes;
-  return inferGrowthAxesFromText({
-    title: input.title,
-    summary: input.aiSummary,
-    tags: input.aiTags,
-    category: input.sourceCategory,
-  });
+  return resolveItemGrowthAxis(input).allAxes;
 }

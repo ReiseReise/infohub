@@ -3,7 +3,7 @@ title: 项目评审：Scrapling 与历史治理
 type: review
 status: archived
 version: 1.0
-owner: AIReie
+owner: AIReise
 created: 2026-03-13
 updated: 2026-03-13
 tags: [review, scrapling, retention, docs]

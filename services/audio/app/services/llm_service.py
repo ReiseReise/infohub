@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.services.llm_errors import LLMUpstreamError
 
 
 @dataclass
@@ -71,6 +72,10 @@ class LLMService:
         is_openai_compatible = normalized_provider in {"openai_compatible", "openai-compatible", "custom_openai"}
         if is_openai_compatible and normalized_model and "/" not in normalized_model:
             normalized_model = f"openai/{normalized_model}"
+        if normalized_provider == "deepseek":
+            normalized_base_url = normalized_base_url or "https://api.deepseek.com"
+            if normalized_model and "/" not in normalized_model:
+                normalized_model = f"openai/{normalized_model}"
 
         return {
             "provider": normalized_provider,
@@ -96,6 +101,7 @@ class LLMService:
         base_url: str | None,
         temperature: float,
         max_tokens: int,
+        thinking: dict | None = None,
     ) -> LLMResult:
         if not endpoint_id.startswith("ep-"):
             raise ValueError("Volcengine Ark requires a valid endpoint id like ep-xxxxxxxx")
@@ -117,6 +123,8 @@ class LLMService:
             "temperature": temperature,
             "max_output_tokens": max_tokens,
         }
+        if thinking:
+            payload["thinking"] = thinking
         async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
             response = await client.post(
                 url,
@@ -128,7 +136,7 @@ class LLMService:
             )
         latency_ms = int((time.perf_counter() - started_at) * 1000)
         if response.status_code >= 400:
-            raise RuntimeError(f"Ark responses error: {response.status_code} {response.text[:300]}")
+            raise LLMUpstreamError(response.status_code)
 
         data = response.json()
         text_parts: list[str] = []
@@ -166,6 +174,8 @@ class LLMService:
         extra_config: dict | None = None,
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        response_format: dict | None = None,
+        thinking: dict | None = None,
     ) -> LLMResult:
         target = self._resolve_target(
             model=model,
@@ -186,19 +196,27 @@ class LLMService:
                 base_url=target["base_url"],
                 temperature=temperature,
                 max_tokens=max_tokens,
+                thinking=thinking,
             )
 
         import litellm
 
         started_at = time.perf_counter()
-        response = await litellm.acompletion(
-            model=target["model"],
-            messages=[{"role": "user", "content": prompt}],
-            api_key=api_key,
-            api_base=target["base_url"],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        completion_kwargs: dict[str, Any] = {
+            "model": target["model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "api_key": api_key,
+            "api_base": target["base_url"],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": 90,
+            "num_retries": 0,
+        }
+        if response_format:
+            completion_kwargs["response_format"] = response_format
+        if thinking:
+            completion_kwargs["extra_body"] = {"thinking": thinking}
+        response = await litellm.acompletion(**completion_kwargs)
         latency_ms = int((time.perf_counter() - started_at) * 1000)
 
         estimated_cost = None
@@ -228,6 +246,8 @@ class LLMService:
         model: str,
         api_key: str = "",
         base_url: str | None = None,
+        provider: str = "",
+        extra_config: dict | None = None,
         max_chunk_tokens: int = 100000,
     ) -> LLMResult:
         """
@@ -238,13 +258,22 @@ class LLMService:
         estimated_tokens = len(rendered_prompt) * 1.5  # 粗估 1 中文字 ≈ 1.5 token
 
         if estimated_tokens <= max_chunk_tokens:
-            return await self.complete(
+            result = await self.complete(
                 model=model,
                 prompt=rendered_prompt,
                 api_key=api_key,
                 base_url=base_url,
-                provider="",
+                provider=provider,
+                extra_config=extra_config,
                 max_tokens=8192,
+            )
+            return await self._ensure_simplified_chinese(
+                result,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                provider=provider,
+                extra_config=extra_config,
             )
 
         # 分段策略
@@ -254,22 +283,27 @@ class LLMService:
 
         for i, chunk in enumerate(chunks):
             chunk_prompt = (
+                "始终使用简体中文输出；原文金句和专有名词可保留原语言，"
+                "但需附中文解释。\n"
                 f"这是一段长音频逐字稿的第 {i+1}/{len(chunks)} 部分。"
-                f"请提取这一部分的关键内容：\n\n{chunk}"
+                f"请用简体中文提取这一部分的关键内容：\n\n{chunk}"
             )
             result = await self.complete(
                 model=model,
                 prompt=chunk_prompt,
                 api_key=api_key,
                 base_url=base_url,
-                provider="",
+                provider=provider,
+                extra_config=extra_config,
                 max_tokens=4096,
             )
             partial_summaries.append(result.text)
 
         # 合并总结
         merge_prompt = (
-            f"以下是一段长音频的分段摘要。请将它们合并为一份完整的结构化总结：\n\n"
+            "始终使用简体中文输出，保留 Markdown 标题、列表、时间戳和证据层级。"
+            "原文金句和专有名词可保留原语言，但需附中文解释。\n"
+            "以下是一段长音频的分段摘要。请将它们合并为一份完整的结构化中文总结：\n\n"
             + "\n\n---\n\n".join(
                 [f"### 第 {i+1} 部分\n{s}" for i, s in enumerate(partial_summaries)]
             )
@@ -279,12 +313,13 @@ class LLMService:
             prompt=merge_prompt,
             api_key=api_key,
             base_url=base_url,
-            provider="",
+            provider=provider,
+            extra_config=extra_config,
             max_tokens=8192,
         )
 
         total_input = sum(len(s) for s in partial_summaries)
-        return LLMResult(
+        combined_result = LLMResult(
             text=final_result.text,
             input_tokens=final_result.input_tokens + total_input,
             output_tokens=final_result.output_tokens,
@@ -296,6 +331,67 @@ class LLMService:
             provider_request_id=final_result.provider_request_id,
             latency_ms=final_result.latency_ms,
             api_kind=final_result.api_kind,
+        )
+        return await self._ensure_simplified_chinese(
+            combined_result,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            provider=provider,
+            extra_config=extra_config,
+        )
+
+    @staticmethod
+    def _needs_chinese_repair(text: str) -> bool:
+        """音频纪要主体应为中文；保留少量英文专名不应触发误判。"""
+        normalized = (text or "").strip()
+        if len(normalized) < 120:
+            return False
+        chinese_chars = sum(1 for char in normalized if "\u4e00" <= char <= "\u9fff")
+        visible_chars = sum(1 for char in normalized if not char.isspace())
+        return chinese_chars < 80 or chinese_chars / max(visible_chars, 1) < 0.18
+
+    async def _ensure_simplified_chinese(
+        self,
+        result: LLMResult,
+        *,
+        model: str,
+        api_key: str,
+        base_url: str | None,
+        provider: str,
+        extra_config: dict | None,
+    ) -> LLMResult:
+        if not self._needs_chinese_repair(result.text):
+            return result
+
+        repair_prompt = (
+            "下面的音频纪要错误地使用了英文。请将全文改写为简体中文：\n"
+            "- 完整保留 Markdown 标题、列表、时间戳和信息层级；\n"
+            "- 专有名词、人名和原文金句可保留原语言，但需附中文解释；\n"
+            "- 不得压缩成更短摘要，不得丢失事实、证据和行动项。\n\n"
+            f"待修复纪要：\n{result.text}"
+        )
+        repaired = await self.complete(
+            model=model,
+            prompt=repair_prompt,
+            api_key=api_key,
+            base_url=base_url,
+            provider=provider,
+            extra_config=extra_config,
+            max_tokens=8192,
+        )
+        return LLMResult(
+            text=repaired.text,
+            input_tokens=result.input_tokens + repaired.input_tokens,
+            output_tokens=result.output_tokens + repaired.output_tokens,
+            total_tokens=result.total_tokens + repaired.total_tokens,
+            model=repaired.model or result.model,
+            provider=repaired.provider or result.provider,
+            endpoint_id=repaired.endpoint_id or result.endpoint_id,
+            estimated_cost=(result.estimated_cost or 0) + (repaired.estimated_cost or 0),
+            provider_request_id=repaired.provider_request_id,
+            latency_ms=(result.latency_ms or 0) + (repaired.latency_ms or 0),
+            api_kind=repaired.api_kind or result.api_kind,
         )
 
     def _resolve_api_key(self, model: str, provider: str = "") -> str:
@@ -326,6 +422,15 @@ class LLMService:
         current_chunk = ""
 
         for para in paragraphs:
+            if len(para) > chunk_size:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+                for offset in range(0, len(para), chunk_size):
+                    piece = para[offset : offset + chunk_size].strip()
+                    if piece:
+                        chunks.append(piece)
+                continue
             if len(current_chunk) + len(para) > chunk_size and current_chunk:
                 chunks.append(current_chunk.strip())
                 current_chunk = ""

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "windows": [
+    "2026-09-06",
+    "2026-09-10",
+    "2026-09-13"
+  ],
+  "materialCount": 49,
+  "eventCount": 48,
+  "frozenSha256": "72b3d29530e7190c1b348138feb170f0144a2bb8127c39958039f24b3d26853d",
+  "privateFixture": "backups/trusted-research-20260914-baseline/evaluation-materials.json",
+  "topics": [
+    "这些窗口中模型与Agent产品能力发生了哪些可核实变化？",
+    "模型发布稿中的性能主张有哪些独立支持或反例？",
+    "企业采用Agent的可靠性限制和可落地用途有哪些？",
+    "开源与商业AI产品在部署、费用和能力边界上有哪些差异？",
+    "这些事件对个人研究与知识管理工作流意味着什么？"
+  ],
+  "counterexamples": [
+    "date_window",
+    "author_attribution",
+    "wrong_link",
+    "placeholder",
+    "missing_evidence",
+    "source_conflict",
+    "prompt_injection",
+    "timeout",
+    "interruption",
+    "duplicate_submit",
+    "cancel",
+    "budget_exhaustion"
+  ],
+  "comparison": {
+    "arms": [
+      "legacy",
+      "structured_once",
+      "pi_research"
+    ],
+    "model": "deepseek-flash",
+    "blindChoiceMinimum": 20,
+    "winRate": 0.7,
+    "tieCountsAsWin": false,
+    "days": 3
+  },
+  "status": "frozen_inputs; live_comparison_pending"
+}

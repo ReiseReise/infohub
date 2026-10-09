@@ -45,6 +45,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# shellcheck source=isolation-policy.sh
+source "$ROOT_DIR/scripts/qa/isolation-policy.sh"
+assert_qa_isolation \
+  "${QA_ISOLATED-}" \
+  "${HUB_ENGINE_URL-}" \
+  "${PG_CONTAINER-}" \
+  "${E2E_USE_EXISTING_STACK-}"
+
 TS="$(date +%Y%m%d_%H%M%S)"
 if [[ "$NO_REPORT" != "true" ]]; then
   if [[ -z "$OUTPUT" ]]; then
@@ -115,6 +123,11 @@ for script in "${SUITE[@]}"; do
   else
     STATUS="FAIL"
     FAIL=$((FAIL+1))
+  fi
+
+  echo "[$STATUS] $script"
+  if [[ "$STATUS" == "FAIL" ]]; then
+    cat "$TMP_OUT"
   fi
 
   if [[ "$NO_REPORT" != "true" ]]; then

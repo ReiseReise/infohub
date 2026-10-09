@@ -1,3 +1,4 @@
+import { JevPanel } from '../components/JevPanel';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ExternalLink, Eye, Globe, Loader2, Plus, RefreshCw, Trash2, Waves } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -212,6 +213,7 @@ export function Monitor() {
 
   return (
     <div className="p-6 max-w-7xl">
+      <JevPanel scene="monitor" />
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h1 className="text-2xl font-bold text-zinc-900">网页监控</h1>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ExternalLink,
@@ -128,7 +128,7 @@ export function PodcastHub() {
   const [triggering, setTriggering] = useState(false);
   const [startingId, setStartingId] = useState<string | null>(null);
 
-  const fetchData = async (preserveSelection = true) => {
+  const fetchData = useCallback(async (preserveSelection = true) => {
     setLoading(true);
     setError(null);
     try {
@@ -148,11 +148,11 @@ export function PodcastHub() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedId]);
 
   useEffect(() => {
     void fetchData(false);
-  }, []);
+  }, [fetchData]);
 
   useEffect(() => {
     setDetailTab('overview');
@@ -194,7 +194,7 @@ export function PodcastHub() {
     return () => {
       cancelled = true;
     };
-  }, [selectedCard?.linkedTask?.id]);
+  }, [selectedCard?.linkedTask]);
 
   const displayTask = selectedTask || (!selectedCard?.linkedTask ? fallbackTask : null);
 

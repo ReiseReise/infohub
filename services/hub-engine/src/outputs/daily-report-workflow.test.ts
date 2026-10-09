@@ -4,11 +4,14 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_DAILY_REPORT_WORKFLOW,
   classifyDailyReportReviewBucket,
+  enforceDailyReportSourceShare,
   looksLikeModelMetaReportSummary,
   looksTruncatedReportSummary,
   normalizeReportSummaryText,
   normalizeDailyReportWorkflowConfig,
   prepareDailyReportCandidates,
+  resolveDailyReportSourceLimit,
+  isWebpageSnapshotDailyCandidate,
   summarizeDailyReportExcludedCandidates,
   type DailyReportCandidateInput,
 } from './daily-report-workflow.js';
@@ -55,6 +58,85 @@ test('normalizes workflow config with safe defaults and bounded values', () => {
   assert.deepEqual(config.enabledModules, DEFAULT_DAILY_REPORT_WORKFLOW.enabledModules);
 });
 
+test('normalizes legacy T source tiers into the current authority scale', () => {
+  const config = normalizeDailyReportWorkflowConfig({
+    scope: {
+      categories: ['AI'],
+      keywords: ['模型'],
+      sourceTiers: ['T1', 'T1.5', 'T2', 'A'],
+    },
+  });
+
+  assert.deepEqual(config.scope.sourceTiers, ['S', 'A']);
+});
+
+test('maps reading tiers to conservative main-report source caps', () => {
+  assert.equal(resolveDailyReportSourceLimit('high_value', 8), 5);
+  assert.equal(resolveDailyReportSourceLimit('light_reading', 8), 2);
+  assert.equal(resolveDailyReportSourceLimit('explore', 8), 1);
+  assert.equal(resolveDailyReportSourceLimit('paused', 8), 0);
+  assert.equal(resolveDailyReportSourceLimit('high_value', 3), 3);
+});
+
+test('keeps every source below the main-report 35 percent share cap', () => {
+  const result = enforceDailyReportSourceShare([
+    ...Array.from({ length: 6 }, (_, index) => ({ sourceName: 'Source A', id: `a-${index}` })),
+    ...Array.from({ length: 2 }, (_, index) => ({ sourceName: 'Source B', id: `b-${index}` })),
+    ...Array.from({ length: 2 }, (_, index) => ({ sourceName: 'Source C', id: `c-${index}` })),
+  ]);
+  const counts = result.reduce<Record<string, number>>((acc, entry) => {
+    acc[entry.sourceName] = (acc[entry.sourceName] || 0) + 1;
+    return acc;
+  }, {});
+  assert.equal(Math.max(...Object.values(counts)) / result.length <= 0.35, true);
+});
+
+test('applies reading-tier caps to main reports but not explicit source reports', async () => {
+  const candidates = Array.from({ length: 8 }, (_, index) => item({
+    id: `light-${index}`,
+    title: `Reuters AI signal ${index}`,
+    sourceName: 'Reuters Technology AI',
+    readingTier: 'light_reading',
+    aiScore: 90 - index,
+  }));
+
+  const mainReport = await prepareDailyReportCandidates(candidates, normalizeDailyReportWorkflowConfig({
+    topN: 8,
+    perSourceLimit: 8,
+  }));
+  const sourceReport = await prepareDailyReportCandidates(candidates, normalizeDailyReportWorkflowConfig({
+    topN: 8,
+    perSourceLimit: 8,
+    scope: { sourceNames: ['Reuters Technology AI'] },
+  }));
+
+  assert.equal(mainReport.finalCandidates.length, 2);
+  assert.equal(sourceReport.finalCandidates.length, 8);
+});
+
+test('keeps enough default high-score candidates for radar-style daily reports', async () => {
+  const categories = ['AI', 'tech', 'tech-cn', 'App&效率工具', 'Product Changelog', '研报&数据'] as const;
+  const items = Array.from({ length: 60 }, (_, index) => {
+    const category = categories[index % categories.length];
+    return item({
+      id: `radar-${index}`,
+      title: `${category} 高价值信号 ${index}`,
+      sourceName: `Radar Source ${index % 12}`,
+      category,
+      sourceTier: index % 3 === 0 ? 'S' : 'A',
+      aiScore: 95 - (index % 25),
+      aiSummary: `${category} 的中文摘要 ${index}，包含事实、影响和建议，适合进入模块化日报证据层。`,
+    });
+  });
+
+  const result = await prepareDailyReportCandidates(items);
+
+  assert.equal(result.selectionMode, 'scored');
+  assert.ok(result.finalCandidates.length >= 35);
+  assert.ok(new Set(result.finalCandidates.map((candidate) => candidate.category)).size >= 5);
+  assert.ok(new Set(result.finalCandidates.map((candidate) => candidate.sourceName)).size >= 8);
+});
+
 test('keeps high score AI scoped items as scored candidates with Chinese report text', async () => {
   const result = await prepareDailyReportCandidates([
     item({ id: 'ai-1', title: 'Claude Code 发布智能体视图', aiScore: 86 }),
@@ -65,12 +147,177 @@ test('keeps high score AI scoped items as scored candidates with Chinese report 
   assert.equal(result.finalCandidates[0].id, 'ai-1');
   assert.equal(result.finalCandidates[0].displayTitle, 'Claude Code 发布智能体视图');
   assert.equal(result.finalCandidates[0].reportSummary, '这是一条中文摘要，说明了 AI 产品的重要变化。');
-  assert.match(result.finalCandidates[0].selectionReason, /达到精选分/);
+  assert.match(result.finalCandidates[0].selectionReason, /高价值信号明确/);
   assert.match(result.finalCandidates[0].selectionReason, /AI/);
   assert.match(result.finalCandidates[0].selectionReason, /产品|技术|产业/);
 });
 
-test('routes fallback-scored items to review instead of trusted scored daily candidates', async () => {
+test('does not admit leaked structured translation output into daily report material', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({
+      id: 'invalid-translation',
+      title: 'Claude translation contract update',
+      aiSummary: 'The release changes the translation contract and validation rules.',
+      aiTranslation: '前置说明 {"translatedTitle":"译文标题","blocks":[{"id":"b0001","markdown":"这不是可展示正文。"}]}',
+      language: 'en',
+      translationStatus: 'ready',
+      contentLength: 1200,
+    }),
+  ], normalizeDailyReportWorkflowConfig({ minScore: 70, topN: 5, requireChinese: true }));
+
+  assert.equal(result.funnel.translationFailed, 1);
+  assert.equal(result.finalCandidates.length, 0);
+  assert.equal(result.excluded[0]?.reason, 'translation_failed');
+});
+
+test('limits scoped daily report candidates to the configured source ids', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({
+      id: 'reuters-1',
+      title: 'Reuters AI round-up',
+      sourceId: 1362,
+      sourceName: 'Reuters Technology AI',
+      category: 'uncategorized',
+      aiScore: 78,
+      aiSummary: '路透科技 AI 线索，涵盖模型发布、监管和产业合作。',
+    }),
+    item({
+      id: 'other-1',
+      title: 'Another AI feed item',
+      sourceId: 999,
+      sourceName: 'Other AI Source',
+      category: 'AI',
+      aiScore: 88,
+      aiSummary: '另一条高分 AI 条目。',
+    }),
+  ], normalizeDailyReportWorkflowConfig({
+    topN: 10,
+    minScore: 55,
+    scope: {
+      categories: ['AI'],
+      keywords: ['AI'],
+      sourceTiers: ['S', 'A', 'B'],
+      sourceIds: [1362],
+    },
+  }));
+
+  assert.deepEqual(result.finalCandidates.map((candidate) => candidate.id), ['reuters-1']);
+  assert.equal(result.funnel.scopeMatched, 1);
+  assert.deepEqual(result.excluded, []);
+});
+
+test('admits matching source-scoped candidates even when they do not match category or keyword scope', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({
+      id: 'reuters-2',
+      title: 'Reuters enterprise contracts update',
+      sourceId: 1362,
+      sourceName: 'Reuters Technology AI',
+      category: 'uncategorized',
+      aiScore: 74,
+      aiSummary: '路透条目主要是企业合作和行业跟进，但属于用户指定的单源日报范围。',
+    }),
+  ], normalizeDailyReportWorkflowConfig({
+    topN: 10,
+    minScore: 55,
+    scope: {
+      categories: ['不存在的分类'],
+      keywords: ['不存在的关键词'],
+      sourceTiers: [],
+      sourceIds: [1362],
+    },
+  }));
+
+  assert.equal(result.funnel.scopeMatched, 1);
+  assert.equal(result.finalCandidates[0]?.id, 'reuters-2');
+});
+
+test('uses source-scoped review candidates instead of producing an empty report', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({
+      id: 'reuters-review-1',
+      title: 'Reuters reports Anthropic expands enterprise partnerships',
+      sourceId: 1362,
+      sourceName: 'Reuters Technology AI',
+      category: 'uncategorized',
+      aiScore: 74,
+      scoreRiskFlags: ['deterministic_fallback', 'ai_scoring_unavailable'],
+      aiSummary: '路透报道称 Anthropic 扩大企业合作，涉及受监管行业落地，但当前评分来自低置信兜底。',
+    }),
+    item({
+      id: 'reuters-review-2',
+      title: 'Reuters tracks OpenAI infrastructure hiring',
+      sourceId: 1362,
+      sourceName: 'Reuters Technology AI',
+      category: 'uncategorized',
+      aiScore: 71,
+      scoreRiskFlags: ['deterministic_fallback'],
+      aiSummary: '路透跟进 OpenAI 基础设施招聘，说明算力和交付仍在继续扩张。',
+    }),
+  ], normalizeDailyReportWorkflowConfig({
+    topN: 10,
+    minScore: 80,
+    scope: {
+      categories: ['不存在的分类'],
+      keywords: ['不存在的关键词'],
+      sourceTiers: [],
+      sourceIds: [1362],
+    },
+  }));
+
+  assert.equal(result.selectionMode, 'review');
+  assert.equal(result.funnel.reviewCandidates, 2);
+  assert.equal(result.funnel.finalCandidates, 2);
+  assert.deepEqual(new Set(result.finalCandidates.map((candidate) => candidate.id)), new Set(['reuters-review-1', 'reuters-review-2']));
+  assert.equal(result.excluded.some((candidate) => candidate.reason === 'fallback_scored'), false);
+});
+
+test('excludes webpage monitor snapshots from final daily report candidates', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({
+      id: 'snapshot-1',
+      title: 'Newsroom \\ Anthropic',
+      sourceName: 'Anthropic Newsroom',
+      sourceType: 'webpage',
+      sourceTier: 'S',
+      aiScore: 92,
+      aiSummary: 'Anthropic 新闻室首页包含 press、support 和 download press kit 等媒体资源入口。',
+      snippet: 'press support download press kit',
+    }),
+    item({
+      id: 'news-1',
+      title: 'Claude Fable 5 and Claude Mythos 5',
+      sourceName: 'Anthropic Newsroom',
+      sourceType: 'curated_index',
+      sourceTier: 'S',
+      aiScore: 88,
+      aiSummary: 'Anthropic 发布 Claude Fable 5 与 Claude Mythos 5，面向长任务和专业工作。',
+    }),
+  ], { topN: 10, minScore: 55 });
+
+  assert.deepEqual(result.finalCandidates.map((candidate) => candidate.id), ['news-1']);
+  assert.equal(result.excluded.find((candidate) => candidate.id === 'snapshot-1')?.reason, 'webpage_snapshot');
+});
+
+test('detects Anthropic newsroom monitor snapshots without treating index news as snapshots', () => {
+  assert.equal(isWebpageSnapshotDailyCandidate({
+    title: 'Newsroom \\ Anthropic',
+    sourceName: 'Anthropic Newsroom',
+    sourceType: 'webpage',
+    aiSummary: '媒体咨询 press@anthropic.com，支持入口和 download press kit。',
+    snippet: 'press support download press kit',
+  }), true);
+
+  assert.equal(isWebpageSnapshotDailyCandidate({
+    title: 'Claude Fable 5 and Claude Mythos 5',
+    sourceName: 'Anthropic Newsroom',
+    sourceType: 'curated_index',
+    aiSummary: 'Anthropic 发布新模型。',
+    snippet: '模型发布',
+  }), false);
+});
+
+test('routes fallback-scored items to review and keeps them out of final candidates when there is no fallback material', async () => {
   const result = await prepareDailyReportCandidates([
     item({
       id: 'fallback-high',
@@ -89,6 +336,127 @@ test('routes fallback-scored items to review instead of trusted scored daily can
   assert.equal(result.finalCandidates.length, 0);
   assert.match(result.reviewCandidates[0].selectionReason, /低置信兜底评分待复核/);
   assert.match(result.reviewCandidates[0].selectionReason, /deterministic_fallback/);
+});
+
+test('uses substantial fallback-scored review pool instead of producing an empty daily report', async () => {
+  const result = await prepareDailyReportCandidates(
+    Array.from({ length: 12 }, (_, index) => item({
+      id: `fallback-pool-${index}`,
+      title: `Claude Agent 企业工作流更新 ${index}`,
+      sourceName: `AI Source ${index % 4}`,
+      category: index % 2 === 0 ? 'AI' : 'Agent/产品',
+      aiScore: 82 - (index % 5),
+      scoreRiskFlags: ['deterministic_fallback', 'ai_scoring_unavailable'],
+      aiSummary: `Claude Agent 企业工作流更新 ${index}，具备产品、技术或产业直接增量，但评分来自低置信兜底。`,
+    })),
+    normalizeDailyReportWorkflowConfig({ minScore: 70, topN: 12, perSourceLimit: 6 }),
+  );
+
+  assert.equal(result.selectionMode, 'review');
+  assert.equal(result.funnel.scoredCandidates, 0);
+  assert.equal(result.funnel.latestFallbackCandidates, 0);
+  assert.equal(result.funnel.fallbackScoredCandidates, 12);
+  assert.ok(result.finalCandidates.length >= 10);
+  assert.ok(result.finalCandidates.every((candidate) => candidate.selectionMode === 'review'));
+  assert.ok(result.finalCandidates.every((candidate) => /低置信兜底评分待复核/.test(candidate.selectionReason)));
+});
+
+test('uses the available fallback review pool when a low-volume day has enough factual material', async () => {
+  const result = await prepareDailyReportCandidates(
+    Array.from({ length: 8 }, (_, index) => item({
+      id: `fallback-low-volume-${index}`,
+      title: `AI 基础设施与模型更新 ${index}`,
+      sourceName: `High Value Source ${index % 4}`,
+      category: index % 2 === 0 ? 'AI' : '基础设施与算力',
+      aiScore: 80 - (index % 4),
+      scoreRiskFlags: ['deterministic_fallback', 'ai_scoring_unavailable'],
+      aiSummary: `AI 基础设施与模型更新 ${index}，正文和摘要可核验，但模型评分暂时使用低置信兜底。`,
+    })),
+    normalizeDailyReportWorkflowConfig({ minScore: 70, topN: 18, perSourceLimit: 6 }),
+  );
+
+  assert.equal(result.selectionMode, 'review');
+  assert.equal(result.funnel.scoredCandidates, 0);
+  assert.equal(result.funnel.fallbackScoredCandidates, 8);
+  assert.equal(result.finalCandidates.length, 8);
+  assert.ok(result.finalCandidates.every((candidate) => candidate.selectionMode === 'review'));
+});
+
+test('supplements a thin scored pool with a substantial review pool during daily recovery', async () => {
+  const scoredPool = Array.from({ length: 2 }, (_, index) => item({
+    id: `scored-recovery-${index}`,
+    title: `OpenAI 模型能力正式更新 ${index}`,
+    sourceName: `Official Source ${index}`,
+    category: 'AI',
+    aiScore: 88 - index,
+    aiSummary: `OpenAI 模型能力正式更新 ${index}，具备可核验的一手产品与技术增量。`,
+  }));
+  const fallbackPool = Array.from({ length: 12 }, (_, index) => item({
+    id: `fallback-recovery-${index}`,
+    title: `AI 产业与基础设施进展 ${index}`,
+    sourceName: `Review Source ${index % 4}`,
+    category: index % 2 === 0 ? 'AI' : '基础设施与算力',
+    aiScore: 82 - (index % 5),
+    scoreRiskFlags: ['deterministic_fallback', 'ai_scoring_unavailable'],
+    aiSummary: `AI 产业与基础设施进展 ${index}，正文和来源均可核验，但评分暂时来自低置信兜底。`,
+  }));
+
+  const result = await prepareDailyReportCandidates(
+    [...scoredPool, ...fallbackPool],
+    normalizeDailyReportWorkflowConfig({ minScore: 70, topN: 12, perSourceLimit: 6 }),
+  );
+
+  assert.equal(result.selectionMode, 'review');
+  assert.equal(result.funnel.scoredCandidates, 2);
+  assert.equal(result.funnel.fallbackScoredCandidates, 12);
+  assert.ok(result.finalCandidates.length >= 10);
+  assert.ok(result.finalCandidates.some((candidate) => candidate.id.startsWith('scored-recovery-')));
+  assert.ok(result.finalCandidates.some((candidate) => candidate.id.startsWith('fallback-recovery-')));
+  assert.equal(
+    result.excluded.some((candidate) => (
+      candidate.reason === 'fallback_scored'
+      && result.finalCandidates.some((selected) => selected.id === candidate.id)
+    )),
+    false,
+  );
+});
+
+test('prefers a substantial fallback review pool over a few latest visible candidates', async () => {
+  const fallbackPool = Array.from({ length: 12 }, (_, index) => item({
+    id: `fallback-with-latest-${index}`,
+    title: `AI 模型与 Agent 高价值更新 ${index}`,
+    sourceName: `Review Source ${index % 4}`,
+    category: index % 2 === 0 ? 'AI' : 'Agent/产品',
+    aiScore: 84 - (index % 5),
+    scoreRiskFlags: ['deterministic_fallback', 'ai_scoring_unavailable'],
+    aiSummary: `AI 模型与 Agent 高价值更新 ${index}，正文与摘要均可核验，但评分链路暂时使用低置信兜底。`,
+  }));
+  const latestPool = Array.from({ length: 2 }, (_, index) => item({
+    id: `latest-alongside-review-${index}`,
+    title: `普通工具最新讨论 ${index}`,
+    sourceName: `Latest Source ${index}`,
+    category: 'App&效率工具',
+    aiScore: 42 - index,
+    aiSummary: `普通工具最新讨论 ${index}，信息增量有限，仅适合作为最新兜底。`,
+  }));
+
+  const result = await prepareDailyReportCandidates(
+    [...fallbackPool, ...latestPool],
+    normalizeDailyReportWorkflowConfig({
+      minScore: 70,
+      topN: 12,
+      perSourceLimit: 6,
+      enableLatestFallback: true,
+    }),
+  );
+
+  assert.equal(result.selectionMode, 'review');
+  assert.equal(result.funnel.scoredCandidates, 0);
+  assert.equal(result.funnel.fallbackScoredCandidates, 12);
+  assert.equal(result.funnel.latestFallbackCandidates, 2);
+  assert.ok(result.finalCandidates.length >= 10);
+  assert.ok(result.finalCandidates.every((candidate) => candidate.id.startsWith('fallback-with-latest-')));
+  assert.ok(result.finalCandidates.every((candidate) => candidate.selectionMode === 'review'));
 });
 
 test('does not hide fallback scoring debt behind latest visible candidates', async () => {
@@ -113,12 +481,37 @@ test('does not hide fallback scoring debt behind latest visible candidates', asy
     enableLatestFallback: true,
   }));
 
-  assert.equal(result.selectionMode, 'empty');
+  assert.equal(result.selectionMode, 'latest_visible');
   assert.equal(result.funnel.fallbackScoredCandidates, 1);
   assert.equal(result.funnel.latestFallbackCandidates, 1);
-  assert.equal(result.funnel.finalCandidates, 0);
-  assert.equal(result.finalCandidates.length, 0);
+  assert.equal(result.funnel.finalCandidates, 1);
+  assert.equal(result.finalCandidates.length, 1);
+  assert.equal(result.finalCandidates[0].id, 'latest-low');
   assert.equal(result.excluded.some((candidate) => candidate.reason === 'fallback_scored'), true);
+});
+
+test('admits unscored Claude model release items through latest fallback instead of dropping them', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({
+      id: 'claude-fable-raw',
+      title: '实测 Claude 史上最强模型 Fable 5，普通人慎用',
+      sourceName: 'BestBlogs.dev',
+      category: 'AI',
+      aiScore: null,
+      aiSummary: null,
+      snippet: 'Claude Fable 5 是 Anthropic 发布的新一代模型，具备更强的软件工程、科研和长任务能力，值得作为今日 AI 模型主线追踪。',
+      processingStatus: 'raw',
+      translationStatus: 'pending',
+    }),
+  ], normalizeDailyReportWorkflowConfig({ minScore: 70, topN: 5, enableLatestFallback: true }));
+
+  assert.equal(result.selectionMode, 'latest_visible');
+  assert.equal(result.funnel.scopeMatched, 1);
+  assert.equal(result.funnel.latestFallbackCandidates, 1);
+  assert.equal(result.funnel.finalCandidates, 1);
+  assert.equal(result.finalCandidates[0].id, 'claude-fable-raw');
+  assert.equal(result.finalCandidates[0].selectionMode, 'latest_visible');
+  assert.match(result.finalCandidates[0].selectionReason, /热点信号|最新线索|Claude|模型/);
 });
 
 test('uses a clean snippet instead of a truncated Chinese summary in daily report candidates', async () => {
@@ -229,7 +622,7 @@ test('keeps aggregation digest candidates from dominating the final daily report
       id: 'direct-1',
       title: 'Anthropic 发布 Claude 企业工作流更新',
       sourceName: 'Anthropic Blog',
-      sourceTier: 'T1',
+      sourceTier: 'S',
       aiScore: 78,
       aiSummary: 'Anthropic 发布 Claude 企业工作流更新，影响企业 AI 产品落地。',
     }),
@@ -312,6 +705,14 @@ test('translates English candidates before admitting them to the report', async 
   assert.equal(result.finalCandidates[0].reportSummary, 'Cursor 新增 Microsoft Teams 集成，强化企业协作场景。');
 });
 
+test('does not collapse distinct persisted events just because both mention Mythos', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({ id: 'one', title: 'Claude Mythos 发布技术更新', clusterId: 'model-release', aiScore: 90 }),
+    item({ id: 'two', title: 'Claude Mythos 遭遇服务故障', clusterId: 'service-outage', aiScore: 89 }),
+  ], normalizeDailyReportWorkflowConfig({ minScore: 70, topN: 5, perSourceLimit: 5 }));
+  assert.deepEqual(result.finalCandidates.map((entry) => entry.id).sort(), ['one', 'two']);
+});
+
 test('excludes English candidates when translation fails under requireChinese gate', async () => {
   const result = await prepareDailyReportCandidates([
     item({
@@ -340,6 +741,18 @@ test('excludes English candidates when translation fails under requireChinese ga
   assert.equal(result.excluded[0].detail, 'translation model unavailable');
 });
 
+test('pending queue work remains visible as pending and is not counted as a model failure', async () => {
+  const candidate = item({ id: 'still-queued', title: 'OpenAI releases a new model', aiScore: 90,
+    aiSummary: 'The release introduces new capabilities.', language: 'en', translationStatus: 'pending' });
+  const result = await prepareDailyReportCandidates([candidate], { requireChinese: true }, {
+    translateItem: async () => ({ translationStatus: 'pending', translationReason: '中文化任务仍在排队或处理中' }),
+  });
+  assert.equal(result.funnel.translationPending, 1);
+  assert.equal(result.funnel.translationFailed, 0);
+  assert.equal(result.finalCandidates.length, 0);
+  assert.match(result.excluded[0].detail || '', /排队或处理中/);
+});
+
 test('does not count original-Chinese skipped translations as translation failures', async () => {
   const result = await prepareDailyReportCandidates([
     item({
@@ -363,6 +776,31 @@ test('does not count original-Chinese skipped translations as translation failur
   assert.equal(result.funnel.translationFailed, 0);
   assert.equal(result.finalCandidates.length, 1);
   assert.equal(result.finalCandidates[0].reportSummary, 'Grok 视频模型登顶图生视频榜首');
+});
+
+test('does not report policy-skipped English translations as model failures', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({
+      id: 'en-low-score-policy-skip',
+      title: 'Winamp launches a creator marketplace',
+      aiScore: 48,
+      aiSummary: 'Winamp launches a marketplace for music creators.',
+      language: 'en',
+      translationStatus: 'pending',
+    }),
+  ], normalizeDailyReportWorkflowConfig({ minScore: 55, topN: 5, requireChinese: true }), {
+    translateItem: async (candidate) => ({
+      ...candidate,
+      translationStatus: 'skipped',
+      translationReason: 'AI 评分过低，跳过翻译',
+    }),
+  });
+
+  assert.equal(result.funnel.translationPending, 0);
+  assert.equal(result.funnel.translationFailed, 0);
+  assert.equal(result.finalCandidates.length, 0);
+  assert.equal(result.excluded[0].reason, 'not_selected');
+  assert.equal(result.excluded[0].detail, 'AI 评分过低，跳过翻译');
 });
 
 test('keeps pending translation candidates visible in preview mode without admitting them to generation by default', async () => {
@@ -538,6 +976,37 @@ test('keeps broad finance and stock movement items out of review and latest fall
   assert.equal(result.excluded.find((entry) => entry.id === 'market-noise')?.reason, 'business_noise');
 });
 
+test('keeps market headlines out of latest fallback even when summaries contain polluted Claude text', async () => {
+  const result = await prepareDailyReportCandidates([
+    item({
+      id: 'polluted-market',
+      title: '现货黄金日内跌幅扩大至2%',
+      category: 'uncategorized',
+      sourceName: '36kr',
+      aiTags: ['Claude Fable 5'],
+      aiScore: 51,
+      filterBucket: 'main',
+      isFiltered: false,
+      aiSummary: '市场短线波动，同时另一条快讯提到 Claude Fable 5 发布。',
+    }),
+    item({
+      id: 'real-claude',
+      title: 'Initial impressions of Claude Fable 5',
+      category: 'AI',
+      sourceName: 'simonwillison.net',
+      aiScore: null,
+      filterBucket: 'main',
+      isFiltered: false,
+      snippet: 'Claude Fable 5 是 Anthropic 发布的新模型，值得跟踪其工程能力变化。',
+    }),
+  ], normalizeDailyReportWorkflowConfig({ minScore: 70, topN: 5, enableLatestFallback: true }));
+
+  assert.equal(result.selectionMode, 'latest_visible');
+  assert.deepEqual(result.finalCandidates.map((entry) => entry.id), ['real-claude']);
+  assert.equal(result.latestFallbackCandidates.some((entry) => entry.id === 'polluted-market'), false);
+  assert.equal(result.excluded.find((entry) => entry.id === 'polluted-market')?.reason, 'business_noise');
+});
+
 test('keeps high scoring brokerage regulation cleanup out of scored daily candidates', async () => {
   const result = await prepareDailyReportCandidates([
     item({
@@ -615,7 +1084,7 @@ test('keeps bond market financing news out of scored daily candidates', async ()
     scope: {
       categories: ['AI'],
       keywords: ['融资', '商业', '金融'],
-      sourceTiers: ['T1'],
+      sourceTiers: ['S'],
     },
   }));
 
@@ -641,7 +1110,7 @@ test('labels high score business noise even when it does not match the saved rep
     scope: {
       categories: ['AI'],
       keywords: ['AI', '大模型'],
-      sourceTiers: ['T1'],
+      sourceTiers: ['S'],
     },
   }));
 

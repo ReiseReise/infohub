@@ -46,7 +46,7 @@ export async function fetchScraplingArticle(
     const resp = await fetch(`${config.scrapling.url}/extract/article`, {
       method: 'POST',
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Key': config.audio.internalApiKey },
       body: JSON.stringify({
         url: target,
         mode,
@@ -78,7 +78,7 @@ export async function fetchScraplingSnapshot(
     const resp = await fetch(`${config.scrapling.url}/extract/snapshot`, {
       method: 'POST',
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Key': config.audio.internalApiKey },
       body: JSON.stringify({
         url: target,
         mode,

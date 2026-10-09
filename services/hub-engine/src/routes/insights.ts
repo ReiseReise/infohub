@@ -1,12 +1,24 @@
 import { Hono } from 'hono';
 import { and, eq, or, desc, gte, lt, count, inArray, sql } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { generateDailyReport, type DailyReportGenerationMode } from '../outputs/daily-report.js';
+import {
+  buildDailyReportCandidateSampleOrder,
+  buildDailyReportCoverageIndex,
+  generateDailyReport,
+  isDailyReportHotSignal,
+  type DailyReportGenerationMode,
+} from '../outputs/daily-report.js';
 import { scheduleDailyReportPush } from '../outputs/push.js';
+import { resolveDailyReportDeliveryDecision } from '../lib/daily-report-quality.js';
 import { resolveDailyReportWindow } from '../outputs/daily-report-window.js';
 import { requireAuth } from '../lib/auth.js';
-import { GROWTH_AXES, resolveItemGrowthAxes } from '../lib/growth.js';
+import {
+  GROWTH_AXES,
+  normalizeGrowthAxes,
+  resolveItemGrowthAxis,
+} from '../lib/growth.js';
 import { getVisibleAiConfigsForUser } from '../lib/ai-configs.js';
+import { resolveSourceReadingTier } from '../lib/source-reading-tier.js';
 import {
   DEFAULT_DAILY_REPORT_WORKFLOW,
   normalizeReportSummaryText,
@@ -15,6 +27,7 @@ import {
   summarizeDailyReportExcludedCandidates,
   type DailyReportWorkflowConfig,
 } from '../outputs/daily-report-workflow.js';
+import { mainReadingSourceCondition } from '../lib/reference-source-visibility.js';
 
 const app = new Hono();
 
@@ -37,9 +50,9 @@ type DashboardRow = {
 
 function computeImportance(item: Pick<DashboardRow, 'priorityScore' | 'aiScore' | 'sourceTier'>) {
   const score = item.priorityScore ?? ((item.aiScore ?? 50) / 100);
-  const tierBoost = item.sourceTier === 'T1' || item.sourceTier === 'S'
+  const tierBoost = item.sourceTier === 'S'
     ? 0.18
-    : item.sourceTier === 'T1.5' || item.sourceTier === 'A'
+    : item.sourceTier === 'A'
       ? 0.08
       : item.sourceTier === 'D'
         ? -0.12
@@ -57,12 +70,12 @@ function buildActionSuggestion(axis: string, item: Pick<DashboardRow, 'sourceTie
   if (axis === '表达输出') {
     return item.processingProfile === 'full' ? '适合转成分享或观点卡' : '先记 1 句表达切口';
   }
-  return item.sourceTier === 'T1' || item.sourceTier === 'S' ? '作为本周认知升级重点材料' : '先抓核心观点，再决定是否深读';
+  return item.sourceTier === 'S' ? '作为本周认知升级重点材料' : '先抓核心观点，再决定是否深读';
 }
 
 function buildAxisSummary(axis: string, items: Array<DashboardRow & { resolvedAxes: string[] }>) {
   if (items.length === 0) return '最近窗口内还没有稳定命中，先补信源映射。';
-  const highSignalCount = items.filter((item) => ['T1', 'T1.5', 'S', 'A'].includes(item.sourceTier)).length;
+  const highSignalCount = items.filter((item) => ['S', 'A'].includes(item.sourceTier)).length;
   const highScoreCount = items.filter((item) => (item.aiScore ?? 0) >= 75).length;
   if (axis === '技术能力') {
     return `最近命中 ${items.length} 条，其中 ${highSignalCount} 条来自高信号源，优先筛可部署、可复用、可验证的能力。`;
@@ -76,11 +89,31 @@ function buildAxisSummary(axis: string, items: Array<DashboardRow & { resolvedAx
   return `最近命中 ${items.length} 条，可优先围绕高信号源做认知升级，再决定是否延伸到行动。`;
 }
 
-function buildAxisEmptyReason(axis: string) {
-  return `${axis} 暂无匹配内容。优先检查信源成长维度、内容标签和过滤阈值，不要把它理解成抓取失败。`;
+type AxisEmptyDiagnostics = {
+  matched: number;
+  filtered: number;
+  unscored: number;
+  secondaryOnly: number;
+  sourceMapped: number;
+};
+
+function buildAxisEmptyReason(axis: string, diagnostics: AxisEmptyDiagnostics) {
+  if (diagnostics.filtered > 0) {
+    return `${axis} 有 ${diagnostics.filtered} 条候选被过滤，当前没有可在主视图展示的内容。`;
+  }
+  if (diagnostics.unscored > 0) {
+    return `${axis} 有 ${diagnostics.unscored} 条内容尚未评分，完成评分后再判断是否进入主视图。`;
+  }
+  if (diagnostics.secondaryOnly > 0) {
+    return `${axis} 暂无主归属文章；有 ${diagnostics.secondaryOnly} 条仅作为次级标签，已展示在其主成长维度中。`;
+  }
+  if (diagnostics.sourceMapped === 0) {
+    return `${axis} 尚无信源明确映射，近期内容也未匹配到该维度。`;
+  }
+  return `${axis} 已有 ${diagnostics.sourceMapped} 个映射信源，但当前时间窗口没有匹配内容。`;
 }
 
-async function getDailyReportWorkflow(userId: string): Promise<DailyReportWorkflowConfig> {
+export async function getDailyReportWorkflow(userId: string): Promise<DailyReportWorkflowConfig> {
   const rows = await db
     .select({ dailyReportWorkflow: schema.userSettings.dailyReportWorkflow })
     .from(schema.userSettings)
@@ -89,7 +122,7 @@ async function getDailyReportWorkflow(userId: string): Promise<DailyReportWorkfl
   return normalizeDailyReportWorkflowConfig(rows[0]?.dailyReportWorkflow || DEFAULT_DAILY_REPORT_WORKFLOW);
 }
 
-async function getDailyWorkflowAiScenes(userId: string, role: string) {
+export async function getDailyWorkflowAiScenes(userId: string, role: string) {
   const configs = await getVisibleAiConfigsForUser(userId, role);
   const sceneTypes = new Set([
     'daily_report_cleaning',
@@ -101,22 +134,49 @@ async function getDailyWorkflowAiScenes(userId: string, role: string) {
   return configs
     .filter((config) => sceneTypes.has(config.type))
     .map((config) => ({
+      id: config.id,
       type: config.type,
       name: config.name,
       isActive: config.isActive,
       promptTemplateId: config.promptTemplateId,
+      promptTemplate: role === 'admin' ? config.promptTemplate : '',
       modelConfigId: config.modelConfigId,
       model: config.model,
       provider: config.provider,
     }));
 }
 
-async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown) {
+export async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown, dateInput?: string | Date | null) {
   const workflow = normalizeDailyReportWorkflowConfig(workflowInput || await getDailyReportWorkflow(userId));
-  const { dayStart, dayEnd } = resolveDailyReportWindow();
+  const { dayStart, dayEnd } = resolveDailyReportWindow(dateInput);
+  const samplingLimit = Math.max(workflow.topN * 4, 60);
+  const candidatePoolLimit = Math.max(workflow.topN * 20, 500);
+  const hotSignalSql = sql<number>`
+    case
+      when concat_ws(
+        ' ',
+        ${schema.items.title},
+        coalesce(${schema.items.snippet}, ''),
+        coalesce(${schema.items.aiSummary}, ''),
+        coalesce(${schema.items.aiTranslation}, ''),
+        coalesce(${schema.sources.name}, ''),
+        coalesce(${schema.sources.category}, '')
+      ) ~* '(claude|anthropic|openai|gpt-?5|gemini|deepmind|fable\\s*5|mythos|opus|sonnet|haiku|agent|智能体|新模型|模型发布|大模型|推理模型|多模态模型|api|codex|cursor)'
+      then 1
+      else 0
+    end
+  `;
 
   const [newRows, todayRows, auditRows] = await Promise.all([
-    db.select({ count: count() }).from(schema.items).where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart), lt(schema.items.fetchedAt, dayEnd))),
+    db.select({ count: count() })
+      .from(schema.items)
+      .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+      .where(and(
+        eq(schema.items.userId, userId),
+        mainReadingSourceCondition(),
+        gte(schema.items.fetchedAt, dayStart),
+        lt(schema.items.fetchedAt, dayEnd),
+      )),
     db.select({
       id: schema.items.id,
       title: schema.items.title,
@@ -128,6 +188,9 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
       language: schema.items.language,
       translationStatus: schema.items.translationStatus,
       translationReason: schema.items.translationReason,
+      priorityScore: schema.items.priorityScore,
+      contentStatus: schema.items.contentStatus,
+      summaryStatus: schema.items.summaryStatus,
       aiTags: schema.items.aiTags,
       publishedAt: schema.items.publishedAt,
       fetchedAt: schema.items.fetchedAt,
@@ -136,6 +199,12 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
       sourceType: schema.items.sourceType,
       sourceTier: schema.items.sourceTier,
       sourceKind: schema.sources.sourceKind,
+      sourceRole: schema.sources.sourceRole,
+      sourceCollectorType: schema.sources.collectorType,
+      sourceConfig: schema.sources.config,
+      sourceStatus: schema.sources.status,
+      sourceAutoFetchEnabled: schema.sources.autoFetchEnabled,
+      sourceTags: schema.sources.tags,
       clusterId: schema.items.clusterId,
       isFiltered: schema.items.isFiltered,
       filterBucket: schema.items.filterBucket,
@@ -147,6 +216,7 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
       .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
       .where(and(
         eq(schema.items.userId, userId),
+        mainReadingSourceCondition(),
         gte(schema.items.fetchedAt, dayStart),
         lt(schema.items.fetchedAt, dayEnd),
         or(
@@ -159,19 +229,54 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
           eq(schema.items.processingStatus, 'score_failed'),
         ),
       ))
-      .orderBy(desc(schema.items.priorityScore), desc(schema.items.fetchedAt))
-      .limit(Math.max(workflow.topN * 4, 60)),
+      .orderBy(desc(hotSignalSql), desc(schema.items.priorityScore), desc(schema.items.fetchedAt))
+      .limit(candidatePoolLimit),
     db.select({
+      id: schema.items.id,
+      title: schema.items.title,
+      snippet: schema.items.snippet,
+      aiSummary: schema.items.aiSummary,
+      aiTranslation: schema.items.aiTranslation,
+      aiScore: schema.items.aiScore,
+      priorityScore: schema.items.priorityScore,
+      processingStatus: schema.items.processingStatus,
+      summaryStatus: schema.items.summaryStatus,
       isFiltered: schema.items.isFiltered,
       filterBucket: schema.items.filterBucket,
       qualityDecision: schema.items.qualityDecision,
       contentStatus: schema.items.contentStatus,
+      sourceName: schema.sources.name,
+      category: schema.sources.category,
     })
       .from(schema.items)
-      .where(and(eq(schema.items.userId, userId), gte(schema.items.fetchedAt, dayStart), lt(schema.items.fetchedAt, dayEnd))),
+      .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+      .where(and(
+        eq(schema.items.userId, userId),
+        mainReadingSourceCondition(),
+        gte(schema.items.fetchedAt, dayStart),
+        lt(schema.items.fetchedAt, dayEnd),
+      )),
   ]);
 
-  const todayItemIds = todayRows.map((row) => row.id);
+  const sampledRows = buildDailyReportCandidateSampleOrder(todayRows.map((row) => ({
+    ...row,
+    sourceName: row.sourceName || 'Unknown',
+    category: row.category || 'uncategorized',
+    sourceReadingTier: resolveSourceReadingTier({
+      name: row.sourceName,
+      sourceTier: row.sourceTier,
+      collectorType: row.sourceCollectorType,
+      sourceType: row.sourceType,
+      sourceKind: row.sourceKind,
+      category: row.category,
+      status: row.sourceStatus,
+      autoFetchEnabled: row.sourceAutoFetchEnabled,
+      tags: row.sourceTags,
+      config: row.sourceConfig,
+    }).value,
+  })), samplingLimit);
+
+  const todayItemIds = sampledRows.map((row) => row.id);
   const scoreRiskRows = todayItemIds.length > 0
     ? await db
       .select({
@@ -191,7 +296,7 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
     scoreRiskFlagsByItem.set(row.itemId, [...(scoreRiskFlagsByItem.get(row.itemId) || []), ...flags]);
   }
 
-  const preparation = await prepareDailyReportCandidates(todayRows.map((row) => ({
+  const preparation = await prepareDailyReportCandidates(sampledRows.map((row) => ({
     id: row.id,
     title: row.title,
     url: row.url,
@@ -206,6 +311,18 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
     category: row.category || 'uncategorized',
     sourceType: row.sourceType || 'article',
     sourceTier: row.sourceTier,
+    readingTier: resolveSourceReadingTier({
+      name: row.sourceName,
+      sourceTier: row.sourceTier,
+      collectorType: row.sourceCollectorType,
+      sourceType: row.sourceType,
+      sourceKind: row.sourceKind,
+      category: row.category,
+      status: row.sourceStatus,
+      autoFetchEnabled: row.sourceAutoFetchEnabled,
+      tags: row.sourceTags,
+      config: row.sourceConfig,
+    }).value,
     sourceKind: row.sourceKind,
     clusterId: row.clusterId,
     isFiltered: row.isFiltered,
@@ -219,18 +336,63 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
     aiTags: Array.isArray(row.aiTags) ? row.aiTags.map((tag) => String(tag)) : [],
   })), workflow, { allowPendingTranslationCandidates: true });
 
+  const coverage = buildDailyReportCoverageIndex(preparation);
+  const candidateDataUpdatedAt = todayRows.reduce<Date | null>((latest, row) => {
+    if (!row.fetchedAt) return latest;
+    const value = row.fetchedAt instanceof Date ? row.fetchedAt : new Date(row.fetchedAt);
+    if (Number.isNaN(value.getTime())) return latest;
+    return !latest || value.getTime() > latest.getTime() ? value : latest;
+  }, null);
+  const finalCandidateIds = new Set(preparation.finalCandidates.map((item) => item.id));
+  const sampledIds = new Set(sampledRows.map((item) => item.id));
+  const hotRows = auditRows.filter((row) => isDailyReportHotSignal({
+    id: row.id,
+    title: row.title,
+    sourceName: row.sourceName || 'Unknown',
+    category: row.category || 'uncategorized',
+    aiScore: row.aiScore,
+    priorityScore: row.priorityScore,
+    processingStatus: row.processingStatus,
+    summaryStatus: row.summaryStatus,
+    contentStatus: row.contentStatus,
+    aiSummary: row.aiSummary,
+    aiTranslation: row.aiTranslation,
+    snippet: row.snippet,
+  }));
+
   return {
     workflow,
     preview: {
+      generatedAt: new Date().toISOString(),
+      dataUpdatedAt: candidateDataUpdatedAt?.toISOString() || null,
       selectionMode: preparation.selectionMode,
       funnel: {
         ...preparation.funnel,
         todayNew: newRows[0]?.count || 0,
+        sampledCandidates: sampledRows.length,
         filteredItems: auditRows.filter((item) => item.isFiltered).length,
         filteredBucketItems: auditRows.filter((item) => item.filterBucket === 'filtered').length,
         reviewItems: auditRows.filter((item) => item.qualityDecision === 'review').length,
         pendingItems: auditRows.filter((item) => item.contentStatus && item.contentStatus !== 'ready').length,
       },
+      coverageDiagnostics: {
+        totalFetched: newRows[0]?.count || 0,
+        sampledCandidates: sampledRows.length,
+        mainVisible: auditRows.filter((item) => item.isFiltered === false && item.filterBucket === 'main').length,
+        scored: auditRows.filter((item) => item.aiScore != null).length,
+        unscored: auditRows.filter((item) => item.aiScore == null).length,
+        raw: auditRows.filter((item) => item.processingStatus === 'raw').length,
+        summaryReady: auditRows.filter((item) => item.summaryStatus === 'ready').length,
+        summaryFailed: auditRows.filter((item) => item.summaryStatus === 'failed').length,
+        hotSignals: hotRows.length,
+        hotUnscored: hotRows.filter((item) => item.aiScore == null).length,
+        hotNotSampled: hotRows.filter((item) => !sampledIds.has(item.id)).length,
+        hotNotSelected: hotRows.filter((item) => !finalCandidateIds.has(item.id)).length,
+        finalCandidates: preparation.finalCandidates.length,
+      },
+      coverageSummary: coverage.summary,
+      coverageItems: coverage.items,
+      coverageMarkdown: coverage.markdown,
       candidates: preparation.finalCandidates.slice(0, workflow.topN).map((item) => ({
         id: item.id,
         title: item.displayTitle,
@@ -241,6 +403,7 @@ async function buildDailyWorkflowPreview(userId: string, workflowInput?: unknown
         selectionReason: item.selectionReason,
         reportSummary: item.reportSummary,
         translationStatus: item.translationStatus,
+        readingTier: item.readingTier || null,
         chineseReady: item.chineseReady,
       })),
       excluded: preparation.excluded.slice(0, 20),
@@ -329,6 +492,7 @@ app.get('/dashboard', async (c) => {
       .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
       .where(and(
         eq(schema.items.userId, authUser.userId),
+        mainReadingSourceCondition(),
         eq(schema.items.filterBucket, 'main'),
         eq(schema.items.isFiltered, false),
         gte(schema.items.fetchedAt, since),
@@ -337,21 +501,32 @@ app.get('/dashboard', async (c) => {
       .limit(itemLimit),
     db
       .select({
+        title: schema.items.title,
+        aiScore: schema.items.aiScore,
+        aiSummary: schema.items.aiSummary,
+        aiTags: schema.items.aiTags,
         isFiltered: schema.items.isFiltered,
         filterBucket: schema.items.filterBucket,
         growthAxes: schema.items.growthAxes,
+        sourceCategory: schema.sources.category,
       })
       .from(schema.items)
-      .where(and(eq(schema.items.userId, authUser.userId), gte(schema.items.fetchedAt, since))),
+      .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
+      .where(and(
+        eq(schema.items.userId, authUser.userId),
+        mainReadingSourceCondition(),
+        gte(schema.items.fetchedAt, since),
+      )),
     db
       .select({
         sourceTier: schema.sources.sourceTier,
         processingProfile: schema.sources.processingProfile,
         status: schema.sources.status,
         autoFetchEnabled: schema.sources.autoFetchEnabled,
+        growthAxes: schema.sources.growthAxes,
       })
       .from(schema.sources)
-      .where(eq(schema.sources.userId, authUser.userId)),
+      .where(and(eq(schema.sources.userId, authUser.userId), mainReadingSourceCondition())),
     db
       .select()
       .from(schema.insights)
@@ -362,24 +537,47 @@ app.get('/dashboard', async (c) => {
 
   const normalizedItems = itemRows.map((item) => {
     const cleanSummary = normalizeReportSummaryText(item.aiSummary) || null;
-    return {
-      ...item,
-      aiSummary: cleanSummary,
-      resolvedAxes: resolveItemGrowthAxes({
+    const growthResolution = resolveItemGrowthAxis({
       growthAxes: item.growthAxes,
       title: item.title,
       aiSummary: cleanSummary,
       aiTags: item.aiTags,
       sourceCategory: item.sourceCategory,
-    }),
+    });
+    return {
+      ...item,
+      aiSummary: cleanSummary,
+      resolvedAxes: growthResolution.allAxes,
+      primaryGrowthAxis: growthResolution.primaryAxis,
+      secondaryGrowthAxes: growthResolution.secondaryAxes,
+      growthMappingSource: growthResolution.mappingSource,
       importance: computeImportance(item),
     };
   });
 
+  const auditedItems = windowAuditRows.map((item) => ({
+    ...item,
+    growthResolution: resolveItemGrowthAxis({
+      growthAxes: item.growthAxes,
+      title: item.title,
+      aiSummary: normalizeReportSummaryText(item.aiSummary) || null,
+      aiTags: item.aiTags,
+      sourceCategory: item.sourceCategory,
+    }),
+  }));
+
   const axisCards = GROWTH_AXES.map((axis) => {
     const axisItems = normalizedItems
-      .filter((item) => item.resolvedAxes.includes(axis))
+      .filter((item) => item.primaryGrowthAxis === axis)
       .sort((left, right) => right.importance - left.importance);
+    const auditedMatches = auditedItems.filter((item) => item.growthResolution.primaryAxis === axis);
+    const emptyDiagnostics: AxisEmptyDiagnostics = {
+      matched: auditedMatches.length,
+      filtered: auditedMatches.filter((item) => item.isFiltered || item.filterBucket !== 'main').length,
+      unscored: auditedMatches.filter((item) => item.aiScore == null).length,
+      secondaryOnly: normalizedItems.filter((item) => item.secondaryGrowthAxes.includes(axis)).length,
+      sourceMapped: sourceRows.filter((source) => normalizeGrowthAxes(source.growthAxes, []).includes(axis)).length,
+    };
     const averageScore = axisItems.length > 0
       ? Number((axisItems.reduce((sum, item) => sum + (item.aiScore ?? 0), 0) / axisItems.length).toFixed(1))
       : null;
@@ -389,9 +587,10 @@ app.get('/dashboard', async (c) => {
       count: axisItems.length,
       averageScore,
       summary: buildAxisSummary(axis, axisItems),
-      emptyReason: axisItems.length === 0 ? buildAxisEmptyReason(axis) : null,
-      sourceExplanation: '来源由条目成长维度、AI 标签、信源分类和标题关键词共同映射；过滤内容不会进入成长主视图。',
-      items: axisItems.slice(0, 4).map((item) => ({
+      emptyReason: axisItems.length === 0 ? buildAxisEmptyReason(axis, emptyDiagnostics) : null,
+      emptyDiagnostics,
+      sourceExplanation: '每篇文章只进入一个主成长维度；其他命中维度作为次级标签，过滤内容不进入主视图。',
+      items: axisItems.slice(0, 12).map((item) => ({
         id: item.id,
         title: item.title,
         url: item.url,
@@ -405,12 +604,14 @@ app.get('/dashboard', async (c) => {
         fetchedAt: item.fetchedAt,
         summary: item.aiSummary || null,
         growthAxes: item.resolvedAxes,
+        primaryGrowthAxis: item.primaryGrowthAxis,
+        secondaryGrowthAxes: item.secondaryGrowthAxes,
         actionSuggestion: buildActionSuggestion(axis, item),
       })),
     };
   });
 
-  const sourceTierStats = ['T1', 'T1.5', 'T2', 'S', 'A', 'B', 'C', 'D'].map((tier) => ({
+  const sourceTierStats = ['S', 'A', 'B', 'C', 'D'].map((tier) => ({
     tier,
     count: sourceRows.filter((source) => source.sourceTier === tier).length,
   }));
@@ -418,10 +619,10 @@ app.get('/dashboard', async (c) => {
     profile,
     count: sourceRows.filter((source) => source.processingProfile === profile).length,
   }));
-  const mustReview = normalizedItems.filter((item) => (item.aiScore ?? 0) >= 75 || ['T1', 'S'].includes(item.sourceTier)).length;
+  const mustReview = normalizedItems.filter((item) => (item.aiScore ?? 0) >= 75 || item.sourceTier === 'S').length;
   const activeSources = sourceRows.filter((source) => source.status === 'active' && source.autoFetchEnabled !== false).length;
-  const signalSources = sourceRows.filter((source) => ['T1', 'T1.5', 'S', 'A'].includes(source.sourceTier)).length;
-  const unmappedItems = normalizedItems.filter((item) => item.resolvedAxes.length === 0).length;
+  const signalSources = sourceRows.filter((source) => ['S', 'A'].includes(source.sourceTier)).length;
+  const unmappedItems = normalizedItems.filter((item) => item.growthMappingSource === 'fallback').length;
 
   return c.json({
     data: {
@@ -501,12 +702,15 @@ app.post('/generate', async (c) => {
         minScore: minScore ?? workflow.minScore,
       },
     });
-    scheduleDailyReportPush(`信息中枢日报 — ${report.date}`, report.markdown);
+    const delivery = resolveDailyReportDeliveryDecision(report.payload);
+    if (delivery.allowExternalPush) {
+      scheduleDailyReportPush(`信息中枢日报 — ${report.date}`, report.markdown);
+    }
 
     return c.json({
       data: report,
       markdown: report.markdown,
-      message: 'Daily report generated; push queued',
+      message: delivery.message,
     });
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500);

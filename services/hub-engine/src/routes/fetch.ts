@@ -11,8 +11,10 @@ import { ensureItemContent } from '../lib/item-enrichment.js';
 import { computeSourceFreshness, summarizeFreshness } from '../lib/freshness.js';
 import { scoreItemsDetailed } from '../processors/ai-scorer.js';
 import { qualityFilterItemsDetailed } from '../processors/quality-filter.js';
-import { summarizeItemsDetailed, translateItemsDetailed } from '../processors/ai-summarizer.js';
+import { summarizeItemsDetailed } from '../processors/ai-summarizer.js';
 import { buildSourceQualityFunnel } from '../lib/content-quality.js';
+import { resolveFetchTriggerMode } from '../lib/fetch-trigger-policy.js';
+import { enqueueItemTranslationJob } from '../scheduler/item-translation-jobs.js';
 
 const app = new Hono();
 
@@ -140,7 +142,11 @@ app.post('/source/:id', async (c) => {
   }
 
   const source = rows[0];
-  const mode = (c.req.query('mode') || 'sync').toLowerCase();
+  const requestedMode = c.req.query('mode');
+  const mode = resolveFetchTriggerMode({
+    collectorType: source.collectorType,
+    requestedMode,
+  });
 
   if (mode === 'sync') {
     try {
@@ -156,15 +162,16 @@ app.post('/source/:id', async (c) => {
       });
       let aiProcessed = { filtered: 0, scored: 0, summarized: 0, translated: 0 };
       const aiErrors: Record<string, string[]> = {};
-      const itemIds = (summary?.newItemIds || []).slice(0, Math.min(summary?.itemsNew || 0, contentLimit));
-      if (itemIds.length > 0) {
-        await Promise.all(itemIds.map((itemId) => ensureItemContent(authUser.userId, itemId)));
+      const changedItemIds = [...(summary?.newItemIds || []), ...(summary?.updatedItemIds || [])];
+      const contentItemIds = changedItemIds.slice(0, contentLimit);
+      if (contentItemIds.length > 0) {
+        await Promise.all(contentItemIds.map((itemId) => ensureItemContent(authUser.userId, itemId)));
       }
-      const contentStats = await getContentStats(authUser.userId, summary?.newItemIds || []);
-      if (summary?.itemsNew && summary.itemsNew > 0) {
+      const contentStats = await getContentStats(authUser.userId, changedItemIds);
+      if (changedItemIds.length > 0) {
         const scenes = await getEffectiveAiSceneAvailability(authUser.userId);
-        const limit = Math.min(summary.itemsNew, aiLimit);
-        const itemIds = (summary.newItemIds || []).slice(0, limit);
+        const limit = Math.min(changedItemIds.length, aiLimit);
+        const itemIds = changedItemIds.slice(0, limit);
         if (scenes.has('quality_filter')) {
           const quality = await qualityFilterItemsDetailed(authUser.userId, limit, { itemIds });
           aiProcessed.filtered = quality.processed;
@@ -181,12 +188,18 @@ app.post('/source/:id', async (c) => {
           if (summarization.errors.length > 0) aiErrors.summary = summarization.errors;
         }
         if (scenes.has('translation')) {
-          const translation = await translateItemsDetailed(authUser.userId, Math.min(limit, translationLimit), { itemIds });
-          aiProcessed.translated = translation.processed;
-          if (translation.errors.length > 0) aiErrors.translation = translation.errors;
+          for (const itemId of itemIds.slice(0, Math.min(limit, translationLimit))) {
+            const queued = await enqueueItemTranslationJob({
+              userId: authUser.userId,
+              itemId,
+              mode: 'automatic',
+              trigger: 'pipeline',
+            });
+            if (queued.enqueued) aiProcessed.translated++;
+          }
         }
       }
-      const qualityFunnel = await getQualityFunnelForItems(authUser.userId, summary?.newItemIds || [], {
+      const qualityFunnel = await getQualityFunnelForItems(authUser.userId, changedItemIds, {
         itemsFound: summary?.itemsFound || 0,
         itemsNew: summary?.itemsNew || 0,
         itemsDuplicate: summary?.itemsDuplicate || 0,
@@ -238,9 +251,66 @@ app.post('/source/:id', async (c) => {
   return c.json({
     message: queued.enqueued ? 'Fetch enqueued' : 'Fetch already queued',
     sourceId: source.id,
+    mode: 'queue',
     jobId: queued.jobId,
+    pollUrl: `/api/fetch/jobs/${queued.jobId}`,
     enqueued: queued.enqueued,
     state: queued.state || null,
+  });
+});
+
+// GET /api/fetch/jobs/:jobId — 单个采集任务状态
+app.get('/jobs/:jobId', async (c) => {
+  const authUser = requireAuth(c);
+  const jobId = c.req.param('jobId');
+  const job = await fetchQueue.getJob(jobId);
+  if (!job) {
+    return c.json({ error: 'Fetch job not found', jobId }, 404);
+  }
+  const sourceId = Number(job.data?.sourceId || 0);
+  if (!Number.isInteger(sourceId) || sourceId <= 0) {
+    return c.json({ error: 'Invalid fetch job payload', jobId }, 400);
+  }
+  const sourceRows = await db.select({ id: schema.sources.id })
+    .from(schema.sources)
+    .where(and(eq(schema.sources.id, sourceId), eq(schema.sources.userId, authUser.userId)))
+    .limit(1);
+  if (sourceRows.length === 0) {
+    return c.json({ error: 'Fetch job not found', jobId }, 404);
+  }
+  const state = await job.getState();
+  const recentFetch = await db
+    .select({
+      id: schema.fetchLogs.id,
+      status: schema.fetchLogs.status,
+      startedAt: schema.fetchLogs.startedAt,
+      finishedAt: schema.fetchLogs.finishedAt,
+      itemsFound: schema.fetchLogs.itemsFound,
+      itemsNew: schema.fetchLogs.itemsNew,
+      itemsFiltered: schema.fetchLogs.itemsFiltered,
+      itemsDuplicate: schema.fetchLogs.itemsDuplicate,
+      itemsQueuedAi: schema.fetchLogs.itemsQueuedAi,
+      outcome: schema.fetchLogs.outcome,
+      error: schema.fetchLogs.error,
+      durationMs: schema.fetchLogs.durationMs,
+    })
+    .from(schema.fetchLogs)
+    .where(eq(schema.fetchLogs.sourceId, sourceId))
+    .orderBy(desc(schema.fetchLogs.startedAt))
+    .limit(1);
+
+  return c.json({
+    jobId,
+    state,
+    sourceId,
+    sourceName: job.data?.sourceName || null,
+    collectorType: job.data?.collectorType || null,
+    attemptsMade: job.attemptsMade,
+    timestamp: job.timestamp || null,
+    processedOn: job.processedOn || null,
+    finishedOn: job.finishedOn || null,
+    failedReason: job.failedReason || null,
+    stageSummary: recentFetch[0] || null,
   });
 });
 

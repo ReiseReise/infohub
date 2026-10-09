@@ -65,6 +65,7 @@ export interface FetchTriggerResult {
   sourceId?: number;
   enqueued?: boolean;
   jobId?: string;
+  pollUrl?: string;
   state?: string | null;
   mode?: string;
   itemsFound?: number;
@@ -98,6 +99,33 @@ export interface FetchTriggerResult {
   newItemIds?: string[];
 }
 
+export interface FetchJobStatus {
+  jobId: string;
+  state: string;
+  sourceId: number;
+  sourceName?: string | null;
+  collectorType?: string | null;
+  attemptsMade: number;
+  timestamp?: number | null;
+  processedOn?: number | null;
+  finishedOn?: number | null;
+  failedReason?: string | null;
+  stageSummary?: {
+    id?: number;
+    status?: string | null;
+    startedAt?: string | null;
+    finishedAt?: string | null;
+    itemsFound?: number | null;
+    itemsNew?: number | null;
+    itemsFiltered?: number | null;
+    itemsDuplicate?: number | null;
+    itemsQueuedAi?: number | null;
+    outcome?: string | null;
+    error?: string | null;
+    durationMs?: number | null;
+  } | null;
+}
+
 export interface SourceQualityFunnel {
   fetched: number;
   unique: number;
@@ -121,6 +149,35 @@ export interface SourceQualityFunnel {
   reportSelectedRate: number;
   qualityScore: number;
   grade: 'excellent' | 'good' | 'fair' | 'poor' | 'empty' | string;
+}
+
+export interface SourceStageHealth {
+  status: 'healthy' | 'stale' | 'degraded' | 'failing' | 'blocked' | 'empty' | string;
+  label: string;
+  summary: string;
+  latestIssue?: string | null;
+  metrics?: Record<string, number | string | null>;
+}
+
+export interface SourceRecommendedAction {
+  action: 'fetch' | 'check_config' | 'repair_content' | 'repair_ai' | 'review_daily_coverage' | string;
+  label: string;
+  reason: string;
+  stage: 'fetch' | 'content' | 'ai' | 'report' | string;
+}
+
+export interface SourceHealthSnapshot {
+  healthStatus: 'healthy' | 'config_mismatch' | 'needs_fetch' | 'fetch_failing' | 'content_degraded' | 'ai_blocked' | 'report_gap' | 'watch' | string;
+  healthLabel: string;
+  healthReasons: string[];
+  stageHealth: {
+    fetch: SourceStageHealth;
+    content: SourceStageHealth;
+    display: SourceStageHealth;
+    ai: SourceStageHealth;
+    report: SourceStageHealth;
+  };
+  recommendedActions: SourceRecommendedAction[];
 }
 
 export interface DiscoveryCandidate {
@@ -199,14 +256,31 @@ export interface SourceRecord {
   sourceRole?: string | null;
   sourceKind?: 'official' | 'blog' | 'rss' | 'x' | 'wechat' | 'media' | 'api' | 'webpage' | 'podcast' | 'other' | string | null;
   sourceTier?: 'S' | 'A' | 'B' | 'C' | 'D' | string | null;
+  readingTier?: 'high_value' | 'light_reading' | 'explore' | 'paused' | string | null;
+  readingTierLabel?: string | null;
+  readingTierReason?: string | null;
+  topicGroup?: 'ai_frontier' | 'agents_products' | 'infrastructure' | 'engineering' | 'business_industry' | 'policy_safety' | 'research_deep' | 'society_culture' | 'tools_lifestyle' | 'other' | string | null;
+  topicGroupLabel?: string | null;
+  governanceRole?: 'first_party' | 'professional_media' | 'personal_blog' | 'aggregator' | 'community_social' | 'monitor' | 'private_inbox' | 'audio_video' | 'other' | string | null;
+  governanceRoleLabel?: string | null;
+  classificationSource?: 'manual' | 'partial' | 'cold_start' | string | null;
+  needsGovernanceReview?: boolean;
+  classificationReasons?: string[];
+  aiDailyBudget?: number | null;
+  aiProcessedToday?: number | null;
+  aiBudgetRemaining?: number | null;
+  aiBudgetWindowStart?: string | null;
+  aiBudgetWindowEnd?: string | null;
   authorityWeight?: number | null;
   processingProfile?: 'full' | 'smart' | 'brief' | 'monitor' | string | null;
+  contentStrategy?: 'feed_only' | 'smart' | 'full' | 'monitor_only' | string | null;
   trustScore?: number | null;
   noiseScore?: number | null;
   growthAxes?: string[];
   upgradeRules?: Record<string, unknown> | null;
+  tags?: string[] | unknown[] | null;
   category: string;
-  status: string;
+  status: 'scheduled' | 'running' | 'full' | 'degraded' | 'failed' | string;
   fetchInterval?: number | null;
   autoFetchEnabled?: boolean | null;
   autoTranscribe?: boolean | null;
@@ -242,11 +316,33 @@ export interface SourceRecord {
   scoredCount?: number;
   summarizedCount?: number;
   translationCompletedCount?: number;
+  summaryFailedCount?: number;
+  translationFailedCount?: number;
+  titleOnlyCount?: number;
+  snippetOnlyCount?: number;
+  longReadRiskCount?: number;
+  averageContentLength?: number;
   sourceQuality?: SourceQualityFunnel;
+  sourceHealth?: SourceHealthSnapshot;
+  healthStatus?: SourceHealthSnapshot['healthStatus'];
+  healthReasons?: string[];
+  stageHealth?: SourceHealthSnapshot['stageHealth'];
+  recommendedActions?: SourceRecommendedAction[];
   latestItemTitle?: string | null;
   latestItemUrl?: string | null;
   latestItemAt?: string | null;
   config?: Record<string, unknown> | null;
+}
+
+export interface DibaoStatusPayload {
+  available: boolean;
+  publicUrl: string;
+  healthUrl: string;
+  message: string;
+  version: string | null;
+  checkedAt: string;
+  error: string | null;
+  raw?: unknown;
 }
 
 export interface RetentionSummary {
@@ -402,6 +498,157 @@ export interface BatchSubscriptionResult {
   failed: Array<{ index: number; error: string }>;
 }
 
+export type ReferenceSourceProvider = 'qmreader' | 'follow_builders' | 'aihot' | 'origin12';
+export type ReferenceSourceImportMode = 'rss' | 'podcast' | 'adapter_required' | 'reference_only';
+
+export interface ReferenceSourceCatalogItem {
+  key: string;
+  name: string;
+  provider: ReferenceSourceProvider;
+  providerLabel: string;
+  providerSourceId: string;
+  channel: string;
+  feedUrl: string | null;
+  feedCandidates: string[];
+  siteUrl: string | null;
+  category: string;
+  sourceKind: string;
+  sourceTier: 'S' | 'A' | 'B' | 'C' | 'D';
+  readingTier: 'high_value' | 'light_reading' | 'explore' | 'paused';
+  recommended: boolean;
+  defaultEnabled: false;
+  importMode: ReferenceSourceImportMode;
+  providerEnabled: boolean;
+  providerStatus: string;
+  observationStatus: 'current' | 'historical';
+  firstObservedAt: string;
+  lastObservedAt: string;
+  description: string;
+  notes: string;
+  manualNotes?: string;
+  refreshMinutes?: number;
+  logicalSites?: Array<{ name: string; url: string; required: boolean }>;
+  provenance: {
+    sourceUrl: string;
+    observedAt: string;
+    license?: string;
+    attributionRequired?: boolean;
+  };
+  alreadyAdded: boolean;
+  existingSourceId: number | null;
+  canImport: boolean;
+  importReason: string;
+}
+
+export interface ReferenceSourceCatalogPayload {
+  version: number;
+  updatedAt: string;
+  description: string;
+  sourcePolicy: {
+    defaultEnabled: false;
+    maxImportPerRequest: number;
+    notes: string;
+  };
+  stats: {
+    total: number;
+    byProvider: Record<string, number>;
+    importable: number;
+    recommended: number;
+    current?: number;
+    historical?: number;
+    aihotObservedItems?: number;
+    aihotObservedPages?: number;
+  };
+  total: number;
+  offset: number;
+  limit: number;
+  providers: ReferenceSourceProvider[];
+  channels: string[];
+  items: ReferenceSourceCatalogItem[];
+}
+
+export type ReferenceIntegrationStatus = 'available' | 'shadow' | 'active' | 'paused' | 'removed';
+
+export interface ReferenceSourceQualityMetrics {
+  windowDays: 7;
+  observationDays: number;
+  fetchAttempts: number;
+  fetchSuccessRate: number | null;
+  itemCount: number;
+  aiRelevanceRate: number | null;
+  aiProcessingRate: number | null;
+  originalLinkRate: number | null;
+  noiseRate: number | null;
+  duplicateRate: number | null;
+  componentHealth: Array<{
+    key: string;
+    name: string;
+    required: boolean;
+    attempts7d: number;
+    successes7d: number;
+    successRate: number | null;
+    lastOutcome: string;
+    lastError: string | null;
+    lastCheckedAt: string | null;
+    eligible: boolean;
+  }>;
+  eligibleForActivation: boolean;
+  activationReasons: string[];
+}
+
+export interface ReferenceIntegrationCatalogItem extends Omit<
+  ReferenceSourceCatalogItem,
+  'alreadyAdded' | 'existingSourceId' | 'canImport' | 'importReason'
+> {
+  integrationStatus: ReferenceIntegrationStatus;
+  sourceId: number | null;
+  quality: ReferenceSourceQualityMetrics;
+  canPreview: boolean;
+}
+
+export interface ReferenceIntegrationCatalogPayload {
+  version: number;
+  updatedAt: string;
+  total: number;
+  recommended: number;
+  enabled?: boolean;
+  limits: {
+    totalActive: number;
+    referenceActive: number;
+    referenceShadow: number;
+    referenceFormal: number;
+    totalScheduled: number;
+  };
+  activeCounts: {
+    total: number;
+    reference: number;
+    formalReference: number;
+    referenceShadow: number;
+    referenceFormal: number;
+    totalScheduled: number;
+  };
+  items: ReferenceIntegrationCatalogItem[];
+}
+
+export interface ReferenceSourcePreviewItem {
+  title: string;
+  url: string;
+  originalUrl?: string | null;
+  curationUrl?: string | null;
+  curationSource?: string | null;
+  content: string;
+  publishedAt?: string | null;
+  curationMeta?: Record<string, unknown> | null;
+}
+
+export interface ReferenceSourcePreviewPayload {
+  key: string;
+  status: 'ready' | 'empty' | 'failed';
+  fetchedAt: string;
+  error: string | null;
+  items: ReferenceSourcePreviewItem[];
+}
+
 export interface DailyReportItemDiagnostic {
   itemId: string;
   status: 'selected' | 'review' | 'latest_visible' | 'excluded' | 'not_in_window' | 'not_generated' | string;
@@ -418,11 +665,135 @@ export interface DailyReportItemDiagnostic {
   snapshotGeneratedAt?: string | null;
 }
 
+export interface ContentReadiness {
+  status: 'full_text' | 'rss_summary' | 'snippet_only' | 'title_only' | 'fetch_failed' | 'pending' | string;
+  label: string;
+  basis: 'content' | 'snippet' | 'title' | string;
+  kind?: 'article' | 'snapshot' | 'curated_summary' | 'index_item' | 'external_link_summary' | string;
+  isFullText?: boolean;
+  fullTextAvailable: boolean;
+  originalTextStatus?: 'ready' | 'pending_fetch' | 'missing_original_url' | 'not_applicable' | string;
+  action: string;
+}
+
+export type ContentEvidenceLayer =
+  | 'readableText'
+  | 'rawFeedHtml'
+  | 'externalLinkSummary'
+  | 'indexSummary'
+  | 'curatedSummary'
+  | 'snapshotText'
+  | 'snippet'
+  | 'title'
+  | 'none'
+  | string;
+
+export interface ContentEvidenceSignal {
+  available: boolean;
+  length: number;
+  label: string;
+  status?: string | null;
+  reason?: string | null;
+}
+
+export interface ContentEvidence {
+  primaryLayer: ContentEvidenceLayer;
+  primaryLabel: string;
+  rawFeedHtml: ContentEvidenceSignal;
+  readableHtml: ContentEvidenceSignal;
+  readableText: ContentEvidenceSignal;
+  externalLinkSummary?: ContentEvidenceSignal;
+  indexSummary: ContentEvidenceSignal;
+  curatedSummary: ContentEvidenceSignal;
+  snapshotText: ContentEvidenceSignal;
+  snippet: ContentEvidenceSignal;
+  title: ContentEvidenceSignal;
+  translationBasis: {
+    layer: ContentEvidenceLayer;
+    label: string;
+    reliableForFullTranslation: boolean;
+    reason: string;
+  };
+}
+
+export interface TranslationCompleteness {
+  basisLength: number;
+  translatedLength: number;
+  chunkCount: number;
+  complete: boolean;
+  usable?: boolean;
+  reason?: string | null;
+  reasonCode?: 'empty' | 'structured_output_leak' | 'non_chinese' | 'model_refusal' | 'too_short' | 'missing_paragraphs' | 'missing_links' | 'missing_images' | 'missing_code' | 'truncated' | string | null;
+  formatVersion?: 'translation-v2' | string;
+}
+
+export interface ReadingAsset {
+  id?: number | string | null;
+  type: 'summary' | 'translation' | 'rewrite' | 'qa' | 'feedback' | 'report_reference' | 'transcript' | 'knowledge' | string;
+  label: string;
+  status: 'ready' | 'pending' | 'failed' | 'skipped' | 'missing' | string;
+  basis?: 'content' | 'snippet' | 'title' | string | null;
+  model?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  preview?: string | null;
+  content?: string | null;
+  source: 'ai' | 'human' | 'system' | 'report' | string;
+  promptKey?: string | null;
+  errorReason?: string | null;
+}
+
+export interface RankContext {
+  strategy: 'feed_recommended_v1' | 'feed_latest_v1' | string;
+  version: string;
+  generatedAt: string;
+  reasons: string[];
+  fallback: boolean;
+}
+
+export interface ReportContext {
+  strategy: 'daily_report_selection_v2' | string;
+  version: string;
+  window?: string | null;
+  selectionMode: string;
+  reason: string;
+  action: string;
+  label: string;
+}
+
+export interface FeedEventContext {
+  clusterId: string;
+  leadItemId: string;
+  leadSourceName?: string | null;
+  leadReason: string;
+  internalSourceCount: number;
+  externalSourceCount: number;
+  firstPartyCount: number;
+  relatedItems: Array<{
+    id: string;
+    title: string;
+    url: string;
+    originalUrl?: string | null;
+    sourceName?: string | null;
+    sourceTier?: string | null;
+    sourceKind?: string | null;
+    sourceRole?: string | null;
+    curationSource?: string | null;
+    evidenceType: 'first_party' | 'local' | 'external_radar';
+    publishedAt?: string | null;
+    fetchedAt?: string | null;
+  }>;
+}
+
 export interface FeedItemRecord {
   id: string;
   sourceId?: number;
   title: string;
   url: string;
+  originalUrl?: string | null;
+  curationUrl?: string | null;
+  curationSource?: string | null;
+  curationMeta?: Record<string, unknown> | null;
   author?: string;
   snippet?: string;
   publishedAt?: string;
@@ -437,6 +808,7 @@ export interface FeedItemRecord {
   processingProfile?: 'full' | 'smart' | 'brief' | 'monitor' | string;
   growthAxes?: string[];
   clusterId?: string | null;
+  eventContext?: FeedEventContext | null;
   eventCluster?: {
     clusterId: string;
     leadItemId: string;
@@ -459,13 +831,20 @@ export interface FeedItemRecord {
   sourceName?: string;
   sourceCategory?: string;
   sourceCollectorType?: string;
+  sourceRole?: string | null;
+  sourceContentStrategy?: 'feed_only' | 'smart' | 'full' | 'monitor_only' | string | null;
   isRead: boolean;
   isFavorite: boolean;
   isLater?: boolean;
   mediaType?: string;
   mediaUrl?: string;
   aiTranslation?: string;
+  translatedTitle?: string | null;
+  language?: string | null;
   content?: string;
+  readabilityContent?: string | null;
+  readabilityStatus?: 'ready' | 'pending' | 'failed' | 'missing' | string | null;
+  readabilityReason?: string | null;
   transcript?: string;
   knowledge?: string;
   audioStatus?: string;
@@ -488,6 +867,15 @@ export interface FeedItemRecord {
   restoredFromFilter?: boolean | null;
   contentStatus?: string;
   contentBasis?: 'title' | 'snippet' | 'content' | null;
+  contentReadiness?: ContentReadiness;
+  contentEvidence?: ContentEvidence;
+  fullTextReady?: boolean;
+  translationAction?: 'translate' | 'fetch_then_translate' | 'open_original' | 'none' | string | null;
+  translationCompleteness?: TranslationCompleteness | null;
+  translationUsability?: 'usable' | 'invalid' | 'pending' | 'failed' | 'skipped' | string;
+  readingAssets?: ReadingAsset[];
+  rankContext?: RankContext;
+  reportContext?: ReportContext;
   contentError?: string | null;
   fetchEngine?: string | null;
   renderMode?: string | null;
@@ -995,6 +1383,8 @@ export interface GrowthDashboardItem {
   priorityScore?: number | null;
   summary?: string | null;
   growthAxes: string[];
+  primaryGrowthAxis?: string;
+  secondaryGrowthAxes?: string[];
   actionSuggestion: string;
   publishedAt?: string | null;
   fetchedAt?: string | null;
@@ -1006,6 +1396,13 @@ export interface GrowthDashboardAxis {
   averageScore?: number | null;
   summary: string;
   emptyReason?: string | null;
+  emptyDiagnostics?: {
+    matched: number;
+    filtered: number;
+    unscored: number;
+    secondaryOnly: number;
+    sourceMapped: number;
+  };
   sourceExplanation?: string | null;
   items: GrowthDashboardItem[];
 }
@@ -1051,6 +1448,17 @@ export interface InsightGeneratePayload {
 }
 
 export interface DailyReportWorkflowConfig {
+  name?: string;
+  version?: string;
+  targetAudience?: string[];
+  reportTemplateId?: string;
+  fallbackStrategy?: 'none' | 'latest_visible' | 'semantic_related' | 'source_priority' | 'manual_review' | string;
+  normalization?: {
+    translationMode?: 'fast' | 'precise' | string;
+    terminologyNormalization?: boolean;
+    entityNormalization?: boolean;
+    dedupStrategy?: 'event' | 'title' | 'semantic' | string;
+  };
   topN: number;
   minScore: number;
   enableLatestFallback: boolean;
@@ -1071,16 +1479,47 @@ export interface DailyReportWorkflowConfig {
 }
 
 export interface DailyReportWorkflowAiScene {
+  id?: number;
   type: string;
   name: string;
   isActive?: boolean | null;
   promptTemplateId?: string | null;
+  promptTemplate?: string | null;
   modelConfigId?: string | null;
   model?: string | null;
   provider?: string | null;
 }
 
+export type DailyReportCoverageStatus = 'selected' | 'review' | 'latestFallback' | 'excluded' | string;
+
+export interface DailyReportCoverageSummary {
+  total: number;
+  selected: number;
+  review: number;
+  latestFallback: number;
+  excluded: number;
+  missingDigest: number;
+}
+
+export interface DailyReportCoverageItem {
+  id: string;
+  title: string;
+  url: string;
+  sourceName: string;
+  category: string;
+  status: DailyReportCoverageStatus;
+  statusLabel: string;
+  digest: string;
+  reason: string;
+  action: string;
+  score: number | null;
+  translationStatus?: string | null;
+  translationStatusLabel?: string | null;
+}
+
 export interface DailyReportWorkflowPreview {
+  generatedAt?: string | null;
+  dataUpdatedAt?: string | null;
   selectionMode: 'scored' | 'review' | 'latest_visible' | 'empty' | string;
   funnel: {
     todayNew: number;
@@ -1095,11 +1534,16 @@ export interface DailyReportWorkflowPreview {
     translationPending: number;
     translationFailed: number;
     finalCandidates: number;
+    sampledCandidates?: number;
     filteredItems?: number;
     filteredBucketItems?: number;
     reviewItems?: number;
     pendingItems?: number;
   };
+  coverageDiagnostics?: DailyReportCoverageDiagnostics | null;
+  coverageSummary?: DailyReportCoverageSummary | null;
+  coverageItems?: DailyReportCoverageItem[];
+  coverageMarkdown?: string;
   candidates: Array<{
     id: string;
     title: string;
@@ -1137,10 +1581,470 @@ export interface DailyReportWorkflowPayload {
   aiScenes?: DailyReportWorkflowAiScene[];
 }
 
+export interface DailyWorkbenchPayload {
+  date: string;
+  reportScope?: {
+    reportType: string;
+    sourceId?: number | null;
+    sourceName?: string | null;
+    label: string;
+  };
+  workflow: DailyReportWorkflowConfig;
+  preview: DailyReportWorkflowPreview & { generatedAt?: string | null };
+  report: {
+    title: string;
+    generatedAt?: string | null;
+    itemCount: number;
+    highlights: string[];
+    topItems: Array<Record<string, unknown>>;
+    source?: 'final_report' | 'none' | string;
+    qualityStatus?: 'full' | 'degraded' | null | string;
+    qualityReasons?: string[];
+    qualityWarnings?: string[];
+    qualityReasonLabel?: string | null;
+  };
+  reportState?: {
+    status: 'missing' | 'full' | 'stale' | 'degraded' | string;
+    label: string;
+    generatedAt?: string | null;
+    itemCount: number;
+    reason: string;
+  };
+  dataFreshness?: Record<string, {
+    source: string;
+    asOf?: string | null;
+    dateScope: string;
+    label: string;
+  }>;
+  agentMatrix: Array<{
+    key: string;
+    label: string;
+    status: 'completed' | 'fallback' | 'error' | 'not_run' | 'pending' | string;
+    statusSource?: 'report_payload' | 'ai_usage_target' | 'no_record' | string;
+    calls: number;
+    tokens: number;
+    cost?: number | null;
+    signal?: string;
+    provider?: string | null;
+    model?: string | null;
+    promptTemplateId?: string | null;
+    modelConfigId?: string | null;
+    error?: string | null;
+    repaired?: boolean;
+  }>;
+  monitor: DailyUsageSummary;
+  dailyUsage?: DailyUsageSummary;
+  systemUsage24h?: DailyUsageSummary;
+  scheduleContext?: {
+    dailyReportEnabled: boolean;
+    nextScheduledAt?: string | null;
+    catchUpDays: number;
+    sourceScoped?: boolean;
+    label: string;
+  };
+  activeGenerationJob?: DailyGenerationJob | null;
+}
+
+export interface DailyUsageSummary {
+    calls: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    estimatedCost?: number | null;
+    byStatus?: Array<{ key: string; count: number; inputTokens?: number; outputTokens?: number; estimatedCost?: number; avgLatencyMs?: number | null }>;
+    hotspotErrors?: Array<{ key: string; count: number; estimatedCost?: number; avgLatencyMs?: number | null }>;
+}
+
+export interface DailyGenerationProgress {
+  stage: string;
+  label: string;
+  percent: number;
+  message: string;
+  detail?: Record<string, unknown> | null;
+  updatedAt?: string | null;
+}
+
+export interface DailyGenerationJob {
+  jobId: string;
+  state: string;
+  status: string;
+  date?: string | null;
+  sourceId?: number | null;
+  sourceName?: string | null;
+  mode?: 'fast' | 'full' | string | null;
+  preset?: string | null;
+  trigger?: 'manual' | 'cron' | 'startup_catchup' | string | null;
+  scheduledFor?: string | null;
+  requestedAt?: string | null;
+  progress: DailyGenerationProgress;
+  stage?: string;
+  label?: string;
+  percent?: number;
+  message?: string;
+  attemptsMade?: number;
+  timestamp?: number | null;
+  processedOn?: number | null;
+  finishedOn?: number | null;
+  failedReason?: string | null;
+  result?: {
+    date?: string;
+    itemCount?: number;
+    generatedAt?: string;
+    reportUrl?: string;
+    qualityStatus?: 'full' | 'degraded' | string;
+    qualityReasons?: string[];
+  } | null;
+}
+
+export interface ItemTranslationProgress {
+  stage: string;
+  label: string;
+  percent: number;
+  message: string;
+  detail?: Record<string, unknown> | null;
+  updatedAt?: string | null;
+}
+
+export interface ItemTranslationJob {
+  jobId: string;
+  state: string;
+  status: string;
+  itemId?: string | null;
+  progress: ItemTranslationProgress;
+  stage?: string;
+  label?: string;
+  percent?: number;
+  message?: string;
+  attemptsMade?: number;
+  timestamp?: number | null;
+  processedOn?: number | null;
+  finishedOn?: number | null;
+  failedReason?: string | null;
+  result?: {
+    itemId?: string;
+    translated?: number;
+    skipped?: number;
+    contentFetched?: boolean;
+    errorReason?: string | null;
+    data?: FeedItemRecord | null;
+    finishedAt?: string;
+  } | null;
+}
+
+export interface DailyCandidatesPayload {
+  date?: string;
+  reportScope?: {
+    reportType: string;
+    sourceId?: number | null;
+    sourceName?: string | null;
+    label: string;
+  };
+  workflow: DailyReportWorkflowConfig;
+  funnel: DailyReportWorkflowPreview['funnel'];
+  candidates: DailyReportWorkflowPreview['candidates'];
+  excluded: DailyReportWorkflowPreview['excluded'];
+  excludedSummary?: DailyReportWorkflowPreview['excludedSummary'];
+  coverageSummary?: DailyReportCoverageSummary | null;
+  coverageItems?: DailyReportCoverageItem[];
+  coverageMarkdown?: string;
+  coverageDiagnostics?: DailyReportCoverageDiagnostics | null;
+  filters?: Record<string, unknown>;
+}
+
+export interface DailyReportCoverageDiagnostics {
+  totalFetched: number;
+  sampledCandidates: number;
+  mainVisible: number;
+  scored: number;
+  unscored: number;
+  raw: number;
+  summaryReady: number;
+  summaryFailed: number;
+  hotSignals: number;
+  hotUnscored: number;
+  hotNotSampled: number;
+  hotNotSelected: number;
+  finalCandidates: number;
+}
+
+export interface DailyReportEventMetrics {
+  localItemCount: number;
+  independentEventCount: number;
+  multiSourceEventCount: number;
+  firstPartyEventCount: number;
+  firstPartyEventShare: number;
+  modelProductEventCount: number;
+  externalRadarItemCount: number;
+  externalRadarEventCount: number;
+  aihotLocalMissCount: number;
+  unverifiableRadarItemCount: number;
+}
+
+export interface DailyReportLatestPayload {
+  id: number | string;
+  date: string;
+  type: string;
+  summary?: string | null;
+  markdown: string;
+  itemCount?: number;
+  generatedAt?: string | null;
+  qualityStatus?: 'full' | 'degraded' | null | string;
+  qualityReasons?: string[];
+  qualityWarnings?: string[];
+  qualityReasonLabel?: string | null;
+  publicationStatus?: 'published' | 'draft' | 'missing' | string;
+  publishable?: boolean;
+  draft?: {
+    markdown: string;
+    generatedAt?: string | null;
+    qualityReasons?: string[];
+    qualityReasonLabel?: string | null;
+  } | null;
+  payload?: InsightRecord['payload'];
+  reportScope?: {
+    reportType: string;
+    sourceId?: number | null;
+    sourceName?: string | null;
+    label: string;
+  };
+  preview?: DailyWorkbenchPayload['report'];
+  missing?: boolean;
+  dateNavigation?: {
+    currentDate?: string | null;
+    latestDate?: string | null;
+    previousDate?: string | null;
+    nextDate?: string | null;
+    recentDates?: string[];
+    latestPublishedDate?: string | null;
+    previousPublishedDate?: string | null;
+    nextPublishedDate?: string | null;
+    publishedDates?: string[];
+  };
+  trendSummary?: {
+    newItems: number;
+    totalItems: number;
+    compareWindowDays: number;
+    categories: Array<{ category: string; count: number; baselineAvg: number; delta: number; direction: 'up' | 'down' | 'flat' | string }>;
+    sources: Array<{ sourceName: string; count: number }>;
+    themes: Array<{ label: string; count: number; sampleTitles: string[] }>;
+    funnel?: DailyReportWorkflowPreview['funnel'];
+    eventMetrics?: DailyReportEventMetrics;
+  } | null;
+  eventMetrics?: DailyReportEventMetrics | null;
+  priorityArticles?: Array<{
+    id: string;
+    title: string;
+    url: string;
+    sourceName: string;
+    category: string;
+    reason: string;
+    summary: string;
+    assetReferences?: Array<{
+      promptKey: string;
+      label: string;
+      excerpt: string;
+    }>;
+  }>;
+  coverJudgement?: {
+    title: string;
+    summary: string;
+  } | null;
+  radarOverview?: {
+    markdown: string;
+  } | null;
+  tableOfContents?: string[];
+  readingOrder?: { markdown: string } | null;
+  nextActions?: { markdown: string } | null;
+  moduleSections?: Array<{
+    key: string;
+    title: string;
+    editorialTitle?: string;
+    conclusion: string;
+    narrativeMarkdown?: string;
+    priorityArticles: Array<{
+      id: string;
+      title: string;
+      url: string;
+      sourceName: string;
+      category: string;
+      reason: string;
+      summary: string;
+    }>;
+    primaryLinks?: Array<{
+      id: string;
+      title: string;
+      url: string;
+      sourceName: string;
+      category: string;
+      reason: string;
+      summary: string;
+    }>;
+    secondaryLinks?: Array<{
+      id: string;
+      title: string;
+      url: string;
+      sourceName: string;
+      category: string;
+      reason: string;
+      summary: string;
+    }>;
+    evidence?: Array<{
+      itemId: string;
+      title: string;
+      url: string;
+      sourceName: string;
+      fact: string;
+      factBasis: 'article_asset' | 'report_summary' | 'ai_summary' | 'snippet' | 'module_summary' | 'title';
+      role: 'primary' | 'supporting';
+    }>;
+    signals: string[];
+    noise: string[];
+    actions: string[];
+    coverageCount: number;
+    evidenceCount?: number;
+  }>;
+  moduleNarratives?: DailyReportLatestPayload['moduleSections'];
+  moreDynamics?: Array<{
+    id: string;
+    title: string;
+    url: string;
+    sourceName: string;
+    category: string;
+    reason: string;
+    summary: string;
+  }>;
+  deepReads?: Array<{
+    id: string;
+    title: string;
+    url: string;
+    sourceName: string;
+    category: string;
+    reason: string;
+    summary: string;
+  }>;
+  editorialMaterials?: Array<{
+    itemId: string;
+    title: string;
+    fact: string;
+    factBasis: 'article_asset' | 'report_summary' | 'ai_summary' | 'snippet' | 'module_summary' | 'title';
+    evidenceUrl: string;
+    sourceName: string;
+    theme: string;
+    recommendedPlacement: 'featured' | 'deep_read' | 'module' | 'more_dynamics' | 'coverage_index';
+    placements: Array<'featured' | 'deep_read' | 'module' | 'more_dynamics' | 'coverage_index'>;
+    reason: string;
+    selectionMode?: string;
+    score: number | null;
+  }>;
+  editorialDigest?: {
+    coverJudgement: {
+      title: string;
+      summary: string;
+    };
+    radarOverview: {
+      markdown: string;
+    };
+    tableOfContents: string[];
+    curated: DailyReportLatestPayload['priorityArticles'];
+    moduleReferences: NonNullable<DailyReportLatestPayload['priorityArticles']>;
+    moreDynamics: NonNullable<DailyReportLatestPayload['moreDynamics']>;
+    deepReads: NonNullable<DailyReportLatestPayload['deepReads']>;
+    moduleNarratives: DailyReportLatestPayload['moduleSections'];
+    materials: NonNullable<DailyReportLatestPayload['editorialMaterials']>;
+    readingOrder: { markdown: string };
+    nextActions: { markdown: string };
+  } | null;
+  coverageSummary?: DailyReportCoverageSummary | null;
+  coverageItems?: DailyReportCoverageItem[];
+  coverageMarkdown?: string;
+  coverageDiagnostics?: DailyReportCoverageDiagnostics | null;
+  reportContext?: ReportContext;
+}
+
 export interface ExportMutationResult {
   message?: string;
   exported?: number;
   [key: string]: unknown;
+}
+
+export interface AudioArtifactChapter {
+  id: string;
+  title: string;
+  summary: string;
+  bullets: string[];
+  start?: number | null;
+  end?: number | null;
+  speakers?: string[];
+  source?: string | null;
+}
+
+export interface AudioArtifactHighlight {
+  id: string;
+  title: string;
+  text: string;
+  reason: string;
+  start?: number | null;
+  end?: number | null;
+  speaker?: string | null;
+  source?: string | null;
+}
+
+export interface AudioArtifactMindMap {
+  root: string;
+  branches: Array<{
+    title: string;
+    children: string[];
+    chapter_id?: string | null;
+  }>;
+}
+
+export interface AudioArtifactQaCitation {
+  id: string;
+  evidence_id?: string | null;
+  start: number;
+  end: number;
+  time_label?: string | null;
+  text: string;
+  speaker?: string | null;
+  source?: string | null;
+}
+
+export interface AudioArtifactQaAnswer {
+  id: string;
+  question: string;
+  prompt_key?: string | null;
+  answer: string;
+  citations: AudioArtifactQaCitation[];
+  status: 'ready' | 'failed' | string;
+  model?: string | null;
+  provider?: string | null;
+  input_tokens?: number;
+  output_tokens?: number;
+  created_at?: string | null;
+}
+
+export interface AudioArtifactsV1 {
+  schema: 'audio_artifacts_v1';
+  version: 1;
+  generated_at?: string | null;
+  basis?: {
+    summary?: boolean;
+    transcript?: boolean;
+    timed_segments?: number;
+    topic_anchors?: number;
+  };
+  chapters: AudioArtifactChapter[];
+  highlights: AudioArtifactHighlight[];
+  mind_map: AudioArtifactMindMap;
+  action_items?: Array<Record<string, unknown>>;
+  qa?: {
+    suggestions?: Array<{
+      key: string;
+      label: string;
+      prompt: string;
+    }>;
+    answers?: AudioArtifactQaAnswer[];
+  };
 }
 
 export interface AudioTask {
@@ -1154,7 +2058,7 @@ export interface AudioTask {
   audio_duration?: number | null;
   audio_file_size?: number | null;
   transcript_text?: string | null;
-  summary_result?: Record<string, unknown> | string | null;
+  summary_result?: (Record<string, unknown> & { artifacts?: AudioArtifactsV1 }) | string | null;
   multimodal_result?: Record<string, unknown> | null;
   user_instruction?: string | null;
   asr_model?: string | null;
@@ -1184,6 +2088,15 @@ export interface AudioTask {
 export interface FetchSettings {
   userId: string;
   autoFetchEnabled: boolean;
+  autoSummaryEnabled: boolean;
+  autoTranslationEnabled: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface DailyReportSettings {
+  userId: string;
+  dailyReportEnabled: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -1193,6 +2106,17 @@ export interface AudioTaskListResponse {
   total: number;
   page: number;
   page_size: number;
+}
+
+export interface AudioTaskPlaybackUrl {
+  url: string;
+  expires_in: number;
+  mode: 'direct' | 'signed' | 'stream' | string;
+}
+
+export interface AudioTaskQaResponse {
+  answer: AudioArtifactQaAnswer;
+  task: AudioTask;
 }
 
 export interface AudioTaskTemplate {
@@ -1206,6 +2130,9 @@ export interface AudioModelOption {
   id: string;
   name: string;
   description?: string;
+  provider?: string;
+  available?: boolean;
+  unavailable_reason?: string | null;
 }
 
 export interface AudioTaskModelsResponse {

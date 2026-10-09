@@ -1,13 +1,53 @@
+import jevRoutes from './routes/jev.js';
+import { startJevWorker } from './jev/queue.js';
 import { serve } from '@hono/node-server';
+import { UnrecoverableError } from 'bullmq';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { sql } from 'drizzle-orm';
 import { logger as pinoLogger } from './lib/logger.js';
 import { config } from './config/index.js';
-import { createFetchWorker } from './scheduler/queue.js';
+import {
+  createDailyReportWorker,
+  createFetchWorker,
+  createItemTranslationWorker,
+  createProcessWorker,
+  fetchQueue,
+  processQueue,
+} from './scheduler/queue.js';
 import { enqueueDueFetches, handleFetchJob } from './scheduler/pipeline.js';
 import { startCronJobs } from './scheduler/cron.js';
 import { db } from './db/index.js';
+import { buildDailyGenerationProgress, humanizeDailyGenerationError } from './lib/daily-generation-progress.js';
+import { buildItemTranslationProgress } from './lib/item-translation-progress.js';
+import { runFullItemTranslation } from './lib/item-full-translation.js';
+import {
+  enqueueItemTranslationJob,
+  markAutomaticTranslationPending,
+  resolveTranslationProviderReadiness,
+} from './scheduler/item-translation-jobs.js';
+import {
+  resolveTranslationReadinessJobDisposition,
+  translationProviderReadinessMessage,
+} from './scheduler/item-translation-policy.js';
+import { buildDailyInsightType, generateDailyReport } from './outputs/daily-report.js';
+import { resolveDailyReportWindow } from './outputs/daily-report-window.js';
+import { scheduleDailyReportPush } from './outputs/push.js';
+import { getDailyReportWorkflow } from './routes/insights.js';
+import { exportToObsidian } from './outputs/obsidian.js';
+import { exportToKnowledgeFiles } from './outputs/knowledge.js';
+import { enqueueDailyReportCatchUp } from './scheduler/daily-report-scheduler.js';
+import { getUserFetchSettings } from './lib/fetch-settings.js';
+import { qualityFilterItems } from './processors/quality-filter.js';
+import { scoreItems } from './processors/ai-scorer.js';
+import { summarizeItemsDetailed, translateItemsDetailed } from './processors/ai-summarizer.js';
+import { waitForQueueQuiescence } from './scheduler/startup-recovery.js';
+import { resolveDailyReportDeliveryDecision } from './lib/daily-report-quality.js';
+import {
+  resolveAutomaticAiRuntimePolicy,
+  resolveDailyReportRuntimePolicy,
+  resolveItemTranslationRuntimePolicy,
+} from './lib/runtime-security-policy.js';
 
 import healthRoutes from './routes/health.js';
 import authRoutes from './routes/auth.js';
@@ -15,6 +55,7 @@ import sourcesRoutes from './routes/sources.js';
 import itemsRoutes from './routes/items.js';
 import fetchRoutes from './routes/fetch.js';
 import insightsRoutes from './routes/insights.js';
+import dailyRoutes from './routes/daily.js';
 import exportRoutes from './routes/export.js';
 import hooksRoutes from './routes/hooks.js';
 import knowledgeRoutes from './routes/knowledge.js';
@@ -31,10 +72,18 @@ import settingsRoutes from './routes/settings.js';
 import adminAiUsageRoutes from './routes/admin-ai-usage.js';
 import adminRetentionRoutes from './routes/admin-retention.js';
 import adminStorageRoutes from './routes/admin-storage.js';
+import integrationsRoutes from './routes/integrations.js';
 
+import researchRoutes from './routes/research.js';
+import radiusRoutes from './routes/radius.js';
+import { startResearchWorker } from './research/queue.js';
+const researchWorker = startResearchWorker();
+const jevWorker = startJevWorker();
 const app = new Hono();
+let httpServer: ReturnType<typeof serve> | null = null;
+let shutdownStarted = false;
 
-app.use('*', cors());
+app.use('*', cors({ origin: config.cors.origins }));
 
 app.use('*', async (c, next) => {
   const start = Date.now();
@@ -49,6 +98,10 @@ app.route('/api/sources', sourcesRoutes);
 app.route('/api/items', itemsRoutes);
 app.route('/api/fetch', fetchRoutes);
 app.route('/api/insights', insightsRoutes);
+app.route('/api/daily', dailyRoutes);
+app.route('/api/research', researchRoutes);
+app.route('/api/radius', radiusRoutes);
+app.route('/api/jev', jevRoutes);
 app.route('/api/export', exportRoutes);
 app.route('/api/hooks', hooksRoutes);
 app.route('/api/knowledge', knowledgeRoutes);
@@ -65,6 +118,7 @@ app.route('/api/settings', settingsRoutes);
 app.route('/api/admin/ai-usage', adminAiUsageRoutes);
 app.route('/api/admin/retention', adminRetentionRoutes);
 app.route('/api/admin/storage', adminStorageRoutes);
+app.route('/api/integrations', integrationsRoutes);
 
 app.get('/', (c) => c.json({
   service: 'hub-engine',
@@ -76,9 +130,270 @@ const fetchWorker = createFetchWorker(async (job) => {
   await handleFetchJob(job);
 });
 
+const dailyReportWorker = createDailyReportWorker(async (job) => {
+  await job.updateProgress(buildDailyGenerationProgress('queued', { message: '日报任务开始排队。' }));
+  const runtimePolicy = resolveDailyReportRuntimePolicy({
+    trigger: job.data.trigger,
+    globalEnabled: config.ai.enabled,
+  });
+  if (!runtimePolicy.run) {
+    await job.updateProgress(buildDailyGenerationProgress('completed', {
+      message: '自动日报已由 AI 总闸关闭，本任务未调用模型。',
+      detail: {
+        trigger: job.data.trigger,
+        skipped: true,
+        reason: runtimePolicy.skippedReason,
+      },
+    }));
+    return {
+      date: job.data.date,
+      itemCount: 0,
+      generatedAt: new Date().toISOString(),
+      qualityStatus: 'degraded',
+      qualityReasons: [runtimePolicy.skippedReason],
+      message: '自动日报已跳过，未调用模型。',
+      reportUrl: null,
+      skipped: true,
+      skipReason: runtimePolicy.skippedReason,
+    };
+  }
+  const workflow = await getDailyReportWorkflow(job.data.userId);
+  try {
+    const reportDate = resolveDailyReportWindow(job.data.date).dayStart;
+    const workflowOverride = job.data.sourceId
+      ? {
+        ...workflow,
+        scope: {
+          ...(workflow.scope || {}),
+          sourceIds: [job.data.sourceId],
+          sourceNames: job.data.sourceName ? [job.data.sourceName] : [],
+        },
+      }
+      : workflow;
+    const report = await generateDailyReport(job.data.userId, reportDate, {
+      generationMode: job.data.mode,
+      preset: job.data.preset,
+      workflow: workflowOverride,
+      sourceId: job.data.sourceId || null,
+      sourceName: job.data.sourceName || null,
+      reportType: buildDailyInsightType(job.data.sourceId || null),
+      onProgress: (progress) => job.updateProgress(progress),
+    });
+    const delivery = resolveDailyReportDeliveryDecision(report.payload);
+    if (delivery.allowExternalPush) {
+      scheduleDailyReportPush(`${job.data.sourceName || '信息中枢日报'} — ${report.date}`, report.markdown);
+    }
+    if (!job.data.sourceId && delivery.allowAutomaticFormalExport) {
+      const exportResults = await Promise.allSettled([
+        exportToObsidian(job.data.userId),
+        exportToKnowledgeFiles(job.data.userId),
+      ]);
+      exportResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          pinoLogger.warn({
+            userId: job.data.userId,
+            target: index === 0 ? 'obsidian' : 'knowledge',
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+          }, 'Daily report export failed after generation');
+        }
+      });
+    }
+    return {
+      date: report.date,
+      itemCount: report.newItems,
+      generatedAt: new Date().toISOString(),
+      qualityStatus: delivery.quality.status,
+      qualityReasons: delivery.quality.reasons,
+      message: delivery.message,
+      reportUrl: job.data.sourceId
+        ? `/daily/reports/latest?date=${encodeURIComponent(report.date)}&sourceId=${encodeURIComponent(String(job.data.sourceId))}`
+        : `/daily/reports/latest?date=${encodeURIComponent(report.date)}`,
+    };
+  } catch (err) {
+    const userMessage = humanizeDailyGenerationError(err);
+    await job.updateProgress(buildDailyGenerationProgress('failed', {
+      message: userMessage,
+    }));
+    pinoLogger.error({ jobId: job.id, error: (err as Error).message }, 'Daily report generation failed');
+    throw err;
+  }
+});
+
+const itemTranslationWorker = createItemTranslationWorker(async (job) => {
+  await job.updateProgress(buildItemTranslationProgress('queued', {
+    message: '全文翻译任务开始排队。',
+    detail: { itemId: job.data.itemId },
+  }));
+  try {
+    const runtimePolicy = resolveItemTranslationRuntimePolicy({
+      mode: job.data.mode,
+      globalEnabled: config.ai.enabled,
+      translationEnabled: config.ai.translationEnabled,
+    });
+    if (!runtimePolicy.callProvider) {
+      await job.updateProgress(buildItemTranslationProgress('completed', {
+        message: '自动全文翻译已由运行时开关关闭，本任务未调用模型。',
+        detail: {
+          itemId: job.data.itemId,
+          translated: 0,
+          skipped: 1,
+          reason: runtimePolicy.skippedReason,
+        },
+      }));
+      return {
+        itemId: job.data.itemId,
+        translated: 0,
+        skipped: 1,
+        skipReason: runtimePolicy.skippedReason,
+        mode: job.data.mode,
+        trigger: job.data.trigger,
+        finishedAt: new Date().toISOString(),
+      };
+    }
+
+    const providerReadiness = await resolveTranslationProviderReadiness(job.data.userId);
+    const readinessDisposition = resolveTranslationReadinessJobDisposition(job.data.mode, providerReadiness);
+    if (readinessDisposition !== 'proceed') {
+      const message = translationProviderReadinessMessage(providerReadiness);
+      if (readinessDisposition === 'fail') {
+        throw new UnrecoverableError(message);
+      }
+      await markAutomaticTranslationPending(job.data.userId, job.data.itemId, message);
+      await job.updateProgress(buildItemTranslationProgress('completed', {
+        message,
+        detail: {
+          itemId: job.data.itemId,
+          translated: 0,
+          skipped: 1,
+          reason: providerReadiness.reason,
+        },
+      }));
+      return {
+        itemId: job.data.itemId,
+        translated: 0,
+        skipped: 1,
+        skipReason: providerReadiness.reason,
+        mode: job.data.mode,
+        trigger: job.data.trigger,
+        finishedAt: new Date().toISOString(),
+      };
+    }
+    if (job.data.mode === 'automatic') {
+      await job.updateProgress(buildItemTranslationProgress('translating', {
+        message: '正在生成高价值内容译文。',
+        detail: { itemId: job.data.itemId, trigger: job.data.trigger },
+      }));
+      const automatic = await translateItemsDetailed(job.data.userId, 1, {
+        itemId: job.data.itemId,
+        automatic: true,
+        bypassQualityCooldown: true,
+      });
+      if (automatic.errors.length > 0) {
+        throw new Error(automatic.errors[0]);
+      }
+      await job.updateProgress(buildItemTranslationProgress('completed', {
+        detail: {
+          itemId: job.data.itemId,
+          translated: automatic.processed,
+          skipped: automatic.skipped,
+        },
+      }));
+      return {
+        itemId: job.data.itemId,
+        translated: automatic.processed,
+        skipped: automatic.skipped,
+        mode: job.data.mode,
+        trigger: job.data.trigger,
+        finishedAt: new Date().toISOString(),
+      };
+    }
+
+    const result = await runFullItemTranslation(job.data.userId, job.data.itemId, {
+      onProgress: (progress) => job.updateProgress(progress),
+    });
+    await job.updateProgress(buildItemTranslationProgress('completed', {
+      detail: {
+        itemId: job.data.itemId,
+        translated: result.translated,
+        skipped: result.skipped,
+      },
+    }));
+    return {
+      itemId: job.data.itemId,
+      translated: result.translated,
+      skipped: result.skipped,
+      contentFetched: result.contentFetched,
+      errorReason: result.errorReason,
+      mode: job.data.mode,
+      trigger: job.data.trigger,
+      data: result.item,
+      finishedAt: new Date().toISOString(),
+    };
+  } catch (err) {
+    await job.updateProgress(buildItemTranslationProgress('failed', {
+      message: (err as Error).message || '全文翻译失败。',
+      detail: { itemId: job.data.itemId },
+    }));
+    throw err;
+  }
+});
+
+const processWorker = createProcessWorker(async (job) => {
+  if (job.data.stage !== 'ai_pipeline') return;
+  const settings = await getUserFetchSettings(job.data.userId);
+  const autoSummaryEnabled = job.data.autoSummaryEnabled ?? settings.autoSummaryEnabled;
+  const autoTranslationEnabled = job.data.autoTranslationEnabled ?? settings.autoTranslationEnabled;
+  const runtimePolicy = resolveAutomaticAiRuntimePolicy({
+    globalEnabled: config.ai.enabled,
+    scoringEnabled: config.ai.scoringEnabled,
+    summaryEnabled: config.ai.summaryEnabled,
+    translationEnabled: config.ai.translationEnabled,
+    userAutoSummaryEnabled: autoSummaryEnabled,
+    userAutoTranslationEnabled: autoTranslationEnabled,
+  });
+
+  if (!runtimePolicy.enabled) return;
+
+  if (runtimePolicy.runQualityFilter) {
+    await qualityFilterItems(job.data.userId, 1, {
+      itemId: job.data.itemId,
+      automatic: true,
+    });
+  }
+  if (runtimePolicy.runScoring) {
+    await scoreItems(job.data.userId, 1, {
+      itemId: job.data.itemId,
+      automatic: true,
+    });
+  }
+  if (runtimePolicy.runSummary) {
+    await summarizeItemsDetailed(job.data.userId, 1, {
+      itemId: job.data.itemId,
+      automatic: true,
+    });
+  }
+  if (runtimePolicy.runTranslation) {
+    await enqueueItemTranslationJob({
+      userId: job.data.userId,
+      itemId: job.data.itemId,
+      mode: 'automatic',
+      trigger: 'pipeline',
+    });
+  }
+});
+
 async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table public.prompt_templates alter column category type text`);
   await db.execute(sql`alter table hub.ai_configs drop constraint if exists ai_configs_type_check`);
+  await db.execute(sql`alter table hub.insights drop constraint if exists insights_type_check`);
+  await db.execute(sql`
+    alter table hub.insights
+    add constraint insights_type_check
+    check (
+      type = any (array['daily'::text, 'weekly'::text])
+      or type like 'daily_source_%'
+    )
+  `);
   await db.execute(sql`
     update hub.filter_rules
     set
@@ -115,12 +430,87 @@ async function ensureSchemaCompatibility() {
     create table if not exists hub.user_settings (
       user_id uuid primary key references auth.users(id) on delete cascade,
       auto_fetch_enabled boolean not null default true,
+      auto_summary_enabled boolean not null default true,
+      auto_translation_enabled boolean not null default true,
+      daily_report_enabled boolean not null default false,
       daily_report_workflow jsonb,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     )
   `);
+  await db.execute(sql`alter table hub.user_settings add column if not exists auto_summary_enabled boolean`);
+  await db.execute(sql`alter table hub.user_settings add column if not exists auto_translation_enabled boolean`);
+  await db.execute(sql`update hub.user_settings set auto_summary_enabled = true where auto_summary_enabled is null`);
+  await db.execute(sql`update hub.user_settings set auto_translation_enabled = true where auto_translation_enabled is null`);
+  await db.execute(sql`alter table hub.user_settings alter column auto_summary_enabled set default true`);
+  await db.execute(sql`alter table hub.user_settings alter column auto_translation_enabled set default true`);
+  await db.execute(sql`alter table hub.user_settings alter column auto_summary_enabled set not null`);
+  await db.execute(sql`alter table hub.user_settings alter column auto_translation_enabled set not null`);
   await db.execute(sql`alter table hub.user_settings add column if not exists daily_report_workflow jsonb`);
+  await db.execute(sql`alter table hub.user_settings add column if not exists daily_report_enabled boolean`);
+  await db.execute(sql`
+    update hub.user_settings settings
+    set daily_report_workflow = jsonb_set(
+      settings.daily_report_workflow,
+      '{scope,sourceTiers}',
+      coalesce((
+        select jsonb_agg(to_jsonb(normalized.mapped) order by normalized.first_ord)
+        from (
+          select mapped, min(ord) as first_ord
+          from (
+            select case entry.value
+              when 'T1' then 'S'
+              when 'T1.5' then 'A'
+              when 'T2' then null
+              else upper(entry.value)
+            end as mapped,
+            entry.ord
+            from jsonb_array_elements_text(
+              coalesce(settings.daily_report_workflow #> '{scope,sourceTiers}', '[]'::jsonb)
+            ) with ordinality as entry(value, ord)
+          ) mapped_entries
+          where mapped in ('S', 'A', 'B', 'C', 'D')
+          group by mapped
+        ) normalized
+      ), '["S", "A"]'::jsonb),
+      true
+    )
+    where settings.daily_report_workflow is not null
+      and jsonb_typeof(settings.daily_report_workflow #> '{scope,sourceTiers}') = 'array'
+      and exists (
+        select 1
+        from jsonb_array_elements_text(settings.daily_report_workflow #> '{scope,sourceTiers}') as legacy(value)
+        where legacy.value in ('T1', 'T1.5', 'T2')
+      )
+  `);
+  await db.execute(sql`
+    insert into hub.user_settings (user_id, auto_fetch_enabled, daily_report_enabled, created_at, updated_at)
+    select distinct u.id, true, true, now(), now()
+    from auth.users u
+    where u.username !~* '^(qa|shadow|hubaudio)'
+      and (
+        exists (
+          select 1 from hub.insights insight
+          where insight.user_id = u.id
+            and insight.type = 'daily'
+        )
+        or exists (
+          select 1 from hub.user_settings existing
+          where existing.user_id = u.id
+            and existing.daily_report_workflow is not null
+        )
+      )
+    on conflict (user_id) do update
+    set daily_report_enabled = coalesce(hub.user_settings.daily_report_enabled, excluded.daily_report_enabled),
+        updated_at = case
+          when hub.user_settings.daily_report_enabled is null then now()
+          else hub.user_settings.updated_at
+        end
+  `);
+  await db.execute(sql`update hub.user_settings set daily_report_enabled = false where daily_report_enabled is null`);
+  await db.execute(sql`alter table hub.user_settings alter column daily_report_enabled set default false`);
+  await db.execute(sql`alter table hub.user_settings alter column daily_report_enabled set not null`);
+  await db.execute(sql`create index if not exists idx_user_settings_daily_report on hub.user_settings(daily_report_enabled)`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_url_unique`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_url_key`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_processing_status_check`);
@@ -131,6 +521,9 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table hub.items add column if not exists growth_axes jsonb default '[]'::jsonb`);
   await db.execute(sql`alter table hub.items add column if not exists content_status text default 'missing'`);
   await db.execute(sql`alter table hub.items add column if not exists content_error text`);
+  await db.execute(sql`alter table hub.items add column if not exists readability_content text`);
+  await db.execute(sql`alter table hub.items add column if not exists readability_status text default 'missing'`);
+  await db.execute(sql`alter table hub.items add column if not exists readability_reason text`);
   await db.execute(sql`alter table hub.items add column if not exists fetch_engine text`);
   await db.execute(sql`alter table hub.items add column if not exists render_mode text`);
   await db.execute(sql`alter table hub.items add column if not exists blocked_reason text`);
@@ -139,6 +532,7 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`alter table hub.items add column if not exists summary_reason text`);
   await db.execute(sql`alter table hub.items add column if not exists translation_status text default 'pending'`);
   await db.execute(sql`alter table hub.items add column if not exists translation_reason text`);
+  await db.execute(sql`alter table hub.items add column if not exists translated_title text`);
   await db.execute(sql`alter table hub.items add column if not exists audio_status_reason text`);
   await db.execute(sql`alter table hub.items drop constraint if exists items_audio_status_check`);
   await db.execute(sql`
@@ -343,9 +737,9 @@ async function ensureSchemaCompatibility() {
   await db.execute(sql`
     update hub.sources
     set authority_weight = greatest(0.35, least(2, case
-      when source_tier in ('T1', 'S') then 1.22
-      when source_tier in ('T1.5', 'A') then 1.08
-      when source_tier in ('T2', 'B') then 0.96
+      when source_tier = 'S' then 1.22
+      when source_tier = 'A' then 1.08
+      when source_tier = 'B' then 0.96
       when source_tier = 'C' then 0.82
       else 0.72
     end
@@ -491,6 +885,35 @@ async function ensureSchemaCompatibility() {
   `);
   await db.execute(sql`create index if not exists idx_item_feedback_item_user on hub.item_feedback(item_id, user_id, created_at desc)`);
   await db.execute(sql`
+    create table if not exists hub.item_reading_assets (
+      id serial primary key,
+      item_id uuid not null references hub.items(id) on delete cascade,
+      user_id uuid not null references auth.users(id) on delete cascade,
+      asset_type text not null,
+      prompt_key text not null,
+      label text not null,
+      status text not null default 'ready',
+      basis text,
+      content text,
+      preview text,
+      source text not null default 'ai',
+      provider text,
+      model_name text,
+      model_config_id text,
+      prompt_template_id text,
+      metadata jsonb not null default '{}'::jsonb,
+      error_reason text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `);
+  await db.execute(sql`
+    create unique index if not exists idx_item_reading_assets_unique
+    on hub.item_reading_assets(user_id, item_id, asset_type, prompt_key)
+  `);
+  await db.execute(sql`create index if not exists idx_item_reading_assets_item on hub.item_reading_assets(item_id, user_id)`);
+  await db.execute(sql`create index if not exists idx_item_reading_assets_user_updated on hub.item_reading_assets(user_id, updated_at desc)`);
+  await db.execute(sql`
     create table if not exists hub.item_score_breakdowns (
       id serial primary key,
       item_id uuid not null references hub.items(id) on delete cascade,
@@ -608,14 +1031,46 @@ async function bootstrap() {
   await ensureSchemaCompatibility();
   await reconcileRunningFetchLogs();
   pinoLogger.info('Fetch worker started');
+  pinoLogger.info('Daily report worker started');
   startCronJobs();
-  void enqueueDueFetches(50).then((result) => {
-    pinoLogger.info({ ...result, phase: 'startup-catch-up' }, 'Startup catch-up finished');
-  }).catch((error) => {
-    pinoLogger.error({ error: error instanceof Error ? error.message : String(error) }, 'Startup catch-up failed');
+  void (async () => {
+    const fetchResult = await enqueueDueFetches(50);
+    pinoLogger.info({ ...fetchResult, phase: 'startup-catch-up' }, 'Startup fetch catch-up enqueued');
+
+    const fetchBarrier = await waitForQueueQuiescence({
+      queue: {
+        getJobCounts: () => fetchQueue.getJobCounts('waiting', 'active', 'delayed', 'prioritized'),
+      },
+      timeoutMs: 10 * 60 * 1000,
+    });
+    if (!fetchBarrier.settled) {
+      pinoLogger.warn({ ...fetchBarrier, phase: 'startup-catch-up' }, 'Startup fetch catch-up timed out before queue became quiet');
+    } else {
+      pinoLogger.info({ ...fetchBarrier, phase: 'startup-catch-up' }, 'Startup fetch catch-up settled');
+    }
+
+    const processBarrier = await waitForQueueQuiescence({
+      queue: {
+        getJobCounts: () => processQueue.getJobCounts('waiting', 'active', 'delayed', 'prioritized'),
+      },
+      timeoutMs: 60 * 1000,
+    });
+    if (!processBarrier.settled) {
+      pinoLogger.warn({ ...processBarrier, phase: 'startup-ai-catch-up' }, 'Startup AI catch-up is still running; daily report will use its own readiness repair');
+    }
+
+    const dailyResult = await enqueueDailyReportCatchUp();
+    pinoLogger.info({
+      ...dailyResult,
+      fetchSettled: fetchBarrier.settled,
+      processSettled: processBarrier.settled,
+      phase: 'daily-report-startup-catch-up',
+    }, 'Daily report startup catch-up finished after content recovery');
+  })().catch((error) => {
+    pinoLogger.error({ error: error instanceof Error ? error.message : String(error) }, 'Startup recovery failed');
   });
 
-  serve({ fetch: app.fetch, port: config.port }, (info) => {
+  httpServer = serve({ fetch: app.fetch, port: config.port }, (info) => {
     pinoLogger.info({ port: info.port, env: config.nodeEnv }, '🚀 hub-engine started');
   });
 }
@@ -625,14 +1080,33 @@ void bootstrap().catch((error) => {
   process.exit(1);
 });
 
-process.on('SIGTERM', async () => {
-  pinoLogger.info('SIGTERM received, shutting down...');
-  await fetchWorker.close();
-  process.exit(0);
+async function shutdown(signal: 'SIGTERM' | 'SIGINT') {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  pinoLogger.info({ signal }, 'Shutdown requested; draining active jobs before exit');
+  httpServer?.close();
+
+  const results = await Promise.allSettled([
+    fetchWorker.close(),
+    processWorker.close(),
+    dailyReportWorker.close(),
+    itemTranslationWorker.close(),
+    researchWorker?.close() ?? Promise.resolve(),
+    jevWorker?.close() ?? Promise.resolve(),
+  ]);
+  const failures = results
+    .map((result, index) => ({ result, worker: ['fetch', 'process', 'daily-report', 'item-translation', 'research', 'jev'][index] }))
+    .filter((entry): entry is { result: PromiseRejectedResult; worker: string } => entry.result.status === 'rejected');
+  failures.forEach(({ result, worker }) => {
+    pinoLogger.error({ worker, error: result.reason instanceof Error ? result.reason.message : String(result.reason) }, 'Worker shutdown failed');
+  });
+  process.exit(failures.length > 0 ? 1 : 0);
+}
+
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM');
 });
 
-process.on('SIGINT', async () => {
-  pinoLogger.info('SIGINT received, shutting down...');
-  await fetchWorker.close();
-  process.exit(0);
+process.on('SIGINT', () => {
+  void shutdown('SIGINT');
 });

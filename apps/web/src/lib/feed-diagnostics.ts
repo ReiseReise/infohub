@@ -304,9 +304,9 @@ export function getDetailEmptyState(
       };
     }
     return {
-      title: '等待翻译',
-      reason: item?.translationReason || '当前还没有翻译结果。',
-      action: '可点击阶段修复里的“重跑翻译”。',
+      title: '译文待补全',
+      reason: item?.translationReason || '当前还没有可展示的完整中文译文。',
+      action: '切到“翻译”页签，点击“一键精译全文”。',
       tone: 'neutral',
     };
   }

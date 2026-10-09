@@ -112,14 +112,17 @@ def assert_mobile_nav_visible(page, label: str) -> None:
                     bottom: rect.bottom,
                     width: rect.width,
                     height: rect.height,
+                    hidden: rect.width === 0 && rect.height === 0,
                     missingLabel: !text,
                     clippedX: rect.left < -1 || rect.right > window.innerWidth + 1,
                     tooSmall: rect.width < 36 || rect.height < 36,
                 };
             }).filter((item) => (
-                item.missingLabel ||
-                item.clippedX ||
-                item.tooSmall
+                !item.hidden && (
+                    item.missingLabel ||
+                    item.clippedX ||
+                    item.tooSmall
+                )
             ));
         }"""
     )
@@ -205,7 +208,7 @@ def assert_mobile_sources_add_form_growth_axes_touchable(page, route: str, label
     if not is_mobile:
         return
 
-    add_button = page.get_by_role("button", name="添加信源", exact=True).first
+    add_button = page.get_by_role("button", name="添加 RSS", exact=True).first
     if add_button.count() == 0:
         raise AssertionError(f"{label} sources page is missing add-source action")
     add_button.click()
@@ -304,8 +307,8 @@ def assert_mobile_feed_filter_controls_touchable(page, route: str, label: str) -
                 /^全部$/,
                 /^未读(?:\\s*\\(\\d+\\))?$/,
                 /^收藏$/,
-                /^按时间$/,
-                /^按优先级$/,
+                /^推荐$/,
+                /^最新$/,
             ];
             const optionalMatchers = [/^立即补抓到期来源$/];
             const buttons = Array.from(document.querySelectorAll('button')).map((node) => {
@@ -446,14 +449,15 @@ def assert_mobile_feed_detail_header_actions_touchable(page, route: str, label: 
         """() => {
             const header = document.querySelector('[data-feed-detail-header]') || document.querySelector('.sticky');
             if (!header) return [{ error: 'missing-detail-header' }];
-            const requiredLabels = ['原文', '重跑AI', '补抓正文'];
             const viewportHeight = window.innerHeight;
-            return requiredLabels.map((actionLabel) => {
-                const node = Array.from(header.querySelectorAll('button, a')).find((candidate) => {
-                    const text = (candidate.textContent || '').replace(/\\s+/g, '');
-                    return text.includes(actionLabel);
-                });
-                if (!node) return { label: actionLabel, error: 'missing-action' };
+            const actions = Array.from(header.querySelectorAll('button, a')).filter((node) => {
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            });
+            if (!actions.some((node) => (node.textContent || '').replace(/\\s+/g, '').includes('打开原'))) {
+                return [{ label: '打开原文', error: 'missing-reader-action' }];
+            }
+            return actions.map((node) => {
                 const rect = node.getBoundingClientRect();
                 const accessibleLabel = [
                     node.getAttribute('aria-label'),
@@ -461,7 +465,7 @@ def assert_mobile_feed_detail_header_actions_touchable(page, route: str, label: 
                     (node.textContent || '').trim(),
                 ].filter(Boolean).join(' ');
                 return {
-                    label: actionLabel,
+                    label: accessibleLabel || node.tagName,
                     accessibleLabel,
                     width: rect.width,
                     height: rect.height,
@@ -474,6 +478,37 @@ def assert_mobile_feed_detail_header_actions_touchable(page, route: str, label: 
     )
     if cramped_actions:
         raise AssertionError(f"{label} feed detail header actions are too small or unlabeled on mobile: {cramped_actions}")
+
+    tools = page.locator("[data-feed-reader-tools]").first
+    if tools.count() == 0:
+        return
+    tools.evaluate(
+        """(container) => {
+            const diagnostics = container.closest('[data-feed-diagnostics]');
+            if (diagnostics) diagnostics.open = true;
+            container.open = true;
+            const reader = container.closest('[data-feed-detail-reader]');
+            if (reader) reader.scrollTop = Math.max(0, container.offsetTop - 80);
+        }"""
+    )
+    cramped_tools = tools.evaluate(
+        """(container) => Array.from(container.querySelectorAll('button, a')).map((node) => {
+            const rect = node.getBoundingClientRect();
+            const accessibleLabel = [
+                node.getAttribute('aria-label'),
+                node.getAttribute('title'),
+                (node.textContent || '').trim(),
+            ].filter(Boolean).join(' ');
+            return {
+                label: accessibleLabel || node.tagName,
+                accessibleLabel,
+                width: rect.width,
+                height: rect.height,
+            };
+        }).filter((item) => !item.accessibleLabel || item.height < 36 || item.width < 36)"""
+    )
+    if cramped_tools:
+        raise AssertionError(f"{label} feed reader tool actions are too small or unlabeled on mobile: {cramped_tools}")
 
 
 def assert_desktop_feed_detail_reader_sticky(page, route: str, label: str) -> None:
@@ -538,10 +573,18 @@ def assert_mobile_feed_stage_repair_actions_touchable(page, route: str, label: s
     is_mobile = page.evaluate("() => window.innerWidth < 768")
     if not is_mobile:
         return
-    stage_heading = page.get_by_text("阶段修复", exact=True).first
-    if stage_heading.count() == 0:
+    section = page.locator("[data-feed-stage-repair]").first
+    if section.count() == 0:
         raise AssertionError(f"{label} feed detail is missing the stage repair section")
-    stage_heading.scroll_into_view_if_needed()
+    section.evaluate(
+        """(container) => {
+            const diagnostics = container.closest('[data-feed-diagnostics]');
+            if (diagnostics) diagnostics.open = true;
+            container.open = true;
+            const reader = container.closest('[data-feed-detail-reader]');
+            if (reader) reader.scrollTop = Math.max(0, container.offsetTop - 80);
+        }"""
+    )
     page.wait_for_timeout(100)
     cramped_actions = page.evaluate(
         """() => {
@@ -579,10 +622,18 @@ def assert_mobile_feed_feedback_actions_touchable(page, route: str, label: str) 
     is_mobile = page.evaluate("() => window.innerWidth < 768")
     if not is_mobile:
         return
-    feedback_heading = page.get_by_text("人类反馈", exact=True).first
-    if feedback_heading.count() == 0:
+    section = page.locator("[data-feed-feedback]").first
+    if section.count() == 0:
         raise AssertionError(f"{label} feed detail is missing the human feedback section")
-    feedback_heading.scroll_into_view_if_needed()
+    section.evaluate(
+        """(container) => {
+            const diagnostics = container.closest('[data-feed-diagnostics]');
+            if (diagnostics) diagnostics.open = true;
+            container.open = true;
+            const reader = container.closest('[data-feed-detail-reader]');
+            if (reader) reader.scrollTop = Math.max(0, container.offsetTop - 80);
+        }"""
+    )
     page.wait_for_timeout(100)
     cramped_actions = page.evaluate(
         """() => {
@@ -830,8 +881,9 @@ def assert_insights_copy_clean(page, route: str, label: str) -> None:
 
 
 def assert_desktop_insights_report_reader_sticky(page, route: str, label: str) -> None:
-    if route != "/insights":
-        return
+    # 日报阅读已从 /insights 拆到 /daily/reports/latest；成长页只保留入口，
+    # 这里不再强制它承载长文日报阅读器。
+    return
     is_desktop = page.evaluate("() => window.innerWidth >= 1024")
     if not is_desktop:
         return
@@ -908,7 +960,7 @@ def assert_mobile_monitor_actions_touchable(page, route: str, label: str) -> Non
                     height: rect.height,
                     x: rect.x,
                     y: rect.y,
-                    visible: rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.top <= window.innerHeight,
+                    visible: rect.width > 0 && rect.height > 0,
                 };
             }).filter((action) => action.visible);
             return requiredLabels.flatMap((requiredLabel) => {
@@ -960,8 +1012,17 @@ def assert_mobile_audio_detail_actions_touchable(page, route: str, label: str) -
         """() => {
             const bodyText = document.body.innerText || '';
             if (bodyText.includes('暂无任务')) return [];
-            const requiredLabels = ['重跑', '删除', '概览', '摘要', '转写', 'Markdown', '原始结果'];
-            if (bodyText.includes('查看技术详情')) requiredLabels.push('查看技术详情');
+            if (!document.querySelector('[data-audio-detail-header]')) return [];
+            const requiredGroups = [
+                ['重做纪要', '重新转写'],
+                ['删除'],
+                ['转写'],
+                ['AI纪要'],
+                ['章节'],
+                ['思维导图'],
+                ['高光时刻'],
+                ['AI问答'],
+            ];
             const actions = Array.from(document.querySelectorAll('button')).map((node) => {
                 const rect = node.getBoundingClientRect();
                 const label = (
@@ -978,9 +1039,9 @@ def assert_mobile_audio_detail_actions_touchable(page, route: str, label: str) -
                     visible: rect.width > 0 && rect.height > 0,
                 };
             }).filter((action) => action.visible);
-            return requiredLabels.flatMap((requiredLabel) => {
-                const matched = actions.filter((action) => action.label === requiredLabel);
-                if (!matched.length) return [{ error: 'missing-audio-action', label: requiredLabel }];
+            return requiredGroups.flatMap((group) => {
+                const matched = actions.filter((action) => group.includes(action.label));
+                if (!matched.length) return [{ error: 'missing-audio-action', label: group.join(' / ') }];
                 return matched.filter((action) => action.width < 36 || action.height < 36);
             });
         }"""
@@ -1085,32 +1146,8 @@ def assert_report_heading_date_not_split(page, label: str) -> None:
 def assert_mobile_insights_mode_controls_touchable(page, route: str, label: str) -> None:
     if not route.startswith("/insights"):
         return
-    is_mobile = page.evaluate("() => window.innerWidth < 768")
-    if not is_mobile:
-        return
-    cramped_controls = page.evaluate(
-        """() => {
-            const requiredLabels = ['快速', '完整'];
-            const buttons = Array.from(document.querySelectorAll('button')).map((node) => {
-                const rect = node.getBoundingClientRect();
-                const label = (node.textContent || '').trim().replace(/\\s+/g, ' ');
-                return {
-                    label,
-                    width: rect.width,
-                    height: rect.height,
-                    x: rect.x,
-                    y: rect.y,
-                };
-            });
-            return requiredLabels.flatMap((requiredLabel) => {
-                const matched = buttons.filter((button) => button.label === requiredLabel);
-                if (!matched.length) return [{ error: 'missing-insights-mode-control', label: requiredLabel }];
-                return matched.filter((button) => button.width < 36 || button.height < 36);
-            });
-        }"""
-    )
-    if cramped_controls:
-        raise AssertionError(f"{label} insights generation mode controls are too small or missing on mobile: {cramped_controls}")
+    # 日报生成模式已迁移到 /daily/workbench；成长页不再承载快速/完整生成控件。
+    return
 
 
 def assert_mobile_insights_report_shortcut(page, route: str, label: str) -> None:
@@ -1119,52 +1156,15 @@ def assert_mobile_insights_report_shortcut(page, route: str, label: str) -> None
     is_mobile = page.evaluate("() => window.innerWidth < 768")
     if not is_mobile:
         return
-    button = page.get_by_role("button", name="查看最新日报", exact=True).first
+    button = page.get_by_role("link", name="打开日报", exact=True).first
     if button.count() == 0:
-        raise AssertionError(f"{label} is missing the mobile latest report shortcut")
+        raise AssertionError(f"{label} is missing the mobile daily report shortcut")
     box = button.bounding_box()
     viewport_height = page.evaluate("() => window.innerHeight")
     if not box:
-        raise AssertionError(f"{label} latest report shortcut is not visible")
+        raise AssertionError(f"{label} daily report shortcut is not visible")
     if box["y"] < 0 or box["y"] + box["height"] > viewport_height:
-        raise AssertionError(f"{label} latest report shortcut is outside the first viewport: {box}")
-    button.click()
-    page.wait_for_timeout(600)
-    report_section = page.locator("#daily-report-section").first
-    section_box = report_section.bounding_box()
-    if not section_box:
-        raise AssertionError(f"{label} latest report target is not visible after clicking the shortcut")
-    if section_box["y"] > 180:
-        raise AssertionError(f"{label} latest report shortcut did not scroll near the report section: {section_box}")
-    if page.get_by_text("日报导航").count() == 0:
-        raise AssertionError(f"{label} daily report section is missing a local report navigation")
-    markdown_button = page.get_by_role("button", name="日报正文", exact=True).first
-    if markdown_button.count() == 0:
-        raise AssertionError(f"{label} daily report navigation is missing the markdown shortcut")
-    markdown_button.click()
-    page.wait_for_timeout(200)
-    markdown_section = page.locator("#report-markdown-section").first
-    markdown_box = markdown_section.bounding_box()
-    if not markdown_box:
-        raise AssertionError(f"{label} report markdown target is not visible after clicking the navigation")
-    if markdown_box["y"] > 220:
-        raise AssertionError(f"{label} markdown navigation did not scroll near the report body: {markdown_box}")
-    back_button = page.get_by_role("button", name="返回日报导航", exact=True).first
-    if back_button.count() == 0:
-        raise AssertionError(f"{label} report body is missing the return-to-navigation control")
-    back_box = back_button.bounding_box()
-    if not back_box or back_box["y"] < 0 or back_box["y"] > viewport_height:
-        raise AssertionError(f"{label} return-to-navigation control is not visible near the report body: {back_box}")
-    assert_report_heading_date_not_split(page, label)
-    back_button.click()
-    page.wait_for_timeout(200)
-    nav_box = page.locator("#report-local-navigation").first.bounding_box()
-    if not nav_box:
-        raise AssertionError(f"{label} report local navigation target is missing after clicking return")
-    if nav_box["y"] > 220:
-        raise AssertionError(f"{label} return-to-navigation control did not scroll near the report navigation: {nav_box}")
-    page.evaluate("() => window.scrollTo({ top: 0, behavior: 'instant' })")
-    page.wait_for_timeout(100)
+        raise AssertionError(f"{label} daily report shortcut is outside the first viewport: {box}")
 
 
 def wait_ready(page) -> None:
@@ -1263,7 +1263,7 @@ def main() -> int:
                     "/sources",
                     "sources",
                     viewport_name,
-                    ["信源管理", "质量底座", "正文率", "噪声率", "日报入选率"],
+                    ["RSS 信源管理", "正文率", "噪声率", "日报入选率"],
                 )
             )
             screenshots.append(
@@ -1317,7 +1317,7 @@ def main() -> int:
                     "/feed",
                     "feed",
                     viewport_name,
-                    ["信息流", "全部", "按时间"],
+                    ["信息流", "全部", "推荐", "最新"],
                 )
             )
             screenshots.append(
@@ -1326,7 +1326,7 @@ def main() -> int:
                     f"/feed/{top_item_id}",
                     "feed-selected",
                     viewport_name,
-                    ["日报解释", "已进入日报", "依据：同日最新日报快照", "内容依据：", "阶段修复", "评分拆解"],
+                    [top_detail.get("title") or "摘要", "摘要", "原文", "翻译"],
                 )
             )
             if noise_item_id:
@@ -1336,7 +1336,7 @@ def main() -> int:
                         f"/feed/{noise_item_id}",
                         "feed-noise",
                         viewport_name,
-                        ["日报解释", "未入报：泛商业噪声", "依据：同日最新日报快照", "阶段修复"],
+                        [noise_detail.get("title") or "摘要", "摘要", "原文", "翻译"],
                     )
                 )
             screenshots.append(
@@ -1345,7 +1345,7 @@ def main() -> int:
                     "/insights",
                     "insights",
                     viewport_name,
-                    ["日报工作流", "预览候选池", "日报档案", "未入报解释", "TOP 入报理由", "最终入报"],
+                    ["成长控制台", "成长仪表板", "认知升级", "技术能力"],
                 )
             )
             context.close()

@@ -1,0 +1,260 @@
+{
+  "version": 1,
+  "updatedAt": "2026-07-05",
+  "description": "人工维护的原始信息源链接注册表；不从系统导出反推。",
+  "sources": [
+    {
+      "id": "reuters-technology-ai-rss",
+      "name": "Reuters Technology AI",
+      "rawUrl": "https://yzcw.dpdns.org/users/1/web_requests/573/R-Technology-AI-slu896.xml",
+      "canonicalSiteUrl": "https://www.reuters.com/technology/artificial-intelligence",
+      "sourceType": "rss",
+      "collectorType": "rss",
+      "sourceKind": "media",
+      "sourceRole": "normal",
+      "category": "AI",
+      "sourceTier": "A",
+      "readingTier": "light_reading",
+      "processingProfile": "smart",
+      "contentStrategy": "smart",
+      "dailyReportEnabled": true,
+      "priority": 4,
+      "fetchInterval": 60,
+      "trustScore": 86,
+      "noiseScore": 20,
+      "authorityWeight": 1.08,
+      "tags": [
+        "reuters",
+        "ai-news",
+        "wire",
+        "global",
+        "浅阅读"
+      ],
+      "growthAxes": [
+        "认知升级",
+        "商业判断"
+      ],
+      "notes": "用户手动提供的 Reuters AI RSS。RSS description 已包含较完整 HTML 正文和图片，适合作为新闻雷达/浅阅读高可信源。"
+    },
+    {
+      "id": "openai-news-rss",
+      "name": "OpenAI News",
+      "rawUrl": "https://openai.com/news/rss.xml",
+      "canonicalSiteUrl": "https://openai.com/news/",
+      "sourceType": "rss",
+      "collectorType": "rss",
+      "sourceKind": "official",
+      "sourceRole": "normal",
+      "category": "AI",
+      "sourceTier": "S",
+      "readingTier": "high_value",
+      "processingProfile": "full",
+      "contentStrategy": "full",
+      "priority": 5,
+      "fetchInterval": 45,
+      "trustScore": 96,
+      "noiseScore": 6,
+      "authorityWeight": 1.35,
+      "tags": [
+        "openai",
+        "official",
+        "model-release",
+        "高价值"
+      ],
+      "growthAxes": [
+        "技术能力",
+        "认知升级"
+      ],
+      "notes": "官方 OpenAI 新闻 RSS。"
+    },
+    {
+      "id": "anthropic-newsroom-index",
+      "name": "Anthropic Newsroom",
+      "rawUrl": "https://www.anthropic.com/news",
+      "canonicalSiteUrl": "https://www.anthropic.com/news",
+      "sourceType": "curated_index",
+      "collectorType": "webpage_index",
+      "sourceKind": "official",
+      "sourceRole": "normal",
+      "category": "AI",
+      "sourceTier": "S",
+      "readingTier": "high_value",
+      "processingProfile": "full",
+      "contentStrategy": "full",
+      "priority": 5,
+      "fetchInterval": 30,
+      "trustScore": 96,
+      "noiseScore": 6,
+      "authorityWeight": 1.35,
+      "tags": [
+        "anthropic",
+        "claude",
+        "official",
+        "model-release",
+        "高价值"
+      ],
+      "growthAxes": [
+        "技术能力",
+        "认知升级"
+      ],
+      "notes": "官方 Anthropic 新闻索引页，系统内按 webpage_index 拆成单篇新闻。"
+    },
+    {
+      "id": "claude-platform-release-notes",
+      "name": "Claude Platform Release Notes",
+      "rawUrl": "https://platform.claude.com/docs/en/release-notes/overview",
+      "canonicalSiteUrl": "https://platform.claude.com/docs/en/release-notes/overview",
+      "sourceType": "webpage",
+      "collectorType": "webpage",
+      "sourceKind": "official",
+      "sourceRole": "monitor",
+      "category": "AI",
+      "sourceTier": "S",
+      "readingTier": "high_value",
+      "processingProfile": "full",
+      "contentStrategy": "full",
+      "priority": 5,
+      "fetchInterval": 45,
+      "trustScore": 94,
+      "noiseScore": 8,
+      "authorityWeight": 1.3,
+      "tags": [
+        "anthropic",
+        "claude",
+        "official",
+        "release-notes",
+        "高价值"
+      ],
+      "growthAxes": [
+        "技术能力",
+        "认知升级"
+      ],
+      "notes": "Claude 平台官方更新说明。"
+    },
+    {
+      "id": "bestblogs-daily-brief",
+      "name": "BestBlogs Daily Brief",
+      "rawUrl": "https://www.bestblogs.dev/en/explore/brief",
+      "canonicalSiteUrl": "https://www.bestblogs.dev/en/explore/brief",
+      "sourceType": "curated_index",
+      "collectorType": "webpage_index",
+      "sourceKind": "media",
+      "sourceRole": "normal",
+      "category": "AI",
+      "sourceTier": "A",
+      "readingTier": "light_reading",
+      "processingProfile": "smart",
+      "contentStrategy": "smart",
+      "priority": 4,
+      "fetchInterval": 1440,
+      "trustScore": 82,
+      "noiseScore": 22,
+      "authorityWeight": 1.08,
+      "tags": [
+        "bestblogs",
+        "daily-brief",
+        "curated-index",
+        "blogs",
+        "浅阅读"
+      ],
+      "growthAxes": [
+        "认知升级",
+        "技术能力"
+      ],
+      "notes": "每日榜单源；原站链接不稳定，允许榜单摘要可读、原站待补抓。"
+    },
+    {
+      "id": "the-verge-ai",
+      "name": "The Verge AI",
+      "rawUrl": "https://www.theverge.com/ai-artificial-intelligence",
+      "canonicalSiteUrl": "https://www.theverge.com/ai-artificial-intelligence",
+      "sourceType": "webpage",
+      "collectorType": "webpage",
+      "sourceKind": "media",
+      "sourceRole": "monitor",
+      "category": "AI",
+      "sourceTier": "A",
+      "readingTier": "light_reading",
+      "processingProfile": "smart",
+      "contentStrategy": "smart",
+      "priority": 4,
+      "fetchInterval": 60,
+      "trustScore": 82,
+      "noiseScore": 24,
+      "authorityWeight": 1.1,
+      "tags": [
+        "media",
+        "ai-news",
+        "anthropic-watch",
+        "浅阅读"
+      ],
+      "growthAxes": [
+        "认知升级",
+        "技术能力"
+      ],
+      "notes": "AI 新闻媒体源。"
+    },
+    {
+      "id": "techcrunch-ai",
+      "name": "TechCrunch AI",
+      "rawUrl": "https://techcrunch.com/category/artificial-intelligence/",
+      "canonicalSiteUrl": "https://techcrunch.com/category/artificial-intelligence/",
+      "sourceType": "webpage",
+      "collectorType": "webpage",
+      "sourceKind": "media",
+      "sourceRole": "monitor",
+      "category": "AI",
+      "sourceTier": "A",
+      "readingTier": "light_reading",
+      "processingProfile": "smart",
+      "contentStrategy": "smart",
+      "priority": 4,
+      "fetchInterval": 60,
+      "trustScore": 80,
+      "noiseScore": 28,
+      "authorityWeight": 1.05,
+      "tags": [
+        "media",
+        "ai-news",
+        "startup-watch",
+        "浅阅读"
+      ],
+      "growthAxes": [
+        "认知升级",
+        "商业判断"
+      ],
+      "notes": "AI 创业与产品动态媒体源。"
+    },
+    {
+      "id": "business-insider-ai",
+      "name": "Business Insider AI",
+      "rawUrl": "https://www.businessinsider.com/artificial-intelligence",
+      "canonicalSiteUrl": "https://www.businessinsider.com/artificial-intelligence",
+      "sourceType": "webpage",
+      "collectorType": "webpage",
+      "sourceKind": "media",
+      "sourceRole": "monitor",
+      "category": "AI",
+      "sourceTier": "A",
+      "readingTier": "light_reading",
+      "processingProfile": "smart",
+      "contentStrategy": "smart",
+      "priority": 3,
+      "fetchInterval": 90,
+      "trustScore": 76,
+      "noiseScore": 34,
+      "authorityWeight": 1,
+      "tags": [
+        "media",
+        "ai-news",
+        "business-watch",
+        "浅阅读"
+      ],
+      "growthAxes": [
+        "认知升级",
+        "商业判断"
+      ],
+      "notes": "AI 商业动态媒体源。"
+    }
+  ]
+}

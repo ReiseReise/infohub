@@ -74,6 +74,7 @@ export function classifySourceKind(input: {
   if (sourceType === 'wechat' || category.includes('公众号') || /mp\.weixin\.qq\.com/i.test(host)) return 'wechat';
   if (route.includes('/twitter/') || route.includes('/x/') || /^x[：:]/i.test(name) || /@\w+/.test(name)) return 'x';
   if (sourceType === 'audio' || sourceType === 'podcast' || collectorType === 'youtube') return 'podcast';
+  if (sourceType === 'curated_index' || collectorType === 'webpage_index') return 'media';
   if (collectorType === 'custom') return 'api';
   if (collectorType === 'changedetection' || collectorType === 'webpage') return 'webpage';
   if (OFFICIAL_HOST_PATTERNS.some((pattern) => pattern.test(host)) || /(官网|newsroom|official|github releases)/i.test(name)) return 'official';
@@ -92,15 +93,15 @@ export function normalizeAuthorityWeight(value: unknown, sourceTier?: string | n
   const tier = String(sourceTier || '').trim().toUpperCase();
   const kind = String(sourceKind || '').trim().toLowerCase();
   let weight = 1;
-  if (tier === 'T1' || tier === 'S') weight = 1.22;
-  else if (tier === 'T1.5' || tier === 'A') weight = 1.08;
-  else if (tier === 'T2' || tier === 'B') weight = 0.96;
+  if (tier === 'S') weight = 1.22;
+  else if (tier === 'A') weight = 1.08;
+  else if (tier === 'B') weight = 0.96;
   else if (tier === 'C') weight = 0.82;
   else if (tier === 'D') weight = 0.72;
 
   if (kind === 'official') weight += 0.06;
   else if (kind === 'blog') weight += 0.02;
-  else if (kind === 'x' && tier !== 'T1.5') weight -= 0.02;
+  else if (kind === 'x') weight -= 0.02;
   else if (kind === 'wechat') weight -= 0.08;
   else if (kind === 'media') weight -= 0.03;
 

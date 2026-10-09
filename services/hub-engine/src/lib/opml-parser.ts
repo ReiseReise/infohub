@@ -6,6 +6,7 @@ export interface OpmlFeed {
   htmlUrl?: string;
   category: string;
   type: string;
+  dailyReportEnabled?: boolean;
 }
 
 interface OutlineNode {
@@ -14,6 +15,7 @@ interface OutlineNode {
   '@_xmlUrl'?: string;
   '@_htmlUrl'?: string;
   '@_type'?: string;
+  '@_dailyReportEnabled'?: string | boolean;
   outline?: OutlineNode | OutlineNode[];
 }
 
@@ -41,6 +43,7 @@ export function parseOpml(xmlContent: string): OpmlFeed[] {
           htmlUrl: node['@_htmlUrl'] || undefined,
           category: category || 'uncategorized',
           type: node['@_type'] || 'rss',
+          dailyReportEnabled: node['@_dailyReportEnabled'] === true || node['@_dailyReportEnabled'] === 'true',
         });
       }
 

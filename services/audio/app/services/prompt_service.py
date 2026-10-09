@@ -4,6 +4,13 @@ from jinja2 import Template, Environment, BaseLoader
 from app.services.asr_service import TranscriptionResult
 
 
+AUDIO_OUTPUT_REQUIREMENTS = """输出要求：
+- 始终使用简体中文撰写标题、分析、结论和行动项。
+- 原文金句、专有名词和人名可保留原语言，但必须附中文解释。
+- 不要因为逐字稿是英文就改用英文输出。
+"""
+
+
 def format_duration(seconds: float) -> str:
     """秒数 → '1小时23分' 格式"""
     hours = int(seconds // 3600)
@@ -42,7 +49,8 @@ def render_prompt(template_text: str, context: dict) -> str:
     """渲染 Jinja2 模板"""
     env = Environment(loader=BaseLoader())
     template = env.from_string(template_text)
-    return template.render(**context)
+    rendered = template.render(**context).strip()
+    return f"{AUDIO_OUTPUT_REQUIREMENTS.strip()}\n\n{rendered}"
 
 
 # ============================================================

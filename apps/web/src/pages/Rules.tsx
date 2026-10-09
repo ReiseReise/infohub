@@ -13,7 +13,7 @@ const RULE_TYPES = [
   { value: 'author_filter', label: '作者过滤' },
 ];
 
-const TIER_SEQUENCE = ['T1', 'T1.5', 'T2', 'S', 'A', 'B', 'C', 'D'] as const;
+const TIER_SEQUENCE = ['S', 'A', 'B', 'C', 'D'] as const;
 type TierKey = (typeof TIER_SEQUENCE)[number];
 type RuleScope = 'user' | 'global';
 type PolicyDraft = {
@@ -78,9 +78,6 @@ const DEFAULT_FORM: RuleFormState = {
 };
 
 const DEFAULT_TIER_POLICIES: Record<TierKey, QualityPolicyConfig> = {
-  T1: { mode: 'skip', onFilter: 'review', minConfidence: 1 },
-  'T1.5': { mode: 'light', onFilter: 'review', minConfidence: 0.8 },
-  T2: { mode: 'standard', onFilter: 'filter', minConfidence: 0.7 },
   S: { mode: 'skip', onFilter: 'review', minConfidence: 1 },
   A: { mode: 'light', onFilter: 'review', minConfidence: 0.78 },
   B: { mode: 'standard', onFilter: 'filter', minConfidence: 0.72 },
@@ -114,9 +111,6 @@ const QUALITY_RISK_FLAGS = ['低信息密度', '疑似导流', '半对半错风�
 const NON_AI_NOISE_PRESET = '体育,足球,篮球,娱乐,明星,影视,汽车,房产,旅游,时尚,美食,情感,母婴,游戏,八卦';
 
 const TIER_GUIDANCE: Record<TierKey, { title: string; note: string }> = {
-  T1: { title: '一手官方层', note: '官网、官方博客等一手来源，默认直通。' },
-  'T1.5': { title: '官方社媒层', note: '官方 X/社媒来源，轻审后进入主流程。' },
-  T2: { title: '观察信源层', note: 'KOL、媒体与综合源，标准质检后再入主流程。' },
   S: { title: '直通信号层', note: '默认不做质检，适合顶级信任源。' },
   A: { title: '轻审分析层', note: '只把明显风险留在主 Feed 待复核。' },
   B: { title: '标准资讯层', note: '常规资讯源，失败可直接进入过滤池。' },
@@ -161,12 +155,6 @@ function policyEquals(left: PolicyDraft, right: QualityPolicyConfig) {
 
 function tierTone(tier: TierKey) {
   switch (tier) {
-    case 'T1':
-      return 'border-rose-200 bg-rose-50 text-rose-700';
-    case 'T1.5':
-      return 'border-orange-200 bg-orange-50 text-orange-700';
-    case 'T2':
-      return 'border-sky-200 bg-sky-50 text-sky-700';
     case 'S':
       return 'border-emerald-200 bg-emerald-50 text-emerald-700';
     case 'A':

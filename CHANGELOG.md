@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] - 2026-08-13
+
+### Changed
+
+- 日报推送与自动正式导出改为持久化质量复算后 fail-closed；降级结果仍保存且可重跑。
+- 参考源准入只把明确 `pass` 计入相关分子，并新增 60% AI 处理率门槛；正式启用仍为人工动作。
+- 全系统 AI 用量只对管理员查询和展示；Feed Query 与浏览器 API 缓存按账号切换隔离。
+- 重复条目的正文升级重新进入既有幂等 AI 队列；仅 provenance 更新不触发重算。
+- Portable 导出默认拒绝明文 `.env`，仅保留显式 `--plain-env` 逃生口。
+- `make gate` 收口为安全静态门禁；有副作用的 QA 回归需 `QA_ISOLATED=1`。
+- 独立复核补丁：Portable 不再生成可泄露环境值的 resolved Compose；降级日报禁止 Markdown 正式导出；正文升级队列改用内容 revision jobId；QA 回归同时校验隔离 URL、PostgreSQL 容器与 E2E 模式。
+- 多标签 token 变更会立即清理 Query/API 缓存并刷新会话；`/ai-usage` 与 `/admin` 增加前端管理员路由门禁。
+
 ## [v3.1.4] - 2026-03-19
 
 ### Changed

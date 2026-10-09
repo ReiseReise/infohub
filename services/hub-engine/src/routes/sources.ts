@@ -6,13 +6,34 @@ import { parseOpml } from '../lib/opml-parser.js';
 import { requireAuth } from '../lib/auth.js';
 import { computeSourceFreshness } from '../lib/freshness.js';
 import { deriveSourceProfile, normalizeGrowthAxes } from '../lib/growth.js';
+import { deriveSourceContentStrategy, withDerivedSourceContentStrategy } from '../lib/source-content-strategy.js';
 import { buildSourceFingerprint } from '../lib/source-normalization.js';
 import { classifySourceKind, normalizeAuthorityWeight } from '../lib/aihot-governance.js';
 import { buildSourceQualityFunnel, type SourceQualityFunnel } from '../lib/content-quality.js';
+import { normalizeSourceReadingTier, resolveSourceReadingTier, type SourceReadingTierValue } from '../lib/source-reading-tier.js';
+import {
+  buildSourceAiBudgetSnapshot,
+  loadSourceAiDailyUsage,
+  normalizeSourceAiDailyBudget,
+  resolveSourceAiDailyBudget,
+} from '../lib/source-ai-budget.js';
+import {
+  buildSourceHealthSnapshot,
+  type SourceHealthAiFailure,
+  type SourceHealthFetchLog,
+  type SourceHealthSnapshot,
+  type SourceHealthStats,
+} from '../lib/source-health.js';
+import {
+  classifySourceGovernance,
+  normalizeSourceGovernanceRole,
+  normalizeSourceTopicGroup,
+} from '../lib/source-governance-classification.js';
+import { mainReadingSourceCondition } from '../lib/reference-source-visibility.js';
 
 const app = new Hono();
 
-type SourceListSort = 'createdAt' | 'latest' | 'unread' | 'health' | 'name' | 'quality' | 'content' | 'ai' | 'noise';
+type SourceListSort = 'createdAt' | 'latest' | 'unread' | 'health' | 'name' | 'quality' | 'content' | 'ai' | 'noise' | 'readingTier';
 
 type SourceOverview = {
   itemCount: number;
@@ -32,7 +53,14 @@ type SourceOverview = {
   scoredCount: number;
   summarizedCount: number;
   translationCompletedCount: number;
+  summaryFailedCount: number;
+  translationFailedCount: number;
+  titleOnlyCount: number;
+  snippetOnlyCount: number;
+  longReadRiskCount: number;
+  averageContentLength: number;
   sourceQuality: SourceQualityFunnel;
+  sourceHealth: SourceHealthSnapshot;
   latestItemTitle: string | null;
   latestItemUrl: string | null;
   latestItemAt: string | null;
@@ -75,6 +103,7 @@ function sortSources<T extends {
   unreadCount?: number | null;
   healthScore?: number | null;
   sourceQuality?: SourceQualityFunnel | null;
+  readingTier?: SourceReadingTierValue | string | null;
 }>(rows: T[], sortBy: SourceListSort): T[] {
   return [...rows].sort((a, b) => {
     if (sortBy === 'name') {
@@ -100,6 +129,11 @@ function sortSources<T extends {
       const noiseDiff = Number(a.sourceQuality?.noiseRate || 0) - Number(b.sourceQuality?.noiseRate || 0);
       if (noiseDiff !== 0) return noiseDiff;
     }
+    if (sortBy === 'readingTier') {
+      const rank: Record<string, number> = { high_value: 4, light_reading: 3, explore: 2, paused: 1 };
+      const diff = Number(rank[String(b.readingTier || '')] || 0) - Number(rank[String(a.readingTier || '')] || 0);
+      if (diff !== 0) return diff;
+    }
     if (sortBy === 'unread') {
       const unreadDiff = Number(b.unreadCount || 0) - Number(a.unreadCount || 0);
       if (unreadDiff !== 0) return unreadDiff;
@@ -114,9 +148,26 @@ function sortSources<T extends {
 
 function mapSourceResponse<T extends { config?: unknown; lastError?: string | null }>(row: T) {
   const config = getConfigObject(row.config);
+  const contentStrategy = deriveSourceContentStrategy({
+    contentStrategy: config.contentStrategy,
+    collectorType: (row as { collectorType?: string | null }).collectorType,
+    sourceType: (row as { sourceType?: string | null }).sourceType,
+    sourceRole: (row as { sourceRole?: string | null }).sourceRole,
+    processingProfile: (row as { processingProfile?: string | null }).processingProfile,
+  });
   const freshness = computeSourceFreshness(row as Parameters<typeof computeSourceFreshness>[0]);
+  const readingTier = resolveSourceReadingTier({
+    ...(row as Record<string, unknown>),
+    config,
+  });
+  const governance = classifySourceGovernance({
+    ...(row as Record<string, unknown>),
+    config,
+  });
   return {
     ...row,
+    ...governance,
+    contentStrategy,
     growthAxes: normalizeGrowthAxes((row as { growthAxes?: unknown }).growthAxes, []),
     sourceHost: getSourceHost(config),
     iconUrl: typeof config.iconUrl === 'string' ? config.iconUrl : null,
@@ -126,6 +177,73 @@ function mapSourceResponse<T extends { config?: unknown; lastError?: string | nu
     lastChangeSummary: typeof config.lastChangeSummary === 'string' ? config.lastChangeSummary : null,
     freshnessState: freshness.freshnessState,
     staleReason: freshness.staleReason,
+    readingTier: readingTier.value,
+    readingTierLabel: readingTier.label,
+    readingTierReason: readingTier.reason,
+    aiDailyBudget: resolveSourceAiDailyBudget({
+      ...(row as Record<string, unknown>),
+      sourceConfig: config,
+    }),
+  };
+}
+
+function emptySourceHealthStats(): SourceHealthStats {
+  return {
+    itemCount: 0,
+    visibleCount: 0,
+    filteredCount: 0,
+    contentReadyCount: 0,
+    contentDegradedCount: 0,
+    contentMissingCount: 0,
+    titleOnlyCount: 0,
+    snippetOnlyCount: 0,
+    longReadRiskCount: 0,
+    scoredCount: 0,
+    summaryReadyCount: 0,
+    summaryFailedCount: 0,
+    translationReadyCount: 0,
+    translationFailedCount: 0,
+    reportCandidateCount: 0,
+    reportSelectedCount: 0,
+    hotNotSelectedCount: 0,
+    averageContentLength: 0,
+  };
+}
+
+function stageFromScene(sceneType: string | null | undefined): SourceHealthAiFailure['stage'] {
+  const scene = String(sceneType || '');
+  if (scene.includes('summary')) return 'summary';
+  if (scene.includes('translation')) return 'translation';
+  if (scene.includes('scoring')) return 'score';
+  if (scene.includes('quality')) return 'quality';
+  return 'other';
+}
+
+function normalizeFetchLogRow(row: {
+  status?: string | null;
+  outcome?: string | null;
+  started_at?: string | Date | null;
+  finished_at?: string | Date | null;
+  duration_ms?: number | null;
+  items_found?: number | null;
+  items_new?: number | null;
+  items_filtered?: number | null;
+  items_duplicate?: number | null;
+  items_queued_ai?: number | null;
+  error?: string | null;
+}): SourceHealthFetchLog {
+  return {
+    status: row.status || null,
+    outcome: row.outcome || null,
+    startedAt: row.started_at || null,
+    finishedAt: row.finished_at || null,
+    durationMs: Number(row.duration_ms || 0),
+    itemsFound: Number(row.items_found || 0),
+    itemsNew: Number(row.items_new || 0),
+    itemsFiltered: Number(row.items_filtered || 0),
+    itemsDuplicate: Number(row.items_duplicate || 0),
+    itemsQueuedAi: Number(row.items_queued_ai || 0),
+    error: row.error || null,
   };
 }
 
@@ -135,20 +253,25 @@ app.get('/', async (c) => {
   const category = c.req.query('category');
   const sourceType = c.req.query('sourceType');
   const sourceRole = c.req.query('sourceRole');
-  const status = c.req.query('status');
+  const status = c.req.query('status') || 'active';
+  const includeReferenceSources = c.req.query('includeReferenceSources') === 'true';
+  const readingTier = normalizeSourceReadingTier(c.req.query('readingTier'));
   const sortBy = (c.req.query('sortBy') || 'createdAt') as SourceListSort;
 
   const conditions = [eq(schema.sources.userId, authUser.userId)];
   if (category) conditions.push(eq(schema.sources.category, category));
   if (sourceType) conditions.push(eq(schema.sources.sourceType, sourceType));
   if (sourceRole) conditions.push(eq(schema.sources.sourceRole, sourceRole));
-  if (status) conditions.push(eq(schema.sources.status, status));
+  if (status !== 'all') conditions.push(eq(schema.sources.status, status));
+  if (!includeReferenceSources) conditions.push(mainReadingSourceCondition());
 
   const rows = await db
     .select()
     .from(schema.sources)
     .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(schema.sources.createdAt));
+
+  const aiBudgetUsage = await loadSourceAiDailyUsage(authUser.userId);
 
   const itemStatsRows = await db
     .select({
@@ -162,12 +285,18 @@ app.get('/', async (c) => {
       contentReadyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.contentStatus} = 'ready' and coalesce(length(trim(${schema.items.content})), 0) >= 180 then 1 else 0 end)`,
       contentDegradedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.contentStatus} = 'degraded' or (${schema.items.contentStatus} = 'ready' and coalesce(length(trim(${schema.items.content})), 0) < 180 and coalesce(length(trim(${schema.items.snippet})), 0) >= 24)) then 1 else 0 end)`,
       contentMissingCount: sql<number>`sum(case when ${schema.items.contentStatus} in ('missing', 'failed', 'unavailable') then 1 else 0 end)`,
+      titleOnlyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and coalesce(length(trim(${schema.items.content})), 0) = 0 and coalesce(length(trim(${schema.items.snippet})), 0) = 0 then 1 else 0 end)`,
+      snippetOnlyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and coalesce(length(trim(${schema.items.content})), 0) < 180 and coalesce(length(trim(${schema.items.snippet})), 0) >= 24 then 1 else 0 end)`,
+      longReadRiskCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and coalesce(length(trim(${schema.items.content})), 0) >= 1800 and (${schema.items.content} like '%<p>%' or ${schema.items.content} like '%</li>%') then 1 else 0 end)`,
+      averageContentLength: sql<number>`coalesce(avg(nullif(length(trim(coalesce(${schema.items.content}, ''))), 0)), 0)::int`,
       qualityPassCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'pass' then 1 else 0 end)`,
       qualityReviewCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'review' then 1 else 0 end)`,
       qualityFilterCount: sql<number>`sum(case when ${schema.items.qualityDecision} = 'filter' then 1 else 0 end)`,
       scoredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.aiScore} is not null then 1 else 0 end)`,
       summarizedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.summaryStatus} = 'ready' or coalesce(length(trim(${schema.items.aiSummary})), 0) > 0) then 1 else 0 end)`,
+      summaryFailedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.summaryStatus} = 'failed' or ${schema.items.processingStatus} = 'summary_failed') and coalesce(length(trim(${schema.items.aiSummary})), 0) = 0 then 1 else 0 end)`,
       translationCompletedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.translationStatus} in ('ready', 'skipped') then 1 else 0 end)`,
+      translationFailedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.translationStatus} = 'failed' and coalesce(length(trim(${schema.items.aiTranslation})), 0) = 0 then 1 else 0 end)`,
     })
     .from(schema.items)
     .where(eq(schema.items.userId, authUser.userId))
@@ -203,6 +332,80 @@ app.get('/', async (c) => {
     .where(gte(schema.fetchLogs.startedAt, new Date(Date.now() - 14 * 24 * 3600 * 1000)))
     .groupBy(schema.fetchLogs.sourceId);
 
+  const recentFetchLogRows = await db.execute(sql`
+    select *
+    from (
+      select
+        log.source_id,
+        log.status,
+        log.outcome,
+        log.started_at,
+        log.finished_at,
+        log.duration_ms,
+        log.items_found,
+        log.items_new,
+        log.items_filtered,
+        log.items_duplicate,
+        log.items_queued_ai,
+        log.error,
+        row_number() over (partition by log.source_id order by log.started_at desc) as rn
+      from hub.fetch_logs log
+      join hub.sources src on src.id = log.source_id
+      where log.started_at >= now() - interval '14 days'
+        and src.user_id = ${authUser.userId}::uuid
+    ) ranked
+    where rn <= 5
+    order by source_id, started_at desc
+  `) as Array<{
+    source_id: number | null;
+    status: string | null;
+    outcome: string | null;
+    started_at: string | Date | null;
+    finished_at: string | Date | null;
+    duration_ms: number | null;
+    items_found: number | null;
+    items_new: number | null;
+    items_filtered: number | null;
+    items_duplicate: number | null;
+    items_queued_ai: number | null;
+    error: string | null;
+  }>;
+
+  const aiFailureRows = await db.execute(sql`
+    select
+      item.source_id,
+      log.scene_type,
+      coalesce(log.error_message, item.summary_reason, item.translation_reason, item.content_error, 'unknown_error') as reason,
+      count(*)::int as count
+    from hub.items item
+    join hub.ai_usage_logs log
+      on log.user_id = item.user_id
+     and log.target_id = item.id::text
+    where item.user_id = ${authUser.userId}::uuid
+      and item.filter_bucket = 'main'
+      and item.is_filtered = false
+      and log.status = 'error'
+      and log.created_at >= now() - interval '14 days'
+      and (
+        (log.scene_type like '%summary%' and coalesce(length(trim(item.ai_summary)), 0) = 0 and item.summary_status <> 'skipped')
+        or (log.scene_type like '%translation%' and coalesce(length(trim(item.ai_translation)), 0) = 0 and item.translation_status not in ('ready', 'skipped'))
+        or (log.scene_type like '%scoring%' and item.ai_score is null)
+        or (log.scene_type like '%quality%' and item.quality_decision is null)
+        or (
+          log.scene_type not like '%summary%'
+          and log.scene_type not like '%translation%'
+          and log.scene_type not like '%scoring%'
+          and log.scene_type not like '%quality%'
+        )
+      )
+    group by item.source_id, log.scene_type, coalesce(log.error_message, item.summary_reason, item.translation_reason, item.content_error, 'unknown_error')
+  `) as Array<{
+    source_id: number | null;
+    scene_type: string | null;
+    reason: string | null;
+    count: number | null;
+  }>;
+
   const fetchLogMap = new Map<number, { itemsFound: number; itemsNew: number; itemsFiltered: number; itemsDuplicate: number }>();
   for (const row of fetchLogRows) {
     if (row.sourceId == null) continue;
@@ -218,7 +421,9 @@ app.get('/', async (c) => {
     'itemCount' | 'entryCount' | 'filteredCount' | 'unreadCount' | 'favoriteCount' | 'selectedCount' | 'selectedHitRate'
     | 'contentReadyCount' | 'contentDegradedCount' | 'contentMissingCount'
     | 'qualityPassCount' | 'qualityReviewCount' | 'qualityFilterCount'
-    | 'scoredCount' | 'summarizedCount' | 'translationCompletedCount' | 'sourceQuality'
+    | 'scoredCount' | 'summarizedCount' | 'translationCompletedCount'
+    | 'summaryFailedCount' | 'translationFailedCount' | 'titleOnlyCount' | 'snippetOnlyCount' | 'longReadRiskCount'
+    | 'averageContentLength' | 'sourceQuality'
   >>();
   for (const row of itemStatsRows) {
     const entryCount = Number(row.entryCount || 0);
@@ -251,14 +456,40 @@ app.get('/', async (c) => {
       contentReadyCount: Number(row.contentReadyCount || 0),
       contentDegradedCount: Number(row.contentDegradedCount || 0),
       contentMissingCount: Number(row.contentMissingCount || 0),
+      titleOnlyCount: Number(row.titleOnlyCount || 0),
+      snippetOnlyCount: Number(row.snippetOnlyCount || 0),
+      longReadRiskCount: Number(row.longReadRiskCount || 0),
+      averageContentLength: Number(row.averageContentLength || 0),
       qualityPassCount: Number(row.qualityPassCount || 0),
       qualityReviewCount: Number(row.qualityReviewCount || 0),
       qualityFilterCount: Number(row.qualityFilterCount || 0),
       scoredCount: Number(row.scoredCount || 0),
       summarizedCount: Number(row.summarizedCount || 0),
       translationCompletedCount: Number(row.translationCompletedCount || 0),
+      summaryFailedCount: Number(row.summaryFailedCount || 0),
+      translationFailedCount: Number(row.translationFailedCount || 0),
       sourceQuality,
     });
+  }
+
+  const recentFetchLogMap = new Map<number, SourceHealthFetchLog[]>();
+  for (const row of recentFetchLogRows) {
+    if (row.source_id == null) continue;
+    const list = recentFetchLogMap.get(row.source_id) || [];
+    list.push(normalizeFetchLogRow(row));
+    recentFetchLogMap.set(row.source_id, list);
+  }
+
+  const aiFailureMap = new Map<number, SourceHealthAiFailure[]>();
+  for (const row of aiFailureRows) {
+    if (row.source_id == null) continue;
+    const list = aiFailureMap.get(row.source_id) || [];
+    list.push({
+      stage: stageFromScene(row.scene_type),
+      reason: row.reason || 'unknown_error',
+      count: Number(row.count || 0),
+    });
+    aiFailureMap.set(row.source_id, list);
   }
 
   const duplicateMap = new Map<number, number>();
@@ -282,8 +513,40 @@ app.get('/', async (c) => {
     const base = mapSourceResponse(row);
     const sourceStats = statsMap.get(row.id);
     const latest = latestMap.get(row.id);
+    const healthStats = sourceStats
+      ? {
+        itemCount: sourceStats.itemCount,
+        visibleCount: sourceStats.entryCount,
+        filteredCount: sourceStats.filteredCount,
+        contentReadyCount: sourceStats.contentReadyCount,
+        contentDegradedCount: sourceStats.contentDegradedCount,
+        contentMissingCount: sourceStats.contentMissingCount,
+        titleOnlyCount: sourceStats.titleOnlyCount,
+        snippetOnlyCount: sourceStats.snippetOnlyCount,
+        longReadRiskCount: sourceStats.longReadRiskCount,
+        scoredCount: sourceStats.scoredCount,
+        summaryReadyCount: sourceStats.summarizedCount,
+        summaryFailedCount: sourceStats.summaryFailedCount,
+        translationReadyCount: sourceStats.translationCompletedCount,
+        translationFailedCount: sourceStats.translationFailedCount,
+        reportCandidateCount: sourceStats.selectedCount,
+        reportSelectedCount: sourceStats.selectedCount,
+        hotNotSelectedCount: 0,
+        averageContentLength: sourceStats.averageContentLength,
+      }
+      : emptySourceHealthStats();
+    const sourceHealth = buildSourceHealthSnapshot({
+      source: { ...row, config: getConfigObject(row.config) },
+      fetchLogs: recentFetchLogMap.get(row.id) || [],
+      stats: healthStats,
+      aiFailures: aiFailureMap.get(row.id) || [],
+    });
     return {
       ...base,
+      ...buildSourceAiBudgetSnapshot({
+        ...row,
+        sourceConfig: row.config,
+      }, aiBudgetUsage, row.id),
       itemCount: sourceStats?.itemCount || 0,
       entryCount: sourceStats?.entryCount || 0,
       filteredCount: sourceStats?.filteredCount || 0,
@@ -294,13 +557,24 @@ app.get('/', async (c) => {
       contentReadyCount: sourceStats?.contentReadyCount || 0,
       contentDegradedCount: sourceStats?.contentDegradedCount || 0,
       contentMissingCount: sourceStats?.contentMissingCount || 0,
+      titleOnlyCount: sourceStats?.titleOnlyCount || 0,
+      snippetOnlyCount: sourceStats?.snippetOnlyCount || 0,
+      longReadRiskCount: sourceStats?.longReadRiskCount || 0,
+      averageContentLength: sourceStats?.averageContentLength || 0,
       qualityPassCount: sourceStats?.qualityPassCount || 0,
       qualityReviewCount: sourceStats?.qualityReviewCount || 0,
       qualityFilterCount: sourceStats?.qualityFilterCount || 0,
       scoredCount: sourceStats?.scoredCount || 0,
       summarizedCount: sourceStats?.summarizedCount || 0,
       translationCompletedCount: sourceStats?.translationCompletedCount || 0,
+      summaryFailedCount: sourceStats?.summaryFailedCount || 0,
+      translationFailedCount: sourceStats?.translationFailedCount || 0,
       sourceQuality: sourceStats?.sourceQuality || buildSourceQualityFunnel({}),
+      sourceHealth,
+      healthStatus: sourceHealth.healthStatus,
+      healthReasons: sourceHealth.healthReasons,
+      stageHealth: sourceHealth.stageHealth,
+      recommendedActions: sourceHealth.recommendedActions,
       duplicateContribution: sourceStats?.sourceQuality.duplicateRate ?? duplicateMap.get(row.id) ?? 0,
       latestItemTitle: latest?.latestItemTitle || null,
       latestItemUrl: latest?.latestItemUrl || null,
@@ -308,7 +582,153 @@ app.get('/', async (c) => {
     };
   });
 
-  return c.json({ data: sortSources(enriched, sortBy), total: enriched.length });
+  const filtered = readingTier
+    ? enriched.filter((source) => source.readingTier === readingTier)
+    : enriched;
+
+  return c.json({ data: sortSources(filtered, sortBy), total: filtered.length });
+});
+
+// GET /api/sources/:id/health — 单源全链路健康诊断
+app.get('/:id/health', async (c) => {
+  const authUser = requireAuth(c);
+  const id = parseInt(c.req.param('id'), 10);
+  if (!Number.isInteger(id)) {
+    return c.json({ error: 'Invalid source id' }, 400);
+  }
+
+  const sourceRows = await db
+    .select()
+    .from(schema.sources)
+    .where(and(eq(schema.sources.id, id), eq(schema.sources.userId, authUser.userId)))
+    .limit(1);
+
+  const source = sourceRows[0];
+  if (!source) {
+    return c.json({ error: 'Source not found' }, 404);
+  }
+
+  const statsRows = await db
+    .select({
+      itemCount: sql<number>`count(*)`,
+      visibleCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false then 1 else 0 end)`,
+      filteredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'filtered' or ${schema.items.isFiltered} = true then 1 else 0 end)`,
+      contentReadyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.contentStatus} = 'ready' and coalesce(length(trim(${schema.items.content})), 0) >= 180 then 1 else 0 end)`,
+      contentDegradedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.contentStatus} = 'degraded' or (${schema.items.contentStatus} = 'ready' and coalesce(length(trim(${schema.items.content})), 0) < 180 and coalesce(length(trim(${schema.items.snippet})), 0) >= 24)) then 1 else 0 end)`,
+      contentMissingCount: sql<number>`sum(case when ${schema.items.contentStatus} in ('missing', 'failed', 'unavailable') then 1 else 0 end)`,
+      titleOnlyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and coalesce(length(trim(${schema.items.content})), 0) = 0 and coalesce(length(trim(${schema.items.snippet})), 0) = 0 then 1 else 0 end)`,
+      snippetOnlyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and coalesce(length(trim(${schema.items.content})), 0) < 180 and coalesce(length(trim(${schema.items.snippet})), 0) >= 24 then 1 else 0 end)`,
+      longReadRiskCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and coalesce(length(trim(${schema.items.content})), 0) >= 1800 and (${schema.items.content} like '%<p>%' or ${schema.items.content} like '%</li>%') then 1 else 0 end)`,
+      scoredCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.aiScore} is not null then 1 else 0 end)`,
+      summaryReadyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.summaryStatus} = 'ready' or coalesce(length(trim(${schema.items.aiSummary})), 0) > 0) then 1 else 0 end)`,
+      summaryFailedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (${schema.items.summaryStatus} = 'failed' or ${schema.items.processingStatus} = 'summary_failed') and coalesce(length(trim(${schema.items.aiSummary})), 0) = 0 then 1 else 0 end)`,
+      translationReadyCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.translationStatus} in ('ready', 'skipped') then 1 else 0 end)`,
+      translationFailedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.translationStatus} = 'failed' and coalesce(length(trim(${schema.items.aiTranslation})), 0) = 0 then 1 else 0 end)`,
+      reportCandidateCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (coalesce(${schema.items.aiScore}, 0) >= 70 or coalesce(${schema.items.priorityScore}, 0) >= 0.7) then 1 else 0 end)`,
+      reportSelectedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and (coalesce(${schema.items.aiScore}, 0) >= 70 or coalesce(${schema.items.priorityScore}, 0) >= 0.7) then 1 else 0 end)`,
+      hotNotSelectedCount: sql<number>`sum(case when ${schema.items.filterBucket} = 'main' and ${schema.items.isFiltered} = false and ${schema.items.aiScore} is null and (${schema.items.title} ~* '(Claude|Anthropic|OpenAI|Gemini|模型|model release|新模型)' or coalesce(${schema.items.snippet}, '') ~* '(Claude|Anthropic|OpenAI|Gemini|模型|model release|新模型)') then 1 else 0 end)`,
+      averageContentLength: sql<number>`coalesce(avg(nullif(length(trim(coalesce(${schema.items.content}, ''))), 0)), 0)::int`,
+    })
+    .from(schema.items)
+    .where(and(eq(schema.items.userId, authUser.userId), eq(schema.items.sourceId, id)));
+
+  const recentLogs = await db
+    .select({
+      status: schema.fetchLogs.status,
+      outcome: schema.fetchLogs.outcome,
+      startedAt: schema.fetchLogs.startedAt,
+      finishedAt: schema.fetchLogs.finishedAt,
+      durationMs: schema.fetchLogs.durationMs,
+      itemsFound: schema.fetchLogs.itemsFound,
+      itemsNew: schema.fetchLogs.itemsNew,
+      itemsFiltered: schema.fetchLogs.itemsFiltered,
+      itemsDuplicate: schema.fetchLogs.itemsDuplicate,
+      itemsQueuedAi: schema.fetchLogs.itemsQueuedAi,
+      error: schema.fetchLogs.error,
+    })
+    .from(schema.fetchLogs)
+    .where(eq(schema.fetchLogs.sourceId, id))
+    .orderBy(desc(schema.fetchLogs.startedAt))
+    .limit(5);
+
+  const aiFailureRowsForSource = await db.execute(sql`
+    select
+      log.scene_type,
+      coalesce(log.error_message, item.summary_reason, item.translation_reason, item.content_error, 'unknown_error') as reason,
+      count(*)::int as count
+    from hub.items item
+    join hub.ai_usage_logs log
+      on log.user_id = item.user_id
+     and log.target_id = item.id::text
+    where item.user_id = ${authUser.userId}::uuid
+      and item.source_id = ${id}
+      and item.filter_bucket = 'main'
+      and item.is_filtered = false
+      and log.status = 'error'
+      and log.created_at >= now() - interval '14 days'
+      and (
+        (log.scene_type like '%summary%' and coalesce(length(trim(item.ai_summary)), 0) = 0 and item.summary_status <> 'skipped')
+        or (log.scene_type like '%translation%' and coalesce(length(trim(item.ai_translation)), 0) = 0 and item.translation_status not in ('ready', 'skipped'))
+        or (log.scene_type like '%scoring%' and item.ai_score is null)
+        or (log.scene_type like '%quality%' and item.quality_decision is null)
+        or (
+          log.scene_type not like '%summary%'
+          and log.scene_type not like '%translation%'
+          and log.scene_type not like '%scoring%'
+          and log.scene_type not like '%quality%'
+        )
+      )
+    group by log.scene_type, coalesce(log.error_message, item.summary_reason, item.translation_reason, item.content_error, 'unknown_error')
+  `) as Array<{ scene_type: string | null; reason: string | null; count: number | null }>;
+
+  const row = statsRows[0];
+  const stats: SourceHealthStats = row
+    ? {
+      itemCount: Number(row.itemCount || 0),
+      visibleCount: Number(row.visibleCount || 0),
+      filteredCount: Number(row.filteredCount || 0),
+      contentReadyCount: Number(row.contentReadyCount || 0),
+      contentDegradedCount: Number(row.contentDegradedCount || 0),
+      contentMissingCount: Number(row.contentMissingCount || 0),
+      titleOnlyCount: Number(row.titleOnlyCount || 0),
+      snippetOnlyCount: Number(row.snippetOnlyCount || 0),
+      longReadRiskCount: Number(row.longReadRiskCount || 0),
+      scoredCount: Number(row.scoredCount || 0),
+      summaryReadyCount: Number(row.summaryReadyCount || 0),
+      summaryFailedCount: Number(row.summaryFailedCount || 0),
+      translationReadyCount: Number(row.translationReadyCount || 0),
+      translationFailedCount: Number(row.translationFailedCount || 0),
+      reportCandidateCount: Number(row.reportCandidateCount || 0),
+      reportSelectedCount: Number(row.reportSelectedCount || 0),
+      hotNotSelectedCount: Number(row.hotNotSelectedCount || 0),
+      averageContentLength: Number(row.averageContentLength || 0),
+    }
+    : emptySourceHealthStats();
+  const sourceHealth = buildSourceHealthSnapshot({
+    source: { ...source, config: getConfigObject(source.config) },
+    fetchLogs: recentLogs,
+    stats,
+    aiFailures: aiFailureRowsForSource.map((failure) => ({
+      stage: stageFromScene(failure.scene_type),
+      reason: failure.reason || 'unknown_error',
+      count: Number(failure.count || 0),
+    })),
+  });
+  const aiBudgetUsage = await loadSourceAiDailyUsage(authUser.userId);
+
+  return c.json({
+    data: {
+      source: {
+        ...mapSourceResponse(source),
+        ...buildSourceAiBudgetSnapshot({
+          ...source,
+          sourceConfig: source.config,
+        }, aiBudgetUsage, source.id),
+      },
+      stats,
+      ...sourceHealth,
+    },
+  });
 });
 
 // GET /api/sources/categories — 分类列表
@@ -389,17 +809,33 @@ app.post('/', async (c) => {
     upgradeRules,
     sourceKind,
     authorityWeight,
+    readingTier,
+    aiDailyBudget,
+    contentStrategy,
   } = body;
 
   if (!name || !sourceType) {
     return c.json({ error: 'name and sourceType are required' }, 400);
   }
+  const normalizedReadingTier = readingTier === undefined ? null : normalizeSourceReadingTier(readingTier);
+  if (readingTier !== undefined && !normalizedReadingTier) {
+    return c.json({ error: 'Invalid reading tier' }, 400);
+  }
+  const normalizedAiDailyBudget = aiDailyBudget === undefined ? null : normalizeSourceAiDailyBudget(aiDailyBudget);
+  if (aiDailyBudget !== undefined && normalizedAiDailyBudget === null) {
+    return c.json({ error: 'Invalid AI daily budget; expected an integer from 0 to 200' }, 400);
+  }
+  const normalizedTopicGroup = body.topicGroup === undefined ? null : normalizeSourceTopicGroup(body.topicGroup);
+  if (body.topicGroup !== undefined && !normalizedTopicGroup) {
+    return c.json({ error: 'Invalid source topic group' }, 400);
+  }
+  const normalizedGovernanceRole = body.governanceRole === undefined ? null : normalizeSourceGovernanceRole(body.governanceRole);
+  if (body.governanceRole !== undefined && !normalizedGovernanceRole) {
+    return c.json({ error: 'Invalid source governance role' }, 400);
+  }
 
   try {
-    const effectiveConfig = { ...(sourceConfig || {}) } as Record<string, unknown>;
-    if ((collectorType === 'webpage' || collectorType === 'changedetection') && !effectiveConfig.renderMode) {
-      effectiveConfig.renderMode = 'auto';
-    }
+    const effectiveSourceRole = sourceRole || ((collectorType === 'webpage' || collectorType === 'webpage_index' || collectorType === 'changedetection') && (category === '监控' || category === 'monitor') ? 'monitor' : 'normal');
     const derivedProfile = deriveSourceProfile({
       sourceTier,
       processingProfile,
@@ -407,10 +843,26 @@ app.post('/', async (c) => {
       trustScore,
       noiseScore,
       upgradeRules,
-      sourceRole,
+      sourceRole: effectiveSourceRole,
       collectorType: collectorType || 'rss',
       sourceType,
       category,
+    });
+    let effectiveConfig = { ...(sourceConfig || {}) } as Record<string, unknown>;
+    if (normalizedReadingTier) effectiveConfig.readingTier = normalizedReadingTier;
+    if (normalizedAiDailyBudget !== null) effectiveConfig.aiDailyBudget = normalizedAiDailyBudget;
+    if (normalizedTopicGroup) effectiveConfig.topicGroup = normalizedTopicGroup;
+    if (normalizedGovernanceRole) effectiveConfig.governanceRole = normalizedGovernanceRole;
+    if ((collectorType === 'webpage' || collectorType === 'webpage_index' || collectorType === 'changedetection') && !effectiveConfig.renderMode) {
+      effectiveConfig.renderMode = 'auto';
+    }
+    effectiveConfig = withDerivedSourceContentStrategy({
+      config: effectiveConfig,
+      collectorType: collectorType || 'rss',
+      sourceType,
+      sourceRole: effectiveSourceRole,
+      processingProfile: derivedProfile.processingProfile,
+      contentStrategy,
     });
     const effectiveSourceKind = sourceKind || classifySourceKind({
       name,
@@ -426,7 +878,7 @@ app.post('/', async (c) => {
       sourceType,
       collectorType: collectorType || 'rss',
       sourceKind: effectiveSourceKind,
-      sourceRole: sourceRole || ((collectorType === 'webpage' || collectorType === 'changedetection') && (category === '监控' || category === 'monitor') ? 'monitor' : 'normal'),
+      sourceRole: effectiveSourceRole,
       sourceTier: derivedProfile.sourceTier,
       authorityWeight: effectiveAuthorityWeight,
       processingProfile: derivedProfile.processingProfile,
@@ -461,6 +913,22 @@ app.put('/:id', async (c) => {
     return c.json({ error: 'Invalid source id' }, 400);
   }
   const body = await c.req.json();
+  const normalizedReadingTier = body.readingTier === undefined ? null : normalizeSourceReadingTier(body.readingTier);
+  if (body.readingTier !== undefined && !normalizedReadingTier) {
+    return c.json({ error: 'Invalid reading tier' }, 400);
+  }
+  const normalizedAiDailyBudget = body.aiDailyBudget === undefined ? null : normalizeSourceAiDailyBudget(body.aiDailyBudget);
+  if (body.aiDailyBudget !== undefined && normalizedAiDailyBudget === null) {
+    return c.json({ error: 'Invalid AI daily budget; expected an integer from 0 to 200' }, 400);
+  }
+  const normalizedTopicGroup = body.topicGroup === undefined ? null : normalizeSourceTopicGroup(body.topicGroup);
+  if (body.topicGroup !== undefined && !normalizedTopicGroup) {
+    return c.json({ error: 'Invalid source topic group' }, 400);
+  }
+  const normalizedGovernanceRole = body.governanceRole === undefined ? null : normalizeSourceGovernanceRole(body.governanceRole);
+  if (body.governanceRole !== undefined && !normalizedGovernanceRole) {
+    return c.json({ error: 'Invalid source governance role' }, 400);
+  }
   const existing = await db.select()
     .from(schema.sources)
     .where(and(eq(schema.sources.id, id), eq(schema.sources.userId, authUser.userId)))
@@ -489,14 +957,20 @@ app.put('/:id', async (c) => {
     updateData.lastOutcome = autoFetchEnabled === false ? 'paused' : status !== 'active' ? 'inactive' : 'scheduled';
   }
   const nextCollectorType = String(body.collectorType ?? current.collectorType ?? '').trim();
-  const nextConfig = (updateData.config as Record<string, unknown> | undefined)
-    || (current.config as Record<string, unknown> | undefined)
-    || {};
+  const nextConfig = {
+    ...((current.config as Record<string, unknown> | undefined) || {}),
+    ...((updateData.config as Record<string, unknown> | undefined) || {}),
+  };
   const nextSourceRole = String(body.sourceRole ?? current.sourceRole ?? '').trim();
   const nextSourceType = String(body.sourceType ?? current.sourceType ?? '').trim();
   const nextCategory = String(body.category ?? current.category ?? '').trim();
-  if ((nextCollectorType === 'webpage' || nextCollectorType === 'changedetection') && !nextConfig.renderMode) {
-    updateData.config = { ...nextConfig, renderMode: 'auto' };
+  let normalizedConfig = { ...nextConfig };
+  if (normalizedReadingTier) normalizedConfig.readingTier = normalizedReadingTier;
+  if (normalizedAiDailyBudget !== null) normalizedConfig.aiDailyBudget = normalizedAiDailyBudget;
+  if (normalizedTopicGroup) normalizedConfig.topicGroup = normalizedTopicGroup;
+  if (normalizedGovernanceRole) normalizedConfig.governanceRole = normalizedGovernanceRole;
+  if ((nextCollectorType === 'webpage' || nextCollectorType === 'webpage_index' || nextCollectorType === 'changedetection') && !normalizedConfig.renderMode) {
+    normalizedConfig = { ...normalizedConfig, renderMode: 'auto' };
   }
   const derivedProfile = deriveSourceProfile({
     sourceTier: body.sourceTier ?? current.sourceTier,
@@ -510,13 +984,22 @@ app.put('/:id', async (c) => {
     sourceType: nextSourceType,
     category: nextCategory,
   });
+  normalizedConfig = withDerivedSourceContentStrategy({
+    config: normalizedConfig,
+    collectorType: nextCollectorType,
+    sourceType: nextSourceType,
+    sourceRole: nextSourceRole,
+    processingProfile: derivedProfile.processingProfile,
+    contentStrategy: body.contentStrategy ?? normalizedConfig.contentStrategy,
+  });
+  updateData.config = normalizedConfig;
   updateData.sourceTier = derivedProfile.sourceTier;
   const nextSourceKind = String(body.sourceKind ?? current.sourceKind ?? '').trim() || classifySourceKind({
     name: body.name ?? current.name,
     sourceType: nextSourceType,
     collectorType: nextCollectorType,
     category: nextCategory,
-    config: updateData.config ?? current.config,
+    config: normalizedConfig,
   });
   updateData.sourceKind = nextSourceKind;
   updateData.authorityWeight = normalizeAuthorityWeight(body.authorityWeight ?? current.authorityWeight, derivedProfile.sourceTier, nextSourceKind);
@@ -609,6 +1092,7 @@ app.post('/import-opml', async (c) => {
         let sourceType = feed.xmlUrl.includes('youtube.com') ? 'rsshub' : 'rss';
         let collectorType = feed.xmlUrl.includes('youtube.com') ? 'youtube' : 'rss';
         let configPayload: Record<string, unknown> = { url: feed.xmlUrl, htmlUrl: feed.htmlUrl };
+        if (feed.dailyReportEnabled === true) configPayload.dailyReportEnabled = true;
 
         try {
           const parsed = new URL(feed.xmlUrl);

@@ -1,9 +1,18 @@
 """ASR 语音转写服务 — 通义听悟 + Paraformer 适配器"""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+import logging
+from typing import Callable, Optional
 from app.config import settings
+
+
+logger = logging.getLogger(__name__)
+DEFAULT_LOCAL_CHUNK_SECONDS = 15 * 60
+MEDIUM_LOCAL_CHUNK_SECONDS = 5 * 60
+DEFAULT_CHUNK_RETRIES = 2
 
 
 @dataclass
@@ -174,6 +183,8 @@ class ParaformerASR(ASRProvider):
         speaker_diarization: bool = True,
         expected_duration: float | None = None,
         chunk_seconds: int | None = None,
+        chunk_retries: int = DEFAULT_CHUNK_RETRIES,
+        progress_callback: Callable[[dict], None] | None = None,
     ) -> TranscriptionResult:
         """本地文件同步转写：直接调用 Recognition 实时 API
         
@@ -185,25 +196,37 @@ class ParaformerASR(ASRProvider):
         actual_path = file_path
         fmt, sr, duration = self._probe_audio_details(file_path)
         if fmt != "wav" or sr != 16000:
+            import os
             import subprocess
             import tempfile
 
             wav_path = tempfile.mktemp(suffix=".wav")
-            subprocess.run(
-                ["ffmpeg", "-i", file_path, "-ar", "16000", "-ac", "1", "-y", wav_path],
-                capture_output=True, timeout=60,
+            conversion_timeout = max(
+                120,
+                min(1800, int((duration or float(expected_duration or 0)) / 4) + 120),
             )
+            conversion_result = subprocess.run(
+                ["ffmpeg", "-i", file_path, "-ar", "16000", "-ac", "1", "-y", wav_path],
+                capture_output=True,
+                timeout=conversion_timeout,
+            )
+            if conversion_result.returncode != 0 or not os.path.exists(wav_path):
+                detail = (conversion_result.stderr or b"").decode("utf-8", errors="replace") if isinstance(conversion_result.stderr, bytes) else str(conversion_result.stderr or "")
+                raise RuntimeError(f"长音频预转换失败: {detail[-500:]}")
             actual_path = wav_path
             fmt, sr, _ = "wav", 16000, 0.0
 
         try:
             _, _, probed_duration = self._probe_audio_details(actual_path)
             duration = probed_duration or duration or float(expected_duration or 0)
-            if duration > 900:
+            effective_chunk_seconds = chunk_seconds or self._chunk_seconds_for_duration(duration)
+            if duration > effective_chunk_seconds:
                 return self._transcribe_local_chunked(
                     actual_path,
                     speaker_diarization=speaker_diarization,
-                    chunk_seconds=chunk_seconds or self._chunk_seconds_for_duration(duration),
+                    chunk_seconds=effective_chunk_seconds,
+                    chunk_retries=chunk_retries,
+                    progress_callback=progress_callback,
                 )
             return self._transcribe_single_local_sync(actual_path, fmt=fmt, sr=sr, speaker_diarization=speaker_diarization, timeout_seconds=self._timeout_for_duration(duration))
         finally:
@@ -257,7 +280,9 @@ class ParaformerASR(ASRProvider):
         self,
         file_path: str,
         speaker_diarization: bool = True,
-        chunk_seconds: int = 900,
+        chunk_seconds: int = DEFAULT_LOCAL_CHUNK_SECONDS,
+        chunk_retries: int = DEFAULT_CHUNK_RETRIES,
+        progress_callback: Callable[[dict], None] | None = None,
     ) -> TranscriptionResult:
         import os
         import subprocess
@@ -266,7 +291,7 @@ class ParaformerASR(ASRProvider):
 
         with tempfile.TemporaryDirectory(prefix="paraformer-chunks-") as temp_dir:
             pattern = str(Path(temp_dir) / "chunk-%03d.wav")
-            subprocess.run(
+            split_result = subprocess.run(
                 [
                     "ffmpeg",
                     "-i",
@@ -285,6 +310,9 @@ class ParaformerASR(ASRProvider):
                 capture_output=True,
                 timeout=180,
             )
+            if split_result.returncode != 0:
+                detail = (split_result.stderr or b"").decode("utf-8", errors="replace") if isinstance(split_result.stderr, bytes) else str(split_result.stderr or "")
+                raise RuntimeError(f"长音频分片失败: {detail[-500:]}")
             chunk_paths = sorted(str(Path(temp_dir) / name) for name in os.listdir(temp_dir) if name.endswith(".wav"))
             if not chunk_paths:
                 return self._transcribe_single_local_sync(
@@ -299,14 +327,17 @@ class ParaformerASR(ASRProvider):
             merged_text_parts: list[str] = []
             merged_speakers: set[str] = set()
             offset = 0.0
+            chunk_diagnostics: list[dict] = []
 
-            for chunk_path in chunk_paths:
-                chunk_result = self._transcribe_single_local_sync(
+            for chunk_index, chunk_path in enumerate(chunk_paths):
+                chunk_result, attempts = self._transcribe_chunk_with_retry(
                     chunk_path,
-                    fmt="wav",
-                    sr=16000,
                     speaker_diarization=speaker_diarization,
                     timeout_seconds=self._timeout_for_duration(chunk_seconds),
+                    max_retries=chunk_retries,
+                    chunk_index=chunk_index,
+                    chunk_count=len(chunk_paths),
+                    progress_callback=progress_callback,
                 )
                 for seg in chunk_result.segments:
                     merged_segments.append(
@@ -322,14 +353,84 @@ class ParaformerASR(ASRProvider):
                 for speaker in chunk_result.speakers:
                     merged_speakers.add(speaker)
                 _, _, chunk_duration = self._probe_audio_details(chunk_path)
-                offset += chunk_duration or float(chunk_seconds)
+                effective_duration = chunk_duration or float(chunk_seconds)
+                chunk_diagnostics.append({
+                    "index": chunk_index + 1,
+                    "start": offset,
+                    "end": offset + effective_duration,
+                    "attempts": attempts,
+                })
+                offset += effective_duration
 
             return TranscriptionResult(
                 text="\n".join(merged_text_parts).strip(),
                 segments=merged_segments,
                 speakers=sorted(merged_speakers),
                 duration=offset,
+                raw_response={
+                    "chunking": {
+                        "enabled": True,
+                        "chunk_seconds": chunk_seconds,
+                        "chunk_count": len(chunk_paths),
+                        "retry_limit": chunk_retries,
+                        "chunks": chunk_diagnostics,
+                    }
+                },
             )
+
+    def _transcribe_chunk_with_retry(
+        self,
+        chunk_path: str,
+        *,
+        speaker_diarization: bool,
+        timeout_seconds: int,
+        max_retries: int,
+        chunk_index: int,
+        chunk_count: int,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> tuple[TranscriptionResult, int]:
+        attempts = max(1, max_retries + 1)
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            if progress_callback:
+                progress_callback({
+                    "stage": "transcribing",
+                    "chunk_index": chunk_index + 1,
+                    "chunk_count": chunk_count,
+                    "attempt": attempt,
+                    "max_attempts": attempts,
+                })
+            try:
+                result = self._transcribe_single_local_sync(
+                    chunk_path,
+                    fmt="wav",
+                    sr=16000,
+                    speaker_diarization=speaker_diarization,
+                    timeout_seconds=timeout_seconds,
+                )
+                if progress_callback:
+                    progress_callback({
+                        "stage": "completed",
+                        "chunk_index": chunk_index + 1,
+                        "chunk_count": chunk_count,
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                    })
+                return result, attempt
+            except Exception as error:
+                last_error = error
+                logger.warning(
+                    "Paraformer 分片 %s/%s 第 %s/%s 次转写失败: %s",
+                    chunk_index + 1,
+                    chunk_count,
+                    attempt,
+                    attempts,
+                    error,
+                )
+        raise RuntimeError(
+            f"第 {chunk_index + 1}/{chunk_count} 段音频转写失败，"
+            f"已自动重试 {max_retries} 次: {last_error}"
+        ) from last_error
 
     @staticmethod
     def _timeout_for_duration(duration: float) -> int:
@@ -338,13 +439,9 @@ class ParaformerASR(ASRProvider):
 
     @staticmethod
     def _chunk_seconds_for_duration(duration: float) -> int:
-        if duration >= 3600:
-            return 180
-        if duration >= 1800:
-            return 240
-        if duration >= 900:
-            return 300
-        return 600
+        if MEDIUM_LOCAL_CHUNK_SECONDS < duration <= DEFAULT_LOCAL_CHUNK_SECONDS:
+            return MEDIUM_LOCAL_CHUNK_SECONDS
+        return DEFAULT_LOCAL_CHUNK_SECONDS
 
     async def _transcribe_local(
         self, file_path: str, speaker_diarization: bool = True

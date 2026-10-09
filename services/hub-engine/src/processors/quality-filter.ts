@@ -7,6 +7,7 @@ import { ensureItemContent, resolveItemText } from '../lib/item-enrichment.js';
 import { logAiUsage } from '../lib/ai-usage.js';
 import { extractJsonPayload } from '../lib/scoring-skills.js';
 import { getEffectiveQualityPolicyForSource } from '../lib/quality-policies.js';
+import { applyAutomaticSourceAiBudget } from '../lib/source-ai-budget.js';
 import {
   normalizeConfidence,
   normalizeQualityDecision,
@@ -18,6 +19,8 @@ import { callLLM, type AiStageResult } from './ai-scorer.js';
 type QualityFilterOptions = {
   itemId?: string;
   itemIds?: string[];
+  automatic?: boolean;
+  budgetExempt?: boolean;
 };
 
 type ParsedQualityResponse = {
@@ -196,7 +199,7 @@ export async function qualityFilterItemsDetailed(userId: string, limit = 10, opt
     conditions.push(inArray(schema.items.id, options.itemIds));
   }
 
-  const rows = await db
+  const candidateRows = await db
     .select({
       id: schema.items.id,
       sourceId: schema.items.sourceId,
@@ -207,11 +210,32 @@ export async function qualityFilterItemsDetailed(userId: string, limit = 10, opt
       contentStatus: schema.items.contentStatus,
       isFiltered: schema.items.isFiltered,
       filterReason: schema.items.filterReason,
+      sourceName: schema.sources.name,
+      collectorType: schema.sources.collectorType,
+      sourceType: schema.sources.sourceType,
+      sourceKind: schema.sources.sourceKind,
+      category: schema.sources.category,
+      sourceStatus: schema.sources.status,
+      sourceAutoFetchEnabled: schema.sources.autoFetchEnabled,
+      sourceTags: schema.sources.tags,
+      sourceConfig: schema.sources.config,
     })
     .from(schema.items)
+    .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
     .where(and(...conditions))
     .orderBy(desc(schema.items.fetchedAt))
-    .limit(options.itemId ? 1 : limit);
+    .limit(options.itemId ? 1 : options.automatic ? Math.max(limit * 50, 500) : limit);
+
+  const rows = options.automatic
+    ? await applyAutomaticSourceAiBudget(
+      userId,
+      candidateRows.map((row) => ({
+        ...row,
+        budgetExempt: Boolean(row.isFiltered) || options.budgetExempt === true,
+      })),
+      limit,
+    )
+    : candidateRows.slice(0, limit);
 
   if (rows.length === 0) return buildStageResult(0, 0, []);
 

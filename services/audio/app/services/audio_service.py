@@ -60,8 +60,8 @@ def convert_to_mp3(input_path: str, output_path: str | None = None, bitrate: str
     return output_path
 
 
-def split_audio(input_path: str, chunk_duration: int = 1800, output_dir: str | None = None) -> list[str]:
-    """将长音频按指定秒数分片（默认 30 分钟一片）"""
+def split_audio(input_path: str, chunk_duration: int = 900, output_dir: str | None = None) -> list[str]:
+    """将长音频按指定秒数分片（默认 15 分钟一片）"""
     if output_dir is None:
         output_dir = tempfile.mkdtemp()
 

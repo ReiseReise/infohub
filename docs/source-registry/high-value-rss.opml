@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>信息中枢 V3 高价值 RSS 冷启动集</title>
+    <dateModified>2026-07-14T02:08:47.663Z</dateModified>
+  </head>
+  <body>
+    <outline text="新闻雷达" title="新闻雷达">
+      <outline type="rss" text="OpenAI News" title="OpenAI News" xmlUrl="https://openai.com/news/rss.xml" htmlUrl="https://openai.com/news/" category="AI" />
+      <outline type="rss" text="Reuters Technology AI" title="Reuters Technology AI" xmlUrl="https://yzcw.dpdns.org/users/1/web_requests/573/R-Technology-AI-slu896.xml" htmlUrl="https://www.reuters.com/technology/artificial-intelligence" category="AI" dailyReportEnabled="true" />
+      <outline type="rss" text="TechCrunch" title="TechCrunch" xmlUrl="https://techcrunch.com/feed/" htmlUrl="https://techcrunch.com/" category="tech" />
+      <outline type="rss" text="智东西" title="智东西" xmlUrl="https://zhidx.com/rss" htmlUrl="https://zhidx.com/" category="AI" />
+      <outline type="rss" text="歸藏的AI工具箱" title="歸藏的AI工具箱" xmlUrl="https://rss.zslren.com/mp/feed/e9374a103fcc10c39c3cf50cbf1e2f20fa98accc.xml" htmlUrl="" category="AI" />
+    </outline>
+    <outline text="核心精读" title="核心精读">
+      <outline type="rss" text="Google DeepMind" title="Google DeepMind" xmlUrl="https://deepmind.google/blog/rss.xml" htmlUrl="https://deepmind.google/discover/blog/" category="AI" />
+      <outline type="rss" text="Hugging Face Blog" title="Hugging Face Blog" xmlUrl="https://huggingface.co/blog/feed.xml" htmlUrl="https://huggingface.co/blog" category="AI" />
+      <outline type="rss" text="Simon Willison&apos;s Weblog" title="Simon Willison&apos;s Weblog" xmlUrl="https://simonwillison.net/atom/everything/" htmlUrl="https://simonwillison.net/" category="AI" />
+      <outline type="rss" text="AIGC Weekly" title="AIGC Weekly" xmlUrl="https://quaily.com/op7418/feed/atom" htmlUrl="https://quaily.com/op7418" category="AI" />
+      <outline type="rss" text="宝玉的分享" title="宝玉的分享" xmlUrl="https://s.baoyu.io/feed.xml" htmlUrl="https://baoyu.io/" category="AI" />
+      <outline type="rss" text="seangoedecke.com" title="seangoedecke.com" xmlUrl="https://www.seangoedecke.com/rss.xml" htmlUrl="https://www.seangoedecke.com/" category="Blogs" />
+      <outline type="rss" text="daringfireball.net" title="daringfireball.net" xmlUrl="https://daringfireball.net/feeds/main" htmlUrl="https://daringfireball.net/" category="Blogs" />
+      <outline type="rss" text="pluralistic.net" title="pluralistic.net" xmlUrl="https://pluralistic.net/feed/" htmlUrl="https://pluralistic.net/" category="Blogs" />
+      <outline type="rss" text="johndcook.com" title="johndcook.com" xmlUrl="https://www.johndcook.com/blog/feed/" htmlUrl="https://www.johndcook.com/blog/" category="Blogs" />
+      <outline type="rss" text="construction-physics.com" title="construction-physics.com" xmlUrl="https://www.construction-physics.com/feed" htmlUrl="https://www.construction-physics.com/" category="Blogs" />
+      <outline type="rss" text="dwarkesh.com" title="dwarkesh.com" xmlUrl="https://www.dwarkeshpatel.com/feed" htmlUrl="https://www.dwarkeshpatel.com/" category="Blogs" />
+      <outline type="rss" text="Yukang Chen | 程序员的喵" title="Yukang Chen | 程序员的喵" xmlUrl="https://catcoding.me/atom.xml" htmlUrl="https://catcoding.me/" category="Blog" />
+      <outline type="rss" text="TonyBai | 白明" title="TonyBai | 白明" xmlUrl="https://tonybai.com/feed/" htmlUrl="https://tonybai.com/" category="Blog" />
+      <outline type="rss" text="Interconnects" title="Interconnects" xmlUrl="https://www.interconnects.ai/feed" htmlUrl="https://www.interconnects.ai/" category="AI" />
+      <outline type="rss" text="One Useful Thing" title="One Useful Thing" xmlUrl="https://www.oneusefulthing.org/feed" htmlUrl="https://www.oneusefulthing.org/" category="AI" />
+      <outline type="rss" text="Latent Space" title="Latent Space" xmlUrl="https://www.latent.space/feed" htmlUrl="https://www.latent.space/" category="AI" />
+    </outline>
+  </body>
+</opml>

@@ -38,12 +38,12 @@ test('classifies x and wechat sources as candidate-only social signals', () => {
   }), 'wechat');
 });
 
-test('normalizes authority weight from AIHOT-style tiers', () => {
-  assert.equal(normalizeAuthorityWeight(null, 'T1', 'official'), 1.28);
-  assert.equal(normalizeAuthorityWeight(undefined, 'T1.5', 'x'), 1.08);
-  assert.equal(normalizeAuthorityWeight(undefined, 'T2', 'wechat'), 0.88);
-  assert.equal(normalizeAuthorityWeight(3, 'T1', 'official'), 2);
-  assert.equal(normalizeAuthorityWeight(0.1, 'T2', 'media'), 0.35);
+test('normalizes authority weight from the current S-to-D authority tiers', () => {
+  assert.equal(normalizeAuthorityWeight(null, 'S', 'official'), 1.28);
+  assert.equal(normalizeAuthorityWeight(undefined, 'A', 'x'), 1.06);
+  assert.equal(normalizeAuthorityWeight(undefined, 'B', 'wechat'), 0.88);
+  assert.equal(normalizeAuthorityWeight(3, 'S', 'official'), 2);
+  assert.equal(normalizeAuthorityWeight(0.1, 'B', 'media'), 0.35);
 });
 
 test('classifies daily report items into AIHOT five buckets', () => {

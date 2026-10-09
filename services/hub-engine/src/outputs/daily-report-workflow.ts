@@ -1,7 +1,21 @@
+import { AIHOT_DAILY_BUCKET_LABELS, classifyAihotDailyBucket } from '../lib/aihot-governance.js';
+import { evaluateTranslationArtifact } from '../lib/translation-quality.js';
+
 export type DailyReportSelectionMode = 'scored' | 'review' | 'latest_visible' | 'empty';
 export type DailyReportReviewBucket = 'ai_tech_review' | 'business_noise_review';
 
 export type DailyReportWorkflowConfig = {
+  name?: string;
+  version?: string;
+  targetAudience?: string[];
+  reportTemplateId?: string;
+  fallbackStrategy?: 'none' | 'latest_visible' | 'semantic_related' | 'source_priority' | 'manual_review';
+  normalization?: {
+    translationMode?: 'fast' | 'precise';
+    terminologyNormalization?: boolean;
+    entityNormalization?: boolean;
+    dedupStrategy?: 'event' | 'title' | 'semantic';
+  };
   topN: number;
   minScore: number;
   enableLatestFallback: boolean;
@@ -11,6 +25,8 @@ export type DailyReportWorkflowConfig = {
     categories: string[];
     keywords: string[];
     sourceTiers: string[];
+    sourceIds: number[];
+    sourceNames: string[];
   };
   enabledModules: {
     cleaning: boolean;
@@ -23,6 +39,7 @@ export type DailyReportWorkflowConfig = {
 
 export type DailyReportCandidateInput = {
   id: string;
+  sourceId?: number | null;
   title: string;
   url: string;
   aiScore: number | null;
@@ -36,6 +53,7 @@ export type DailyReportCandidateInput = {
   category: string;
   sourceType?: string | null;
   sourceTier?: string | null;
+  readingTier?: 'high_value' | 'light_reading' | 'explore' | 'paused' | string | null;
   sourceKind?: string | null;
   clusterId?: string | null;
   isFiltered?: boolean | null;
@@ -47,6 +65,8 @@ export type DailyReportCandidateInput = {
   publishedAt?: string | null;
   fetchedAt?: string | null;
   aiTags?: string[];
+  contentLength?: number | null;
+  translationSourceText?: string | null;
 };
 
 export type DailyReportPreparedCandidate = DailyReportCandidateInput & {
@@ -77,7 +97,7 @@ export type DailyReportCandidateFunnel = {
 export type DailyReportExcludedCandidate = {
   id: string;
   title: string;
-  reason: 'translation_failed' | 'not_chinese' | 'not_selected' | 'business_noise' | 'fallback_scored';
+  reason: 'translation_failed' | 'not_chinese' | 'not_selected' | 'business_noise' | 'fallback_scored' | 'webpage_snapshot';
   detail?: string | null;
   url?: string | null;
   sourceName?: string | null;
@@ -118,10 +138,21 @@ export type PrepareDailyReportCandidateOptions = {
 };
 
 export const DEFAULT_DAILY_REPORT_WORKFLOW: DailyReportWorkflowConfig = {
-  topN: 18,
+  name: '默认工作流（高价值优先）',
+  version: 'v2.0',
+  targetAudience: ['个人决策', '成长复盘'],
+  reportTemplateId: 'high_quality_v2',
+  fallbackStrategy: 'latest_visible',
+  normalization: {
+    translationMode: 'precise',
+    terminologyNormalization: true,
+    entityNormalization: true,
+    dedupStrategy: 'event',
+  },
+  topN: 42,
   minScore: 55,
   enableLatestFallback: true,
-  perSourceLimit: 4,
+  perSourceLimit: 8,
   requireChinese: true,
   scope: {
     categories: ['AI', 'tech', 'tech-cn', 'App&效率工具', 'Product Changelog', '研报&数据'],
@@ -145,7 +176,9 @@ export const DEFAULT_DAILY_REPORT_WORKFLOW: DailyReportWorkflowConfig = {
       '科技',
       '工具',
     ],
-    sourceTiers: ['T1', 'T1.5', 'T2', 'S', 'A'],
+    sourceTiers: ['S', 'A'],
+    sourceIds: [],
+    sourceNames: [],
   },
   enabledModules: {
     cleaning: true,
@@ -168,6 +201,30 @@ function normalizeStringArray(value: unknown, fallback: string[]) {
   return normalized.length > 0 ? Array.from(new Set(normalized)) : fallback;
 }
 
+function normalizeSourceTierArray(value: unknown, fallback: string[]) {
+  const legacyMap: Record<string, string | null> = {
+    T1: 'S',
+    'T1.5': 'A',
+    T2: null,
+  };
+  const allowed = new Set(['S', 'A', 'B', 'C', 'D']);
+  const normalized = normalizeStringArray(value, fallback)
+    .map((item) => Object.prototype.hasOwnProperty.call(legacyMap, item.toUpperCase())
+      ? legacyMap[item.toUpperCase()]
+      : item.toUpperCase())
+    .filter((item): item is string => Boolean(item) && allowed.has(item as string));
+  return normalized.length > 0 ? Array.from(new Set(normalized)) : [...fallback];
+}
+
+function normalizeIntegerArray(value: unknown, fallback: number[]) {
+  if (!Array.isArray(value)) return fallback;
+  const normalized = value
+    .map((item) => typeof item === 'number' ? item : Number(item))
+    .filter((item) => Number.isInteger(item) && item > 0)
+    .map((item) => Math.trunc(item));
+  return normalized.length > 0 ? Array.from(new Set(normalized)) : fallback;
+}
+
 function normalizeModuleFlags(value: unknown): DailyReportWorkflowConfig['enabledModules'] {
   const input = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   return {
@@ -179,10 +236,31 @@ function normalizeModuleFlags(value: unknown): DailyReportWorkflowConfig['enable
   };
 }
 
+function normalizeEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  const normalized = String(value || '').trim();
+  return allowed.includes(normalized as T) ? normalized as T : fallback;
+}
+
 export function normalizeDailyReportWorkflowConfig(input?: unknown): DailyReportWorkflowConfig {
   const raw = input && typeof input === 'object' ? input as Record<string, unknown> : {};
   const rawScope = raw.scope && typeof raw.scope === 'object' ? raw.scope as Record<string, unknown> : {};
+  const rawNormalization = raw.normalization && typeof raw.normalization === 'object' ? raw.normalization as Record<string, unknown> : {};
   return {
+    name: String(raw.name || DEFAULT_DAILY_REPORT_WORKFLOW.name).trim() || DEFAULT_DAILY_REPORT_WORKFLOW.name,
+    version: String(raw.version || DEFAULT_DAILY_REPORT_WORKFLOW.version).trim() || DEFAULT_DAILY_REPORT_WORKFLOW.version,
+    targetAudience: normalizeStringArray(raw.targetAudience, DEFAULT_DAILY_REPORT_WORKFLOW.targetAudience || []),
+    reportTemplateId: String(raw.reportTemplateId || DEFAULT_DAILY_REPORT_WORKFLOW.reportTemplateId).trim() || DEFAULT_DAILY_REPORT_WORKFLOW.reportTemplateId,
+    fallbackStrategy: normalizeEnum(raw.fallbackStrategy, ['none', 'latest_visible', 'semantic_related', 'source_priority', 'manual_review'] as const, DEFAULT_DAILY_REPORT_WORKFLOW.fallbackStrategy || 'latest_visible'),
+    normalization: {
+      translationMode: normalizeEnum(rawNormalization.translationMode, ['fast', 'precise'] as const, DEFAULT_DAILY_REPORT_WORKFLOW.normalization?.translationMode || 'precise'),
+      terminologyNormalization: typeof rawNormalization.terminologyNormalization === 'boolean'
+        ? rawNormalization.terminologyNormalization
+        : DEFAULT_DAILY_REPORT_WORKFLOW.normalization?.terminologyNormalization ?? true,
+      entityNormalization: typeof rawNormalization.entityNormalization === 'boolean'
+        ? rawNormalization.entityNormalization
+        : DEFAULT_DAILY_REPORT_WORKFLOW.normalization?.entityNormalization ?? true,
+      dedupStrategy: normalizeEnum(rawNormalization.dedupStrategy, ['event', 'title', 'semantic'] as const, DEFAULT_DAILY_REPORT_WORKFLOW.normalization?.dedupStrategy || 'event'),
+    },
     topN: clampInteger(raw.topN, DEFAULT_DAILY_REPORT_WORKFLOW.topN, 1, 50),
     minScore: clampInteger(raw.minScore, DEFAULT_DAILY_REPORT_WORKFLOW.minScore, 0, 100),
     enableLatestFallback: typeof raw.enableLatestFallback === 'boolean'
@@ -195,7 +273,9 @@ export function normalizeDailyReportWorkflowConfig(input?: unknown): DailyReport
     scope: {
       categories: normalizeStringArray(rawScope.categories, DEFAULT_DAILY_REPORT_WORKFLOW.scope.categories),
       keywords: normalizeStringArray(rawScope.keywords, DEFAULT_DAILY_REPORT_WORKFLOW.scope.keywords),
-      sourceTiers: normalizeStringArray(rawScope.sourceTiers, DEFAULT_DAILY_REPORT_WORKFLOW.scope.sourceTiers),
+      sourceTiers: normalizeSourceTierArray(rawScope.sourceTiers, DEFAULT_DAILY_REPORT_WORKFLOW.scope.sourceTiers),
+      sourceIds: normalizeIntegerArray(rawScope.sourceIds, DEFAULT_DAILY_REPORT_WORKFLOW.scope.sourceIds),
+      sourceNames: normalizeStringArray(rawScope.sourceNames, DEFAULT_DAILY_REPORT_WORKFLOW.scope.sourceNames),
     },
     enabledModules: normalizeModuleFlags(raw.enabledModules),
   };
@@ -267,7 +347,33 @@ function resolveReportSummary(candidate: DailyReportCandidateInput): string {
   return '';
 }
 
+export function sanitizeDailyReportTranslation(candidate: DailyReportCandidateInput): DailyReportCandidateInput {
+  if (!candidate.aiTranslation?.trim()) return candidate;
+  const quality = evaluateTranslationArtifact(
+    candidate.aiTranslation,
+    candidate.translationSourceText,
+    { basisLength: candidate.contentLength },
+  );
+  if (quality.usable) return candidate;
+  return {
+    ...candidate,
+    aiTranslation: null,
+    translationStatus: 'failed',
+    translationReason: quality.reason || candidate.translationReason || '译文质量校验未通过。',
+  };
+}
+
 function itemMatchesDailyScope(candidate: DailyReportCandidateInput, config: DailyReportWorkflowConfig): boolean {
+  const scopedSourceIds = config.scope.sourceIds || [];
+  const scopedSourceNames = (config.scope.sourceNames || []).map((name) => name.toLowerCase());
+  const hasSourceScope = scopedSourceIds.length > 0 || scopedSourceNames.length > 0;
+  const sourceName = String(candidate.sourceName || '').trim().toLowerCase();
+  const matchesSourceScope = (
+    (candidate.sourceId != null && scopedSourceIds.includes(candidate.sourceId))
+    || (sourceName.length > 0 && scopedSourceNames.includes(sourceName))
+  );
+  if (hasSourceScope) return matchesSourceScope;
+
   const category = candidate.category || '';
   if (config.scope.categories.some((entry) => entry.toLowerCase() === category.toLowerCase())) return true;
   if (candidate.sourceTier && config.scope.sourceTiers.includes(candidate.sourceTier)) return true;
@@ -280,6 +386,13 @@ function itemMatchesDailyScope(candidate: DailyReportCandidateInput, config: Dai
     ...(candidate.aiTags || []),
   ].join('\n').toLowerCase();
   return config.scope.keywords.some((keyword) => haystack.includes(keyword.toLowerCase()));
+}
+
+function normalizeDailyCategoryLabel(candidate: Pick<DailyReportCandidateInput, 'title' | 'aiSummary' | 'aiTags' | 'category'>): string {
+  const category = String(candidate.category || '').trim();
+  if (category && !/^uncategorized$/i.test(category)) return category;
+  const bucket = classifyAihotDailyBucket(candidate);
+  return AIHOT_DAILY_BUCKET_LABELS[bucket] || 'AI 线索';
 }
 
 export function classifyDailyReportReviewBucket(candidate: Pick<
@@ -306,12 +419,16 @@ export function classifyDailyReportReviewBucket(candidate: Pick<
   const regulatoryAiTechSignal = /(监管|合规|治理|政策|法案|实施细则)/i.test(signalText)
     && /(ai|人工智能|大模型|模型|算法|数据|平台|科技|自动驾驶|机器人|芯片|算力|智能体)/i.test(signalText);
   const aiTechSignal = !explicitNonAiTech && (strongAiTechSignal || regulatoryAiTechSignal);
-  const marketNoise = /(恒指|a股|港股|美股|开盘|收盘|涨超|跌超|指数|股价|股票|新开仓|加仓|平仓|持仓|投资者账户|资金划转|财报|公告|融资余额|主力资金|板块|快手涨|公司公告|爱企查|天眼查)/i.test(text);
+  const marketNoisePattern = /(恒指|a股|港股|美股|沪深|科创50|创业板|开盘|收盘|盘中|午间休盘|日内|涨超|跌超|涨幅|跌幅|指数|股价|股票|新开仓|加仓|平仓|持仓|投资者账户|资金划转|财报|公告|融资余额|主力资金|成交额|板块|快手涨|公司公告|爱企查|天眼查|黄金|现货|期货|逆回购|央行公开市场)/i;
+  const titleMarketNoise = marketNoisePattern.test(candidate.title || '');
+  const titleAiTechSignal = /(ai|人工智能|openai|anthropic|claude|gpt|gemini|大模型|模型发布|智能体|芯片|算力|机器人|自动驾驶|codex|cursor)/i.test(candidate.title || '');
+  const marketNoise = marketNoisePattern.test(text);
   const genericBusiness = /(商业快讯|财经|证券|券商|投资理财|资本市场|股市|基金|银行|保险|地产|存量业务|内地业务清理|跨境证券|行业监管|点心债|债券|境外发行人|发行规模|融资成本|外资入场|外资机构|人民币国际化|人民币资产|金融市场开放)/i.test(text);
   const genericFinanceGovernance = /(证监会|基金业协会|证券投资基金|基金行业|投资投研|客户服务|内控|错位发展|风险防控|概念炒作|过度投机|通道空转|伪创新|乱创新)/i.test(text)
     && !hasDirectProductOrTechnicalSignal(candidate);
   const genericAggregation = /BestBlogs\.dev|AI洞察日报|RSS Feed/i.test(candidate.sourceName || '');
 
+  if (titleMarketNoise && !titleAiTechSignal) return 'business_noise_review';
   if (genericFinanceGovernance) return 'business_noise_review';
   if (genericAggregation && !aiTechSignal) return 'business_noise_review';
   if (!aiTechSignal && (marketNoise || genericBusiness)) return 'business_noise_review';
@@ -361,7 +478,7 @@ function buildExcludedCandidate(
     detail: detail || null,
     url: candidate.url,
     sourceName: candidate.sourceName,
-    category: candidate.category,
+    category: normalizeDailyCategoryLabel(candidate),
     aiScore: candidate.aiScore,
     translationStatus: candidate.translationStatus || null,
   };
@@ -371,6 +488,7 @@ const EXCLUDED_REASON_PRIORITY: DailyReportExcludedCandidate['reason'][] = [
   'translation_failed',
   'not_chinese',
   'fallback_scored',
+  'webpage_snapshot',
   'business_noise',
   'not_selected',
 ];
@@ -416,6 +534,7 @@ function toPreparedCandidate(
   return {
     ...candidate,
     displayTitle: candidate.title.trim(),
+    category: normalizeDailyCategoryLabel(candidate),
     reportSummary: reportSummary || candidate.title.trim(),
     scopeMatched,
     selectionMode,
@@ -425,15 +544,58 @@ function toPreparedCandidate(
   };
 }
 
-function applyPerSourceLimit<T extends { sourceName: string }>(items: T[], limit: number): T[] {
+export function resolveDailyReportSourceLimit(
+  readingTier: DailyReportCandidateInput['readingTier'],
+  configuredLimit: number,
+): number {
+  const tierLimit = readingTier === 'high_value'
+    ? 5
+    : readingTier === 'light_reading'
+      ? 2
+      : readingTier === 'explore'
+        ? 1
+        : readingTier === 'paused'
+          ? 0
+          : configuredLimit;
+  return Math.max(0, Math.min(configuredLimit, tierLimit));
+}
+
+function applyPerSourceLimit<T extends { sourceName: string; readingTier?: DailyReportCandidateInput['readingTier'] }>(
+  items: T[],
+  limit: number,
+  options: { respectReadingTier?: boolean } = {},
+): T[] {
   const counts = new Map<string, number>();
   const result: T[] = [];
   for (const item of items) {
     const key = item.sourceName || '未知来源';
     const current = counts.get(key) || 0;
-    if (current >= limit) continue;
+    const itemLimit = options.respectReadingTier === false
+      ? limit
+      : resolveDailyReportSourceLimit(item.readingTier, limit);
+    if (current >= itemLimit) continue;
     counts.set(key, current + 1);
     result.push(item);
+  }
+  return result;
+}
+
+export function enforceDailyReportSourceShare<T extends { sourceName: string }>(items: T[], maxShare = 0.35): T[] {
+  if (items.length <= 1 || maxShare <= 0 || maxShare >= 1) return items;
+  if (new Set(items.map((item) => item.sourceName || '未知来源')).size < 3) return items;
+  let result = [...items];
+  let previousLength = -1;
+  while (result.length !== previousLength) {
+    previousLength = result.length;
+    const maxPerSource = Math.max(1, Math.floor(result.length * maxShare));
+    const counts = new Map<string, number>();
+    result = result.filter((item) => {
+      const key = item.sourceName || '未知来源';
+      const current = counts.get(key) || 0;
+      if (current >= maxPerSource) return false;
+      counts.set(key, current + 1);
+      return true;
+    });
   }
   return result;
 }
@@ -448,6 +610,21 @@ function isAggregationDigestCandidate(candidate: Pick<DailyReportCandidateInput,
     || /AI洞察日报|BestBlogs\.dev|RSS Feed/i.test(sourceName)
     || /汇总了多条|热门内容|今日信息汇总|日报包含/.test(summary),
   );
+}
+
+export function isWebpageSnapshotDailyCandidate(candidate: Pick<
+  DailyReportCandidateInput,
+  'title' | 'sourceName' | 'sourceType' | 'snippet' | 'aiSummary'
+>): boolean {
+  if (String(candidate.sourceType || '').toLowerCase() === 'webpage') return true;
+  const text = [
+    candidate.title || '',
+    candidate.sourceName || '',
+    candidate.snippet || '',
+    candidate.aiSummary || '',
+  ].join('\n');
+  return /newsroom\s*(?:\\|\|)\s*anthropic/i.test(text)
+    || (/\bpress\b|\bsupport\b|download\s+press\s+kit/i.test(text) && /newsroom|anthropic/i.test(text));
 }
 
 function hasDirectProductOrTechnicalSignal(candidate: Pick<DailyReportCandidateInput, 'title' | 'aiSummary' | 'category' | 'sourceName' | 'aiTags'>): boolean {
@@ -467,9 +644,9 @@ function hasDirectProductOrTechnicalSignal(candidate: Pick<DailyReportCandidateI
 
 function sourceTierRank(tier?: string | null): number {
   const normalized = String(tier || '').toUpperCase();
-  if (normalized === 'T1' || normalized === 'S') return 12;
-  if (normalized === 'T1.5' || normalized === 'A') return 8;
-  if (normalized === 'T2') return 4;
+  if (normalized === 'S') return 12;
+  if (normalized === 'A') return 8;
+  if (normalized === 'B') return 4;
   if (normalized === 'C') return -4;
   if (normalized === 'D') return -8;
   return 0;
@@ -512,6 +689,8 @@ function applyAggregationDigestLimit(items: DailyReportPreparedCandidate[], maxA
 }
 
 function dailyReportEventKey(candidate: Pick<DailyReportCandidateInput, 'title' | 'aiSummary' | 'aiTranslation' | 'aiTags' | 'clusterId'>): string | null {
+  // Persisted event identity must win over historical keyword shortcuts.
+  if (candidate.clusterId) return candidate.clusterId;
   const text = [
     candidate.title,
     candidate.aiSummary || '',
@@ -519,11 +698,10 @@ function dailyReportEventKey(candidate: Pick<DailyReportCandidateInput, 'title' 
     ...(candidate.aiTags || []),
   ].join('\n').toLowerCase();
 
-  if (/claude/i.test(text) && /(opus\s*)?4[\s.]*8|mythos/i.test(text)) return 'claude:4.8';
-  if (/glean/i.test(text) && /(arr|300m|3亿美元|预算|enterprise|企业)/i.test(text)) return 'glean:enterprise-ai-revenue';
-  if (/零一万物|李开复|palantir|01\.ai/i.test(text)) return '01ai:palantir-profitability';
-  if (/endive/i.test(text) || (/webassembly|wasm/i.test(text) && /java|字节/i.test(text))) return 'bytedance:endive-wasm';
-  if (/agent/i.test(text) && /工厂|制造业|厂二代|排产/i.test(text)) return 'manufacturing:agent';
+  // Compatibility for unclustered historical release rows only, never all
+  // articles mentioning Mythos, manufacturing, or a company name.
+  if (/claude/i.test(candidate.title) && /(?:opus\s*)?4[\s.]*8\b/i.test(candidate.title)
+    && /发布|登场|炸场|release|launch/i.test(text)) return 'claude:4.8:release';
 
   return candidate.clusterId || null;
 }
@@ -544,48 +722,69 @@ function applyDailyReportEventDedupe(items: DailyReportPreparedCandidate[]): Dai
 
 function buildSelectionReason(
   candidate: DailyReportCandidateInput,
-  config: DailyReportWorkflowConfig,
+  _config: DailyReportWorkflowConfig,
   mode: Exclude<DailyReportSelectionMode, 'empty'>,
   baseReason: string,
 ): string {
   const details: string[] = [];
-  if (candidate.category) details.push(`分类 ${candidate.category}`);
-  if (candidate.sourceTier) details.push(`来源等级 ${candidate.sourceTier}`);
+  const categoryLabel = normalizeDailyCategoryLabel(candidate);
+  if (categoryLabel) details.push(categoryLabel);
+  if (candidate.sourceTier) details.push(`${candidate.sourceTier} 来源`);
   const tags = (candidate.aiTags || []).slice(0, 2).filter(Boolean);
-  if (tags.length > 0) details.push(`标签 ${tags.join('/')}`);
-  if (hasDirectProductOrTechnicalSignal(candidate)) details.push('有产品/技术/产业直接信号');
-  if (isAggregationDigestCandidate(candidate)) details.push('聚合源已降权，仅保留少量高价值线索');
+  if (tags.length > 0) details.push(tags.join('/'));
+  if (hasDirectProductOrTechnicalSignal(candidate)) details.push('具备产品、技术或产业直接增量');
+  if (isAggregationDigestCandidate(candidate)) details.push('聚合源已降权，仅保留高价值线索');
 
   if (mode === 'scored') {
-    return [`达到精选分 ${candidate.aiScore ?? 0} >= ${config.minScore}`, ...details].join('；') + '。';
+    return [`高价值信号明确（评分 ${candidate.aiScore ?? 0}）`, ...details].join('；') + '。';
   }
   if (mode === 'review') {
     return [baseReason.replace(/[。.]$/, ''), ...details].join('；') + '。';
   }
-  return [`未达到精选分 ${config.minScore}，作为同范围最新兜底入报`, ...details].join('；') + '。';
+  return ['候选不足时作为同范围最新线索补齐', ...details].join('；') + '。';
 }
 
 async function ensureChineseCandidate(
   candidate: DailyReportCandidateInput,
   config: DailyReportWorkflowConfig,
   options: PrepareDailyReportCandidateOptions,
-): Promise<{ candidate: DailyReportCandidateInput; pending: boolean; failed: boolean }> {
+): Promise<{
+  candidate: DailyReportCandidateInput;
+  pending: boolean;
+  failed: boolean;
+  policySkipped: boolean;
+}> {
   if (!config.requireChinese || !needsChineseMaterial(candidate)) {
-    return { candidate, pending: false, failed: false };
+    return { candidate, pending: false, failed: false, policySkipped: false };
   }
   if (isChineseEnough(candidate.aiTranslation) || isChineseEnough(candidate.aiSummary)) {
-    return { candidate, pending: false, failed: false };
+    return { candidate, pending: false, failed: false, policySkipped: false };
   }
 
   const pending = candidate.translationStatus !== 'ready';
   if (!options.translateItem) {
-    return { candidate, pending, failed: !options.allowPendingTranslationCandidates };
+    return {
+      candidate,
+      pending,
+      failed: !options.allowPendingTranslationCandidates,
+      policySkipped: false,
+    };
   }
 
   const update = await options.translateItem(candidate);
-  const next = { ...candidate, ...(update || {}) };
+  const next = sanitizeDailyReportTranslation({ ...candidate, ...(update || {}) });
   const ready = isChineseEnough(resolveReportSummary(next)) || isChineseEnough(next.title);
-  return { candidate: next, pending, failed: !ready };
+  const policySkipped = !ready
+    && next.translationStatus === 'skipped'
+    && /未能识别为外文|原文已是中文|监控档位默认不做翻译|AI 评分过低|轻处理档位仅翻译高分内容|未进入翻译/.test(
+      next.translationReason || '',
+    );
+  return {
+    candidate: next,
+    pending: policySkipped ? false : pending,
+    failed: !ready && !policySkipped && next.translationStatus !== 'pending',
+    policySkipped,
+  };
 }
 
 export async function prepareDailyReportCandidates(
@@ -594,6 +793,7 @@ export async function prepareDailyReportCandidates(
   options: PrepareDailyReportCandidateOptions = {},
 ): Promise<DailyReportCandidatePreparation> {
   const config = normalizeDailyReportWorkflowConfig(workflowInput);
+  const hasSourceScope = (config.scope.sourceIds || []).length > 0 || (config.scope.sourceNames || []).length > 0;
   const scopedCandidates: DailyReportPreparedCandidate[] = [];
   const scoredCandidates: DailyReportPreparedCandidate[] = [];
   const reviewCandidates: DailyReportPreparedCandidate[] = [];
@@ -606,8 +806,16 @@ export async function prepareDailyReportCandidates(
   let fallbackScoredCandidates = 0;
   let scopeMatchedCount = 0;
 
-  for (const rawCandidate of inputItems) {
+  for (const inputCandidate of inputItems) {
+    const rawCandidate = sanitizeDailyReportTranslation(inputCandidate);
     const scopeMatched = itemMatchesDailyScope(rawCandidate, config);
+    if (hasSourceScope && !scopeMatched) continue;
+
+    if (isWebpageSnapshotDailyCandidate(rawCandidate)) {
+      excluded.push(buildExcludedCandidate(rawCandidate, 'webpage_snapshot', '网页监控快照只进入覆盖诊断，不进入正式日报主线；请改用索引源或单篇正文源。'));
+      continue;
+    }
+
     const softScoreFiltered = isSoftScoreFilteredCandidate(rawCandidate);
     const scoreFailed = isScoreFailedCandidate(rawCandidate);
     const fallbackScored = isFallbackScoredCandidate(rawCandidate);
@@ -632,11 +840,30 @@ export async function prepareDailyReportCandidates(
       continue;
     }
 
-    const { candidate, pending, failed } = await ensureChineseCandidate(rawCandidate, config, options);
+    const {
+      candidate,
+      pending,
+      failed,
+      policySkipped,
+    } = await ensureChineseCandidate(rawCandidate, config, options);
     if (pending) translationPending += 1;
+    if (policySkipped) {
+      excluded.push(buildExcludedCandidate(
+        candidate,
+        'not_selected',
+        candidate.translationReason || '当前条目不满足自动翻译策略',
+      ));
+      continue;
+    }
     if (failed) {
       translationFailed += 1;
       excluded.push(buildExcludedCandidate(candidate, 'translation_failed', candidate.translationReason || '英文内容未能在入报前完成中文化'));
+      continue;
+    }
+    if (pending && candidate.translationStatus === 'pending'
+      && !isChineseEnough(resolveReportSummary(candidate)) && !isChineseEnough(candidate.title)
+      && !options.allowPendingTranslationCandidates) {
+      excluded.push(buildExcludedCandidate(candidate, 'not_selected', candidate.translationReason || '中文化任务仍在排队或处理中'));
       continue;
     }
 
@@ -697,28 +924,66 @@ export async function prepareDailyReportCandidates(
     }
   }
 
-  const limitedScored = applyAggregationDigestLimit(applyPerSourceLimit(applyDailyReportEventDedupe(sortDailyReportCandidates(scoredCandidates)), config.perSourceLimit)).slice(0, config.topN);
-  const limitedReview = applyAggregationDigestLimit(applyPerSourceLimit(applyDailyReportEventDedupe(sortDailyReportCandidates(reviewCandidates)), config.perSourceLimit)).slice(0, config.topN);
+  const perSourceOptions = { respectReadingTier: !hasSourceScope };
+  const limitedScored = applyAggregationDigestLimit(applyPerSourceLimit(applyDailyReportEventDedupe(sortDailyReportCandidates(scoredCandidates)), config.perSourceLimit, perSourceOptions)).slice(0, config.topN);
+  const limitedReview = applyAggregationDigestLimit(applyPerSourceLimit(applyDailyReportEventDedupe(sortDailyReportCandidates(reviewCandidates)), config.perSourceLimit, perSourceOptions)).slice(0, config.topN);
+  const latestCandidates = applyAggregationDigestLimit(applyPerSourceLimit(applyDailyReportEventDedupe(sortDailyReportCandidates(latestFallbackCandidates)), config.perSourceLimit, perSourceOptions)).slice(0, config.topN);
   const trustedReview = limitedReview.filter((candidate) => !isFallbackScoredCandidate(candidate));
+  const fallbackReviewPool = limitedReview.filter((candidate) => isFallbackScoredCandidate(candidate));
+  const sourceScopedReviewCandidates = hasSourceScope && limitedScored.length === 0 && limitedReview.length > 0
+    ? limitedReview
+    : [];
+  const fallbackReviewThreshold = Math.min(
+    10,
+    Math.max(3, Math.min(Math.ceil(config.topN / 2), Math.ceil(scopeMatchedCount / 2))),
+  );
+  const substantialFallbackReviewPool = fallbackReviewPool.length >= fallbackReviewThreshold;
+  const fallbackReviewCandidates = limitedScored.length === 0
+    && sourceScopedReviewCandidates.length === 0
+    && trustedReview.length === 0
+    && substantialFallbackReviewPool
+    ? fallbackReviewPool
+    : [];
+  const minimumFinalEvidence = Math.min(config.topN, hasSourceScope ? 3 : 5);
+  const recoveryEvidenceTarget = Math.min(config.topN, hasSourceScope ? 3 : 10);
+  const recoveryReviewPool = [
+    ...trustedReview,
+    ...(substantialFallbackReviewPool ? fallbackReviewPool : []),
+  ];
+  const reviewSupplementCandidates = limitedScored.length > 0
+    && limitedScored.length < minimumFinalEvidence
+    ? recoveryReviewPool.slice(0, Math.max(0, recoveryEvidenceTarget - limitedScored.length))
+    : [];
+  const selectedReviewIds = new Set([
+    ...sourceScopedReviewCandidates.map((candidate) => candidate.id),
+    ...fallbackReviewCandidates.map((candidate) => candidate.id),
+    ...reviewSupplementCandidates.map((candidate) => candidate.id),
+  ]);
   for (const candidate of limitedReview) {
-    if (isFallbackScoredCandidate(candidate)) {
+    if (isFallbackScoredCandidate(candidate) && !selectedReviewIds.has(candidate.id)) {
       excluded.push(buildExcludedCandidate(candidate, 'fallback_scored', '低置信兜底评分只进入复核诊断，不进入最终日报候选；请先回收评分。'));
     }
   }
-  const latestCandidates = applyAggregationDigestLimit(applyPerSourceLimit(applyDailyReportEventDedupe(sortDailyReportCandidates(latestFallbackCandidates)), config.perSourceLimit)).slice(0, config.topN);
-  const hasReviewQualityDebt = limitedReview.length > 0 && trustedReview.length === 0;
-  const finalCandidates = limitedScored.length > 0
-    ? limitedScored
+  const preliminaryFinalCandidates = limitedScored.length > 0
+    ? [...limitedScored, ...reviewSupplementCandidates]
+    : sourceScopedReviewCandidates.length > 0
+      ? sourceScopedReviewCandidates
     : trustedReview.length > 0
       ? trustedReview
-      : hasReviewQualityDebt
-        ? []
+      : fallbackReviewCandidates.length > 0
+        ? fallbackReviewCandidates
         : latestCandidates;
+  const finalCandidates = hasSourceScope
+    ? preliminaryFinalCandidates
+    : enforceDailyReportSourceShare(preliminaryFinalCandidates, 0.35);
   const selectionMode: DailyReportSelectionMode = finalCandidates.length === 0
     ? 'empty'
-    : limitedScored.length > 0
+    : limitedScored.length > 0 && reviewSupplementCandidates.length === 0
       ? 'scored'
-      : trustedReview.length > 0
+    : sourceScopedReviewCandidates.length > 0
+        || trustedReview.length > 0
+        || fallbackReviewCandidates.length > 0
+        || reviewSupplementCandidates.length > 0
         ? 'review'
         : 'latest_visible';
 

@@ -6,6 +6,20 @@ export function encodeNtfyHeader(value: string): string {
   return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
 }
 
+export function truncateUtf8Bytes(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  let bytes = 0;
+  let result = '';
+  for (const char of value) {
+    const charBytes = Buffer.byteLength(char, 'utf8');
+    if (bytes + charBytes > maxBytes) break;
+    result += char;
+    bytes += charBytes;
+  }
+  return result;
+}
+
 export async function pushToNtfy(title: string, message: string, priority?: number): Promise<boolean> {
   const url = `${config.ntfy.url}/${config.ntfy.topic}`;
   try {
@@ -67,8 +81,12 @@ export async function pushToFeishu(title: string, content: string): Promise<bool
 }
 
 export async function pushDailyReport(title: string, markdownContent: string): Promise<void> {
+  const ntfySuffix = '\n\n（内容已截断，请在信息中枢查看完整日报）';
+  const ntfyBody = Buffer.byteLength(markdownContent, 'utf8') > 3500
+    ? `${truncateUtf8Bytes(markdownContent, 3500 - Buffer.byteLength(ntfySuffix, 'utf8'))}${ntfySuffix}`
+    : markdownContent;
   await Promise.allSettled([
-    pushToNtfy(title, markdownContent.slice(0, 4000), 3),
+    pushToNtfy(title, ntfyBody, 3),
     pushToFeishu(title, markdownContent.slice(0, 4000)),
   ]);
 }

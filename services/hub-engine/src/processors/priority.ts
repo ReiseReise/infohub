@@ -31,12 +31,10 @@ export async function calculatePriority(
   const tierBoost = (() => {
     switch (source[0]?.sourceTier) {
       case 'S':
-      case 'T1':
         return 1.18;
       case 'A':
-      case 'T1.5':
         return 1.08;
-      case 'T2':
+      case 'B':
         return 0.98;
       case 'C':
         return 0.84;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { encodeNtfyHeader, scheduleDailyReportPush } from './push.js';
+import { encodeNtfyHeader, scheduleDailyReportPush, truncateUtf8Bytes } from './push.js';
 
 test('encodes non Latin-1 ntfy titles into ASCII-safe header values', () => {
   const encoded = encodeNtfyHeader('信息中枢日报 — 2026-05-26');
@@ -12,6 +12,14 @@ test('encodes non Latin-1 ntfy titles into ASCII-safe header values', () => {
 
 test('keeps ASCII ntfy titles readable', () => {
   assert.equal(encodeNtfyHeader('InfoHub Daily Report'), 'InfoHub Daily Report');
+});
+
+test('truncates Chinese ntfy content by UTF-8 bytes without splitting characters', () => {
+  const truncated = truncateUtf8Bytes('日报内容'.repeat(1000), 101);
+
+  assert.ok(Buffer.byteLength(truncated, 'utf8') <= 101);
+  assert.equal(truncated.includes('\uFFFD'), false);
+  assert.equal(truncated.endsWith('日') || truncated.endsWith('报') || truncated.endsWith('内') || truncated.endsWith('容'), true);
 });
 
 test('schedules daily report push without awaiting delivery', async () => {

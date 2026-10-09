@@ -80,11 +80,15 @@ export const sources = hubSchema.table('sources', {
 export const userSettings = hubSchema.table('user_settings', {
   userId: uuid('user_id').notNull().primaryKey().references(() => users.id, { onDelete: 'cascade' }),
   autoFetchEnabled: boolean('auto_fetch_enabled').notNull().default(true),
+  autoSummaryEnabled: boolean('auto_summary_enabled').notNull().default(true),
+  autoTranslationEnabled: boolean('auto_translation_enabled').notNull().default(true),
+  dailyReportEnabled: boolean('daily_report_enabled').notNull().default(false),
   dailyReportWorkflow: jsonb('daily_report_workflow'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index('idx_user_settings_auto_fetch').on(table.autoFetchEnabled),
+  index('idx_user_settings_daily_report').on(table.dailyReportEnabled),
 ]);
 
 export const items = hubSchema.table('items', {
@@ -98,8 +102,15 @@ export const items = hubSchema.table('items', {
   guid: text('guid'),
   title: text('title').notNull(),
   url: text('url').notNull(),
+  originalUrl: text('original_url'),
+  curationUrl: text('curation_url'),
+  curationSource: text('curation_source'),
+  curationMeta: jsonb('curation_meta').default({}),
   author: text('author'),
   content: text('content'),
+  readabilityContent: text('readability_content'),
+  readabilityStatus: text('readability_status').default('missing'),
+  readabilityReason: text('readability_reason'),
   snippet: text('snippet'),
   language: text('language'),
   mediaUrl: text('media_url'),
@@ -111,6 +122,7 @@ export const items = hubSchema.table('items', {
   aiSummary: text('ai_summary'),
   aiTags: jsonb('ai_tags').default([]),
   aiTranslation: text('ai_translation'),
+  translatedTitle: text('translated_title'),
   priorityScore: real('priority_score'),
   clusterId: text('cluster_id'),
   transcript: text('transcript'),
@@ -241,6 +253,32 @@ export const itemFeedback = hubSchema.table('item_feedback', {
 }, (table) => [
   index('idx_item_feedback_item_user').on(table.itemId, table.userId, table.createdAt),
   index('idx_item_feedback_user').on(table.userId, table.createdAt),
+]);
+
+export const itemReadingAssets = hubSchema.table('item_reading_assets', {
+  id: serial('id').primaryKey(),
+  itemId: uuid('item_id').notNull().references(() => items.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  assetType: text('asset_type').notNull(),
+  promptKey: text('prompt_key').notNull(),
+  label: text('label').notNull(),
+  status: text('status').notNull().default('ready'),
+  basis: text('basis'),
+  content: text('content'),
+  preview: text('preview'),
+  source: text('source').notNull().default('ai'),
+  provider: text('provider'),
+  modelName: text('model_name'),
+  modelConfigId: text('model_config_id'),
+  promptTemplateId: text('prompt_template_id'),
+  metadata: jsonb('metadata').notNull().default({}),
+  errorReason: text('error_reason'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex('idx_item_reading_assets_unique').on(table.userId, table.itemId, table.assetType, table.promptKey),
+  index('idx_item_reading_assets_item').on(table.itemId, table.userId),
+  index('idx_item_reading_assets_user_updated').on(table.userId, table.updatedAt),
 ]);
 
 export const itemScoreBreakdowns = hubSchema.table('item_score_breakdowns', {

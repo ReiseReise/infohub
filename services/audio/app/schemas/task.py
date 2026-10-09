@@ -64,3 +64,9 @@ class TaskListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class TaskAudioUrlResponse(BaseModel):
+    url: str
+    expires_in: int
+    mode: str

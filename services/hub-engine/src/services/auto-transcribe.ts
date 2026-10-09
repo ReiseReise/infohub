@@ -1,3 +1,4 @@
+import { observeJev } from '../jev/queue.js';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
@@ -263,6 +264,7 @@ export async function maybeAutoTranscribeItem(candidate: AutoTranscribeCandidate
     .where(eq(schema.items.id, candidate.itemId));
 
   try {
+    observeJev("transcribe", candidate.itemId);
     const result = await startAudioTaskForItem({
       audioUrl,
       title: candidate.title,

@@ -84,6 +84,7 @@ async function main() {
     affectedUsers.add(row.userId);
     await db.update(schema.items).set({
       aiTranslation: null,
+      translatedTitle: null,
       processingStatus: 'summarized',
       translationStatus: 'pending',
       translationReason: null,

@@ -248,21 +248,41 @@ export async function getEffectiveAiSceneAvailability(userId: string): Promise<S
 export async function completeWithModelConfig(
   modelConfigId: string,
   prompt: string,
-  options?: { temperature?: number; maxTokens?: number },
+  options?: {
+    temperature?: number;
+    maxTokens?: number;
+    responseFormat?: 'json_object';
+    thinking?: 'enabled' | 'disabled';
+  },
 ): Promise<ModelConfigCompletion> {
-  const response = await fetch(`${config.audio.serviceUrl}/api/internal/llm/complete`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Internal-API-Key': config.audio.internalApiKey,
-    },
-    body: JSON.stringify({
-      model_config_id: modelConfigId,
-      prompt,
-      temperature: options?.temperature,
-      max_tokens: options?.maxTokens,
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 105_000);
+  let response: Response;
+  try {
+    response = await fetch(`${config.audio.serviceUrl}/api/internal/llm/complete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-API-Key': config.audio.internalApiKey,
+      },
+      body: JSON.stringify({
+        model_config_id: modelConfigId,
+        prompt,
+        temperature: options?.temperature,
+        max_tokens: options?.maxTokens,
+        response_format: options?.responseFormat ? { type: options.responseFormat } : undefined,
+        thinking: options?.thinking ? { type: options.thinking } : undefined,
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') {
+      throw new Error('model_request_timeout');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     throw new Error(`Audio internal LLM API error: ${response.status} ${await response.text()}`);

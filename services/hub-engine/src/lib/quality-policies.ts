@@ -8,7 +8,7 @@ import {
   resolveEffectiveQualityPolicy,
   type QualityPolicy,
 } from './quality-filtering.js';
-import type { SourceTier } from './growth.js';
+import { normalizeSourceTier, type SourceTier } from './growth.js';
 
 export type QualityPolicyScope = 'user' | 'global' | 'effective';
 export type QualityPolicyTargetType = 'tier' | 'source';
@@ -169,15 +169,16 @@ export async function buildQualityPolicySnapshot(userId: string, scope: QualityP
       const source = sourceMap.get(sourceId);
       if (!source) return null;
       const config = normalizeQualityPolicyConfig(row.config);
+      const sourceTier = normalizeSourceTier(source.sourceTier);
       return {
         id: row.id,
         sourceId,
         sourceName: source.name,
-        sourceTier: source.sourceTier as SourceTier,
+        sourceTier,
         config,
         resolved: mergeQualityPolicy(
-          resolvedTierMap.get(source.sourceTier as SourceTier)
-            || DEFAULT_TIER_QUALITY_POLICIES[source.sourceTier as SourceTier],
+          resolvedTierMap.get(sourceTier)
+            || DEFAULT_TIER_QUALITY_POLICIES[sourceTier],
           config,
         ),
         scope: 'user',
@@ -193,22 +194,23 @@ export async function buildQualityPolicySnapshot(userId: string, scope: QualityP
 }
 
 export async function getEffectiveQualityPolicyForSource(userId: string, sourceId: number, sourceTier: SourceTier) {
+  const normalizedTier = normalizeSourceTier(sourceTier);
   const rows = await getEffectiveRows(userId);
   const globalTierOverride = rows.find((row) => (
     row.targetType === 'tier'
     && row.scope === 'global'
-    && String(row.targetKey || '').toUpperCase() === sourceTier
+    && normalizeSourceTier(row.targetKey) === normalizedTier
   ));
   const userTierOverride = rows.find((row) => (
     row.targetType === 'tier'
     && row.scope === 'user'
-    && String(row.targetKey || '').toUpperCase() === sourceTier
+    && normalizeSourceTier(row.targetKey) === normalizedTier
   ));
   const sourceOverride = rows.find((row) => row.targetType === 'source' && Number(row.targetKey) === sourceId && row.scope === 'user');
 
   return mergeQualityPolicy(
     resolveLayeredTierPolicy({
-      sourceTier,
+      sourceTier: normalizedTier,
       globalOverride: normalizeQualityPolicyConfig(globalTierOverride?.config),
       userOverride: normalizeQualityPolicyConfig(userTierOverride?.config),
     }),
