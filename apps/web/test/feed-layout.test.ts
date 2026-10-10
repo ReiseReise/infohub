@@ -853,7 +853,20 @@ test('loads feed detail once per route and does not silently batch reprocess vis
 
   assert.doesNotMatch(source, /void handleEnrich\(selectedItem, \{ silent: true \}\)/);
   assert.doesNotMatch(source, /items\.find\(\(item\) => !autoEnrichedIds/);
-  assert.match(source, /\}, \[items, selectedIdFromRoute\]\);/);
+  assert.match(source, /useFeedDetail\(effectiveDetailId\)/);
+  assert.match(source, /\}, \[items, effectiveDetailId\]\);/);
+});
+
+test('default desktop Feed loads first detail while narrow screens retain the list', async () => {
+  const { resolveFeedDetailId } = await import('../src/lib/feed-layout.ts');
+  const items = [{ id: 'first' }, { id: 'second' }];
+  assert.equal(resolveFeedDetailId(undefined, items, 1440), 'first');
+  assert.equal(resolveFeedDetailId(undefined, items, 1280), 'first');
+  assert.equal(resolveFeedDetailId(undefined, items, 1279), null);
+  assert.equal(resolveFeedDetailId(undefined, items, 390), null);
+  assert.equal(resolveFeedDetailId(undefined, [], 1440), null);
+  assert.equal(resolveFeedDetailId('second', items, 390), 'second');
+  assert.equal(resolveFeedDetailId('outside-list', items, 1440), 'outside-list');
 });
 
 test('auto-selects the first feed item on wide screens so the detail pane is not blank', async () => {

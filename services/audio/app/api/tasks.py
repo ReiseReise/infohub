@@ -3,8 +3,8 @@
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request, status
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, desc
@@ -18,7 +18,8 @@ from app.models.prompt_template import PromptTemplate
 from app.models.usage_log import UsageLog, ServiceType
 from app.schemas.task import TaskCreateRequest, TaskResponse, TaskListResponse, TaskAudioUrlResponse
 from app.api.deps import get_current_user
-from app.services.storage_service import OSSStorage, get_storage
+from app.services.storage_service import LocalStorage, OSSStorage, get_storage
+from app.services.audio_playback import is_supported_audio_range
 from app.services.audio_config_guard import (
     AUDIO_PROMPT_CATEGORIES,
     DEFAULT_ENDPOINT_SENTINEL,
@@ -587,6 +588,7 @@ async def get_task_audio_url(
 @router.get("/{task_id}/audio-stream")
 async def stream_task_audio(
     task_id: str,
+    request: Request,
     token: str = Query(""),
     db: AsyncSession = Depends(get_db),
 ):
@@ -608,13 +610,23 @@ async def stream_task_audio(
         raise HTTPException(404, "当前任务还没有可播放的音频文件")
 
     try:
-        audio_data = await _storage_for_audio_url(task.audio_url).download(task.audio_url)
+        storage = _storage_for_audio_url(task.audio_url)
+        if isinstance(storage, LocalStorage):
+            path = storage.playback_path(task.audio_url)
+            file_stat = path.stat()
+            if not is_supported_audio_range(request.headers.getlist("range")):
+                raise HTTPException(416, "仅支持单段音频范围请求", headers={"Content-Range": f"bytes */{file_stat.st_size}"})
+            return FileResponse(path, media_type=_audio_media_type(task), stat_result=file_stat)
+        signed_url = await storage.get_url(task.audio_url, expires=AUDIO_PLAYBACK_EXPIRES_SECONDS)
+        if not _is_http_url(signed_url):
+            raise HTTPException(502, "暂时无法取得音频播放地址，请重试")
+        return RedirectResponse(signed_url, status_code=307)
+    except HTTPException:
+        raise
     except FileNotFoundError:
         raise HTTPException(404, "音频文件不存在，建议重新上传或重跑任务")
-    except Exception as exc:
-        raise HTTPException(502, f"音频文件读取失败: {exc}")
-
-    return Response(content=audio_data, media_type=_audio_media_type(task))
+    except Exception:
+        raise HTTPException(502, "音频文件读取失败，请重试")
 
 
 @router.get("/{task_id}", response_model=TaskResponse)

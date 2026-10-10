@@ -34,6 +34,18 @@ export function decryptFernet(token: string, key: string) {
     decipher.final(),
   ]).toString("utf8");
 }
+// Official price snapshot reviewed 2026-10-10; refresh before the seven-day expiry.
+// Cache writes are conservatively charged as cache-miss input, not a separate provider tariff.
+export const RESEARCH_PRICING = {
+  reviewedAt: '2026-10-10',
+  expiresAt: '2026-10-17T00:00:00Z',
+  priceVersion: '2026-10-10-peak-cny-ceiling',
+  sources: ['https://api-docs.deepseek.com/quick_start/pricing/', 'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/'],
+  usdPeakPerMillion: { input: 0.3, output: 1.2, cacheRead: 0.006 },
+  cnyPeakPerMillion: { input: 2, output: 8, cacheRead: 0.04 },
+  inputMicros: 3,
+  outputMicros: 12,
+};
 export const MODEL: Model<"openai-completions"> = {
   id: "deepseek-flash",
   name: "DeepSeek V4.1 Flash",
@@ -42,13 +54,13 @@ export const MODEL: Model<"openai-completions"> = {
   baseUrl: "https://api.deepseek.com",
   reasoning: false,
   input: ["text"],
-  cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0.3 },
+  cost: { ...RESEARCH_PRICING.usdPeakPerMillion, cacheWrite: RESEARCH_PRICING.usdPeakPerMillion.input },
   contextWindow: 1000000,
   maxTokens: 4096,
 };
-export const RESEARCH_PRICING={reviewedAt:'2026-09-29',expiresAt:'2026-10-06T00:00:00Z'};
 export function assertResearchPricing(now=Date.now()){
-  if(now>Date.parse(RESEARCH_PRICING.expiresAt))throw new ResearchError('pricing_refresh_required');
+  const expiry = Date.parse(RESEARCH_PRICING.expiresAt);
+  if(!Number.isFinite(now)||!Number.isFinite(expiry)||now>expiry)throw new ResearchError('pricing_refresh_required');
 }
 export async function resolveResearchKey(store: ResearchStore) {
   const rows =
@@ -79,8 +91,8 @@ export function meteredStream(
   lease: Lease,
   credential: { key: string; configId: string | null },
   purpose = "research",
+  provider = deepseekProvider(),
 ): StreamFn {
-  const provider = deepseekProvider();
   return (_model, context, options) => {
     const stream = createAssistantMessageEventStream();
     void (async () => {
@@ -89,12 +101,11 @@ export function meteredStream(
       try {
         await store.assertLease(lease);
         // Conservative CNY ceiling, not a claim of settled provider billing. $ peak rates at <=10 CNY/USD.
-        // Official pricing rechecked 2026-09-29: https://api-docs.deepseek.com/quick_start/pricing
-        // Peak USD / 1M: input 0.3, output 1.2. Keep the existing seven-day review window.
+        // Price sources and review window are recorded in RESEARCH_PRICING.
         assertResearchPricing();
         const bytes = Buffer.byteLength(JSON.stringify(context), "utf8");
         if (bytes > 140000) throw new ResearchError("context_limit");
-        const amount = (bytes + 8192) * 3 + 4096 * 12;
+        const amount = (bytes + 8192) * RESEARCH_PRICING.inputMicros + 4096 * RESEARCH_PRICING.outputMicros;
         callId = await store.reserve(
           lease,
           amount,
@@ -102,7 +113,7 @@ export function meteredStream(
           {
             model: MODEL.id,
             configId: credential.configId,
-            priceVersion: "2026-09-29-peak-cny-ceiling",
+            priceVersion: RESEARCH_PRICING.priceVersion,
             inputBytes: bytes,
           },
         );
@@ -126,8 +137,8 @@ export function meteredStream(
             const cost =
               tokens?.totalTokens > 0
                 ? Math.ceil(
-                    (tokens.input + tokens.cacheRead + tokens.cacheWrite) * 3 +
-                      tokens.output * 12,
+                    (tokens.input + tokens.cacheRead + tokens.cacheWrite) * RESEARCH_PRICING.inputMicros +
+                      tokens.output * RESEARCH_PRICING.outputMicros,
                   )
                 : null;
             await store.settle(callId, cost, {
@@ -136,6 +147,7 @@ export function meteredStream(
               usage: tokens,
               stopReason: msg.stopReason,
               costBasis: "conservative_estimate_cny",
+              priceVersion: RESEARCH_PRICING.priceVersion,
             });
           }
           stream.push(event);
@@ -147,6 +159,7 @@ export function meteredStream(
             .settle(callId, null, {
               error: "provider_or_accounting_interrupted",
               latencyMs: Date.now() - startedAt,
+              priceVersion: RESEARCH_PRICING.priceVersion,
             })
             .catch(() => {});
         const message: AssistantMessage = {

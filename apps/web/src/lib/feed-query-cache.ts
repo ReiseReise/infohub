@@ -11,6 +11,11 @@ export function selectFeedDetailForRoute<T extends { id: string }>(
   return items.find((item) => item.id === routeId) || null;
 }
 
+export function mergeSelectedFeedDetail<T extends { id: string }>(current: T | null, itemId: string, detail: T): T | null {
+  if (current?.id !== itemId || detail.id !== itemId) return current;
+  return { ...current, ...detail };
+}
+
 interface FeedInfinitePage {
   data?: FeedItemRecord[];
   [key: string]: unknown;

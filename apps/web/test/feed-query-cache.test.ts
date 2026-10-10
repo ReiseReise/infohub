@@ -43,3 +43,21 @@ test('changing or clearing the route never leaves the previous article selected'
   assert.equal(selectFeedDetailForRoute(previous, 'missing', [next]), null);
   assert.equal(selectFeedDetailForRoute(previous, undefined, [next]), null);
 });
+
+test('default desktop selection retains complete detail across lean list refreshes', async () => {
+  const { resolveFeedDetailId } = await import('../src/lib/feed-layout.ts');
+  const { selectFeedDetailForRoute } = await import('../src/lib/feed-query-cache.ts');
+  const detail = { id: 'a', content: 'Full original', aiTranslation: '完整译文', readingAssets: [{ content: 'Saved answer' }] };
+  const items = [{ id: 'a' }, { id: 'b' }];
+  assert.equal(selectFeedDetailForRoute(detail, resolveFeedDetailId(undefined, items, 1440), items), detail);
+  assert.equal(selectFeedDetailForRoute(detail, resolveFeedDetailId(undefined, [items[1]], 1440), [items[1]]), items[1]);
+});
+
+test('late action refreshes never replace a different or closed article', async () => {
+  const { mergeSelectedFeedDetail } = await import('../src/lib/feed-query-cache.ts');
+  const articleA = { id: 'a', content: 'Old A' }, refreshedA = { id: 'a', content: 'New A' }, articleB = { id: 'b', content: 'Full B' };
+  assert.deepEqual(mergeSelectedFeedDetail(articleA, 'a', refreshedA), refreshedA);
+  assert.equal(mergeSelectedFeedDetail(articleB, 'a', refreshedA), articleB);
+  assert.equal(mergeSelectedFeedDetail(null, 'a', refreshedA), null);
+  assert.equal(mergeSelectedFeedDetail(articleA, 'a', articleB), articleA);
+});

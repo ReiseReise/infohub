@@ -15,7 +15,7 @@ import {
   resolveFeedDetailSourceContext,
   resolveFeedSourceMismatchNotice,
   resolveFeedTranslationAction,
-  shouldAutoSelectFirstFeedItem,
+  resolveFeedDetailId,
 } from '../../lib/feed-layout';
 import {
   mergeFeedUrlParams,
@@ -32,7 +32,7 @@ import {
 import { buildArticleAgentPrompt, type ArticleAgentPromptKey } from '../../lib/reading-assets';
 import { getPreferredReaderSourceText, normalizeAiSummary } from './presentation';
 import { useAuth } from '../../lib/use-auth';
-import { selectFeedDetailForRoute } from '../../lib/feed-query-cache';
+import { mergeSelectedFeedDetail, selectFeedDetailForRoute } from '../../lib/feed-query-cache';
 import {
   useFeedList,
   useFeedDetail,
@@ -280,6 +280,10 @@ export function FeedProvider({ children }: { children: ReactNode }) {
     return result;
   }, [feedListQuery.data?.pages]);
 
+  const effectiveDetailId = resolveFeedDetailId(selectedIdFromRoute, items);
+  const currentDetailIdRef = useRef(effectiveDetailId);
+  useEffect(() => { currentDetailIdRef.current = effectiveDetailId; }, [effectiveDetailId]);
+
   const lastPage = feedListQuery.data?.pages[feedListQuery.data.pages.length - 1];
   const total = lastPage?.total ?? 0;
   const nextPageOffset = lastPage?.nextOffset ?? null;
@@ -301,19 +305,19 @@ export function FeedProvider({ children }: { children: ReactNode }) {
   const preferenceSummary: PreferenceProfileSummary | null = preferenceSummaryQuery.data ?? null;
 
   // --- React Query: Score Breakdown ---
-  const breakdownQuery = useScoreBreakdown(selectedItem?.id ?? selectedIdFromRoute ?? null);
+  const breakdownQuery = useScoreBreakdown(effectiveDetailId);
   const scoreBreakdown: ItemScoreBreakdownPayload | null = breakdownQuery.data ?? null;
   const breakdownLoading = breakdownQuery.isLoading;
 
   // --- React Query: Detail ---
-  const detailQuery = useFeedDetail(selectedIdFromRoute ?? null);
+  const detailQuery = useFeedDetail(effectiveDetailId);
 
   // Sync detail query result to selectedItem
   useEffect(() => {
-    if (detailQuery.data && selectedIdFromRoute) {
-      setSelectedItem((prev) => prev?.id === selectedIdFromRoute ? { ...prev, ...detailQuery.data } : detailQuery.data!);
+    if (detailQuery.data && detailQuery.data.id === effectiveDetailId) {
+      setSelectedItem((prev) => prev?.id === effectiveDetailId ? { ...prev, ...detailQuery.data } : detailQuery.data!);
     }
-  }, [detailQuery.data, selectedIdFromRoute]);
+  }, [detailQuery.data, effectiveDetailId]);
 
   useEffect(() => {
     setDetailLoading(detailQuery.isLoading);
@@ -357,14 +361,15 @@ export function FeedProvider({ children }: { children: ReactNode }) {
   }, [queryClient, userId]);
 
   const fetchDetail = async (itemId: string, silent = false) => {
+    if (currentDetailIdRef.current !== itemId) return;
     if (!silent) setDetailLoading(true);
     setDetailError(null);
     try {
       const resp = await api.items.get(itemId);
       const detail = resp.data as FeedItem;
-      setSelectedItem((prev) => prev?.id === itemId ? { ...prev, ...detail } : detail);
-    } catch (err) { const message = (err as Error).message || '详情加载失败'; setDetailError(message); if (!silent) setError(message); }
-    finally { if (!silent) setDetailLoading(false); }
+      setSelectedItem((prev) => mergeSelectedFeedDetail(prev, itemId, detail));
+    } catch (err) { if (currentDetailIdRef.current === itemId) { const message = (err as Error).message || '详情加载失败'; setDetailError(message); if (!silent) setError(message); } }
+    finally { if (!silent && currentDetailIdRef.current === itemId) setDetailLoading(false); }
   };
 
   // Load more pages
@@ -393,18 +398,8 @@ export function FeedProvider({ children }: { children: ReactNode }) {
 
   // Route-driven detail loading
   useEffect(() => {
-    setSelectedItem((current) => selectFeedDetailForRoute(current, selectedIdFromRoute, items));
-  }, [items, selectedIdFromRoute]);
-
-  // 宽屏下详情区占 2/3 版面，无选中时整片空白；自动选中首条填满版面（窄屏不做，见 shouldAutoSelectFirstFeedItem）
-  useEffect(() => {
-    if (!shouldAutoSelectFirstFeedItem({
-      hasRouteId: Boolean(selectedIdFromRoute),
-      hasSelectedItem: Boolean(selectedItem),
-      itemCount: items.length,
-    })) return;
-    setSelectedItem(items[0]);
-  }, [items, selectedIdFromRoute, selectedItem]);
+    setSelectedItem((current) => selectFeedDetailForRoute(current, effectiveDetailId, items));
+  }, [items, effectiveDetailId]);
 
   // Clear per-item state on selection change
   useEffect(() => { setActiveDetailTab('original'); }, [selectedItem?.id]);

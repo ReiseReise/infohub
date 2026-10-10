@@ -58,6 +58,13 @@ class LocalStorage(StorageProvider):
             raise FileNotFoundError(f"文件不存在: {file_path}")
         return full_path.read_bytes()
 
+    def playback_path(self, file_path: str) -> Path:
+        root = self.base_path.resolve()
+        full_path = (root / file_path).resolve()
+        if not full_path.is_relative_to(root) or not full_path.is_file():
+            raise FileNotFoundError("Audio file not found in local storage")
+        return full_path
+
     async def delete(self, file_path: str) -> bool:
         full_path = self.base_path / file_path
         if full_path.exists():

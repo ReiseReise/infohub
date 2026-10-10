@@ -10,12 +10,12 @@ import {
   normalizeCaptureIngestItem,
   resolveIngestSourceDefaults,
 } from '../lib/capture-inbox.js';
-import { normalizeEmailIngestItems, parseEmlMessages, redactEmailIngestLog } from '../lib/email-ingest.js';
+import { emailIngestReceipt, normalizeEmailIngestItems, parseEmlMessages, redactEmailIngestLog } from '../lib/email-ingest.js';
 
 const app = new Hono();
 
 // POST /api/hooks/email-ingest — 安全邮件投递入口（手动/半手动导入）
-export function createEmailIngestHandler(database = db, authenticate = requireAuth) {
+export function createEmailIngestHandler(database = db, authenticate = requireAuth, ingestLogger: Pick<typeof logger, 'info'> = logger) {
  return async (c: Context) => {
   const authUser = authenticate(c);
   const contentType = c.req.header('content-type') || '';
@@ -150,7 +150,7 @@ export function createEmailIngestHandler(database = db, authenticate = requireAu
   }
 
   const redactedItems = items.map(redactEmailIngestLog);
-  logger.info({ ingested: inserted, duplicates, failed, total: rawItems.length, sourceId, items: redactedItems }, 'Email content ingested');
+  ingestLogger.info({ ingested: inserted, duplicates, failed, total: rawItems.length, items: redactedItems }, 'Email content ingested');
   return c.json({
     ...(failed ? { error: 'Some emails could not be saved; retry the import.' } : {}),
     message: failed ? 'Email import incomplete' : 'Email ingested',
@@ -159,7 +159,7 @@ export function createEmailIngestHandler(database = db, authenticate = requireAu
     duplicates,
     failed,
     total: rawItems.length,
-    items: redactedItems,
+    items: items.map(emailIngestReceipt),
   }, failed ? 503 : 200);
  };
 }

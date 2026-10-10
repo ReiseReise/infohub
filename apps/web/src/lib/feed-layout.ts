@@ -184,6 +184,17 @@ export function shouldAutoSelectFirstFeedItem(params: {
   return width >= 1280;
 }
 
+export function resolveFeedDetailId(
+  routeId: string | undefined,
+  items: Array<{ id: string }>,
+  viewportWidth?: number,
+): string | null {
+  if (routeId) return routeId;
+  return shouldAutoSelectFirstFeedItem({
+    hasRouteId: false, hasSelectedItem: false, itemCount: items.length, viewportWidth,
+  }) ? items[0].id : null;
+}
+
 export function shouldAutoScrollFeedDetailIntoView(hasSelectedItem: boolean, viewportWidth?: number): boolean {
   if (!hasSelectedItem) return false;
   const width = viewportWidth ?? (

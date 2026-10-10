@@ -20,7 +20,7 @@ export interface NormalizedEmailIngestItem {
   messageId?: string;
 }
 
-export interface RedactedEmailIngestLog {
+export interface EmailIngestReceipt {
   title: string;
   author?: string;
   sourceLabel?: string;
@@ -28,6 +28,8 @@ export interface RedactedEmailIngestLog {
   sourceType: 'email';
   publishedAt?: string;
 }
+
+export type RedactedEmailIngestLog = Pick<EmailIngestReceipt, 'guidHash' | 'sourceType'>;
 
 function asText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -249,7 +251,7 @@ export function normalizeEmailIngestItems(rawItems: RawEmailIngestItem[]): Norma
   return normalized;
 }
 
-export function redactEmailIngestLog(item: NormalizedEmailIngestItem): RedactedEmailIngestLog {
+export function emailIngestReceipt(item: NormalizedEmailIngestItem): EmailIngestReceipt {
   return {
     title: item.title,
     author: item.author,
@@ -258,4 +260,8 @@ export function redactEmailIngestLog(item: NormalizedEmailIngestItem): RedactedE
     sourceType: 'email',
     publishedAt: item.publishedAt?.toISOString(),
   };
+}
+
+export function redactEmailIngestLog(item: NormalizedEmailIngestItem): RedactedEmailIngestLog {
+  return { guidHash: sha256(item.guid).slice(0, 12), sourceType: 'email' };
 }

@@ -40,18 +40,20 @@ test('dedupes repeated emails by message id or content hash', () => {
   ]);
 });
 
-test('redacts email ingest logs and never includes full body text', () => {
+test('redacts email ingest logs including private subject, sender and labels', () => {
   const [item] = normalizeEmailIngestItems([
     {
       subject: 'Private deal memo',
       from: 'reise@example.com',
       bodyText: 'secret body should not appear in logs',
+      sourceLabel: 'Private mailbox label',
+      date: '2026-10-10T00:00:00Z',
     },
   ]);
 
   const log = redactEmailIngestLog(item);
-  assert.equal(log.title, 'Private deal memo');
-  assert.equal(log.author, 'reise@example.com');
+  assert.deepEqual(Object.keys(log).sort(), ['guidHash', 'sourceType']);
+  assert.doesNotMatch(JSON.stringify(log), /Private deal memo|reise@example.com|Private mailbox label|secret body|2026-10-10/);
   assert.equal('content' in log, false);
   assert.equal('snippet' in log, false);
   assert.match(log.guidHash, /^[a-f0-9]{12}$/);
