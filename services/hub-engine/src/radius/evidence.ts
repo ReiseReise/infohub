@@ -5,6 +5,7 @@ export type EvidenceItem=Candidate&{title?:unknown;source_name?:unknown;material
 export async function prepareEvidence(store:Pick<RadiusStore,'search'|'article'>,userId:string,input:AskInput,now=new Date()){
  const search=questionSearch(input,now),comparison=comparisonWindow(input,now);
  const warnings:string[]=['资料来自你关注的来源，收录不代表你已阅读或认同；来源权重不代表事实已核实。'];
+ const selectedKeys=new Set<string>();
  const groups:Array<{label:string;from:string|null;to:string|null;matched:number;eligibleInSample:number;selected:EvidenceItem[]}>=[];
  if(input.itemIds.length){
   const articles=await Promise.all([...new Set(input.itemIds)].map(id=>store.article(userId,id)));
@@ -15,7 +16,7 @@ export async function prepareEvidence(store:Pick<RadiusStore,'search'|'article'>
   for(const part of searches){
    const found=await store.search(userId,part.search);
    const eligible=found.items.filter(x=>x.qa_eligible===true);
-   groups.push({label:part.label,from:part.search.from||null,to:part.search.to||null,matched:found.total,eligibleInSample:eligible.length,selected:selectQuestionSources(eligible,comparison?6:12)});
+   groups.push({label:part.label,from:part.search.from||null,to:part.search.to||null,matched:found.total,eligibleInSample:eligible.length,selected:selectQuestionSources(eligible,comparison?6:12,selectedKeys)});
    if(found.total>50)warnings.push(`${part.label}匹配 ${found.total} 条，本次从相关度最高的 50 条中选择；不代表全部来源的观点分布。`);
    if(found.items.some(x=>x.qa_eligible!==true))warnings.push(`${part.label}中的短内容或未转写音视频只作为搜索线索，没有用来生成回答。`);
   }
@@ -23,7 +24,7 @@ export async function prepareEvidence(store:Pick<RadiusStore,'search'|'article'>
  const selected=groups.flatMap(g=>g.selected);
  const ready=comparison?groups.every(g=>g.selected.length>0):selected.length>0;
  const reason=ready?null:comparison?'comparison_evidence_missing':'no_evidence';
- if(comparison)warnings.push('两段使用同样长度的时间窗口与严格关键词；数量变化也可能来自采集覆盖变化，不等于态度变化。');
+ if(comparison)warnings.push('两段使用同样长度的时间窗口与严格关键词；相同规范 URL 或正文只选用一次；数量变化也可能来自采集覆盖变化，不等于态度变化。');
  if(groups.some(g=>g.from||g.to))warnings.push('按发布时间筛选，未注明发布时间的材料不参与时间比较。');
  if(selected.some(x=>x.material_kind==='stored_text'))warnings.push('部分材料为已存文本，完整性尚未核实；结论应限于实际读到的内容。');
  return {ready,reason,keywords:search.q,mode:comparison?'compare':'answer',matching:'strict',

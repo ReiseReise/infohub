@@ -125,40 +125,36 @@ function splitMultipart(bodyText: string, boundary: string): string[] {
     .filter((part) => part && part !== '--' && !part.startsWith('--'));
 }
 
-function parseEmlPart(raw: string): { contentType: string; transferEncoding: string; body: string } {
+function parseEmlPart(raw: string, depth = 0): { bodyText: string; bodyHtml: string } {
   const { headerText, bodyText } = splitHeaderBody(raw);
   const headers = parseHeaders(headerText);
+  const rawContentType = headers['content-type'] || 'text/plain';
+  const contentType = rawContentType.split(';', 1)[0].trim().toLowerCase();
+  if (/^attachment\b/i.test(headers['content-disposition'] || '')) return { bodyText: '', bodyHtml: '' };
+  if (contentType.startsWith('multipart/')) {
+    if (depth >= 20) throw new Error('Email MIME nesting limit exceeded');
+    // MIME boundaries are case-sensitive, even though media type names are not.
+    const boundary = extractHeaderParam(rawContentType, 'boundary');
+    const result = { bodyText: '', bodyHtml: '' };
+    for (const part of splitMultipart(bodyText, boundary)) {
+      const parsed = parseEmlPart(part, depth + 1);
+      result.bodyText ||= parsed.bodyText;
+      result.bodyHtml ||= parsed.bodyHtml;
+    }
+    return result;
+  }
+  const body = decodeTransfer(bodyText, headers['content-transfer-encoding'] || '');
   return {
-    contentType: (headers['content-type'] || 'text/plain').toLowerCase(),
-    transferEncoding: headers['content-transfer-encoding'] || '',
-    body: decodeTransfer(bodyText, headers['content-transfer-encoding'] || ''),
+    bodyText: contentType === 'text/plain' ? body : '',
+    bodyHtml: contentType === 'text/html' ? body : '',
   };
 }
 
 export function parseEmlMessages(inputs: RawEmlInput[], sourceLabel?: string): RawEmailIngestItem[] {
   return inputs.flatMap((input) => {
-    const { headerText, bodyText } = splitHeaderBody(input.content);
+    const { headerText } = splitHeaderBody(input.content);
     const headers = parseHeaders(headerText);
-    const contentType = (headers['content-type'] || 'text/plain').toLowerCase();
-    const transferEncoding = headers['content-transfer-encoding'] || '';
-    const boundary = extractHeaderParam(contentType, 'boundary');
-
-    let bodyTextValue = '';
-    let bodyHtmlValue = '';
-    if (contentType.includes('multipart/') && boundary) {
-      for (const partRaw of splitMultipart(bodyText, boundary)) {
-        const part = parseEmlPart(partRaw);
-        if (part.contentType.includes('text/plain') && !bodyTextValue) {
-          bodyTextValue = part.body;
-        } else if (part.contentType.includes('text/html') && !bodyHtmlValue) {
-          bodyHtmlValue = part.body;
-        }
-      }
-    } else if (contentType.includes('text/html')) {
-      bodyHtmlValue = decodeTransfer(bodyText, transferEncoding);
-    } else {
-      bodyTextValue = decodeTransfer(bodyText, transferEncoding);
-    }
+    const { bodyText: bodyTextValue, bodyHtml: bodyHtmlValue } = parseEmlPart(input.content);
 
     return [{
       subject: headers.subject || input.filename || '邮件：无标题',

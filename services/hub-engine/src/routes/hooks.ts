@@ -1,5 +1,5 @@
 import { observeJev } from '../jev/queue.js';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
@@ -15,8 +15,9 @@ import { normalizeEmailIngestItems, parseEmlMessages, redactEmailIngestLog } fro
 const app = new Hono();
 
 // POST /api/hooks/email-ingest — 安全邮件投递入口（手动/半手动导入）
-app.post('/email-ingest', async (c) => {
-  const authUser = requireAuth(c);
+export function createEmailIngestHandler(database = db, authenticate = requireAuth) {
+ return async (c: Context) => {
+  const authUser = authenticate(c);
   const contentType = c.req.header('content-type') || '';
   let body: Record<string, unknown> = {};
   let rawItems: Record<string, unknown>[] = [];
@@ -61,8 +62,17 @@ app.post('/email-ingest', async (c) => {
   }
 
   let sourceId = Number(body.sourceId);
+  if (body.sourceId != null && (!Number.isSafeInteger(sourceId) || sourceId <= 0)) {
+    return c.json({ error: 'Invalid email source ID' }, 400);
+  }
+  if (Number.isSafeInteger(sourceId) && sourceId > 0) {
+    const owned = await database.select({ id: schema.sources.id }).from(schema.sources)
+      .where(and(eq(schema.sources.id, sourceId), eq(schema.sources.userId, authUser.userId)))
+      .limit(1);
+    if (!owned.length) return c.json({ error: 'Email source not found for current user' }, 404);
+  }
   if (!Number.isInteger(sourceId) || sourceId <= 0) {
-    const existing = await db.select({ id: schema.sources.id })
+    const existing = await database.select({ id: schema.sources.id })
       .from(schema.sources)
       .where(and(
         eq(schema.sources.userId, authUser.userId),
@@ -73,7 +83,7 @@ app.post('/email-ingest', async (c) => {
     if (existing.length > 0) {
       sourceId = existing[0].id;
     } else {
-      const created = await db.insert(schema.sources).values({
+      const created = await database.insert(schema.sources).values({
         userId: authUser.userId,
         name: 'Email Inbox',
         sourceType: 'email',
@@ -103,11 +113,13 @@ app.post('/email-ingest', async (c) => {
   }
 
   let inserted = 0;
+  let duplicates = rawItems.length - items.length;
+  let failed = 0;
   for (const item of items) {
     try {
       const contentLength = item.content.trim().length;
       const contentStatus = contentLength >= 180 ? 'ready' : contentLength >= 24 ? 'degraded' : 'missing';
-      const result = await db.insert(schema.items).values({
+      const result = await database.insert(schema.items).values({
         sourceId,
         userId: authUser.userId,
         sourceType: 'email',
@@ -130,22 +142,28 @@ app.post('/email-ingest', async (c) => {
         translationStatus: 'pending',
       }).onConflictDoNothing().returning({ id: schema.items.id });
       if (result.length > 0) inserted++;
+      else duplicates++;
     } catch {
-      // Duplicate protection also exists at database unique indexes.
+      // ON CONFLICT handles duplicates. Other database failures must remain visible.
+      failed++;
     }
   }
 
   const redactedItems = items.map(redactEmailIngestLog);
-  logger.info({ ingested: inserted, total: rawItems.length, sourceId, items: redactedItems }, 'Email content ingested');
+  logger.info({ ingested: inserted, duplicates, failed, total: rawItems.length, sourceId, items: redactedItems }, 'Email content ingested');
   return c.json({
-    message: 'Email ingested',
+    ...(failed ? { error: 'Some emails could not be saved; retry the import.' } : {}),
+    message: failed ? 'Email import incomplete' : 'Email ingested',
     sourceId,
     ingested: inserted,
-    duplicates: rawItems.length - inserted,
+    duplicates,
+    failed,
     total: rawItems.length,
     items: redactedItems,
-  });
-});
+  }, failed ? 503 : 200);
+ };
+}
+app.post('/email-ingest', createEmailIngestHandler());
 
 // POST /api/hooks/audio-callback — audio-service 回调更新 Feed 条目
 app.post('/audio-callback', async (c) => {

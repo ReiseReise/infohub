@@ -772,6 +772,19 @@ async def generate_task_qa(
         await db.commit()
         raise HTTPException(502, f"AI 问答生成失败：{str(error)[:180]}") from error
 
+    # Refresh the identity-map instance after the model call, under the row lock.
+    # Concurrent answers must merge into the latest persisted JSON and cost.
+    result = await db.execute(
+        select(AudioTask)
+        .where(AudioTask.id == task_uuid, AudioTask.user_id == current_user.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+
+    summary_text = _extract_summary_text(task)
     summary = dict(task.summary_result or {})
     artifacts = summary.get("artifacts")
     if not isinstance(artifacts, dict) or artifacts.get("schema") != "audio_artifacts_v1":

@@ -27,3 +27,19 @@ test('leaves unrelated cache shapes unchanged', async () => {
   assert.equal(patchFeedItemInInfiniteCache(current, 'item-1', { isRead: true }), current);
   assert.equal(patchFeedItemInInfiniteCache(undefined, 'item-1', { isRead: true }), undefined);
 });
+
+test('list refresh and repeated selection preserve full reader detail and assets', async () => {
+  const { selectFeedDetailForRoute } = await import('../src/lib/feed-query-cache.ts');
+  const detail = { id: 'a', content: 'Full article', aiTranslation: '完整译文', readingAssets: [{ type: 'qa', content: 'Saved answer' }] };
+  const listItem = { id: 'a', aiTranslation: null, readingAssets: [], content: undefined };
+  assert.equal(selectFeedDetailForRoute<typeof detail | typeof listItem>(detail, 'a', [listItem]), detail);
+  assert.equal(selectFeedDetailForRoute(detail, 'a', []), detail);
+});
+
+test('changing or clearing the route never leaves the previous article selected', async () => {
+  const { selectFeedDetailForRoute } = await import('../src/lib/feed-query-cache.ts');
+  const previous = { id: 'a' }, next = { id: 'b' };
+  assert.equal(selectFeedDetailForRoute(previous, 'b', [next]), next);
+  assert.equal(selectFeedDetailForRoute(previous, 'missing', [next]), null);
+  assert.equal(selectFeedDetailForRoute(previous, undefined, [next]), null);
+});

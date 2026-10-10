@@ -3,23 +3,14 @@ import {useQuery,useQueryClient} from '@tanstack/react-query';
 import {ArrowUp,ArrowUpRight,BookOpen,Check,ChevronDown,History,Loader2,MessageCircle,Plus,Search,SlidersHorizontal,Square,X} from 'lucide-react';
 import {request} from '../../lib/api/shared';
 import {MarkdownContent} from '../../components/MarkdownContent';
-import {readableEvidenceText} from './answer-format';
+import {radiusAnswerMarkdown} from './answer-format';
 import {RadiusEvidence} from './RadiusEvidence';
 import {dateText,errorText,type EvidencePlan,type ReaderTarget,type Topic} from './types';
 
-type Entry={text:string;citations:string[]};
-type Detail={run:{id:string;question:string;state:string;reason?:string;spent_micros:number|string;policy?:{radius?:{question:string;keywords:string;matched:number;selected:number;sourceCount:number;from?:string;to?:string;mode?:string;warnings?:string[];groups?:{label:string;from:string;to:string;itemIds:string[]}[]}}};drafts:{id:string;quality:string;markdown:string;payload?:{title:string;facts:Entry[];analysis:Entry[];unresolved:string[]}}[];sources:{id:string;title:string;url:string;published_at:string}[];citations:{id:string;source_id:string;quote:string}[];steps:{stage:string;state:string;error?:string}[]};
+type Detail={run:{id:string;question:string;state:string;reason?:string;spent_micros:number|string;policy?:{radius?:{question:string;keywords:string;matched:number;selected:number;sourceCount:number;from?:string;to?:string;mode?:string;warnings?:string[];groups?:{label:string;from:string;to:string;itemIds:string[]}[]}}};drafts:{id:string;quality:string;markdown:string;payload?:unknown}[];sources:{id:string;title:string;url:string;published_at:string}[];citations:{id:string;source_id:string;quote:string}[];steps:{stage:string;state:string;error?:string}[]};
 type Config={modelReady:boolean;modelError?:string;model:string;budgetCny:number;priceReviewExpiresAt?:string};
 type Scope={id:string;title:string}|null;
 const terminal=new Set(['completed','failed','paused','cancelled','review']);
-const escape=(s:string)=>s.replace(/[\\`*_{}[\]<>#]/g,'\\$&');
-function answerMarkdown(detail:Detail){
-  const draft=detail.drafts[0],p=draft?.payload;
-  if(!p)return draft?.markdown||'';
-  const map=new Map(detail.citations.map(c=>[c.id,c.source_id]));
-  const line=(entry:Entry)=>`${escape(readableEvidenceText(entry.text,detail.citations.map(c=>c.id)))} ${[...new Set(entry.citations.map(id=>map.get(id)).filter(Boolean))].map(id=>`[${detail.sources.findIndex(s=>s.id===id)+1}](#radius-evidence-${id})`).join(' ')}`;
-  return [...p.analysis.map(line),'### 资料中的依据',...p.facts.map(f=>'- '+line(f)),...(p.unresolved.length?['### 仍待确认',...p.unresolved.map(s=>'- '+escape(s))]:[])].join('\n\n');
-}
 export function RadiusChat({topic,scope,onClearScope,onRead}:{topic?:Topic;scope:Scope;onClearScope:()=>void;onRead:(target:ReaderTarget)=>void}){
   const cache=useQueryClient();
   const [mode,setMode]=useState<'auto'|'answer'|'compare'>('auto'),[from,setFrom]=useState(''),[to,setTo]=useState('');
@@ -67,7 +58,7 @@ export function RadiusChat({topic,scope,onClearScope,onRead}:{topic?:Topic;scope
       {metadata?.mode==='compare'&&<div className="radius-period-summary">{metadata.groups?.map(g=><span key={g.label}>{g.label}：{g.from} — {g.to} · {g.itemIds.length} 篇</span>)}</div>}
       {metadata&&<div className="radius-evidence-scope"><Search size={12}/>检索「{metadata.keywords||topic?.name||'指定材料'}」 · 找到 {metadata.matched} 篇 · 参考 {metadata.selected} 篇 / {metadata.sourceCount} 个来源{metadata.from&&<> · {metadata.from} 至 {metadata.to}</>}</div>}
       {detail.error&&<p role="alert" className="radius-notice danger">{errorText(detail.error)}</p>}
-      {answer?.drafts.length? <div className="radius-answer" onClick={event=>{const a=(event.target as HTMLElement).closest('a');const href=a?.getAttribute('href');if(href?.startsWith('#radius-evidence-')){event.preventDefault();onRead({kind:'evidence',id:href.slice('#radius-evidence-'.length)});}}}><div className="radius-answer-label"><span className="radius-mini-orbit"/>{working?'回答草稿':answer.run.state==='completed'?<><Check size={13}/>{answer.drafts[0]?.quality==='verified'?'基于资料的回答':'已核对 · 含资料限制'}</>:'回答 · 仍有待核实项'}</div><MarkdownContent content={answerMarkdown(answer)} mode="markdown" variant="reader"/>
+      {answer?.drafts.length? <div className="radius-answer" onClick={event=>{const a=(event.target as HTMLElement).closest('a');const href=a?.getAttribute('href');if(href?.startsWith('#radius-evidence-')){event.preventDefault();onRead({kind:'evidence',id:href.slice('#radius-evidence-'.length)});}}}><div className="radius-answer-label"><span className="radius-mini-orbit"/>{working?'回答草稿':answer.run.state==='completed'?<><Check size={13}/>{answer.drafts[0]?.quality==='verified'?'基于资料的回答':'已核对 · 含资料限制'}</>:'回答 · 仍有待核实项'}</div><MarkdownContent content={radiusAnswerMarkdown(answer)} mode="markdown" variant="reader"/>
         <div className="radius-answer-sources"><h3><BookOpen size={14}/>参考来源 <span>{answer.sources.length}</span></h3>{answer.sources.slice(0,expandedSources?answer.sources.length:3).map((s,i)=><button key={s.id} onClick={()=>onRead({kind:'evidence',id:s.id})}><span>{i+1}</span><span>{s.title}<small>{dateText(s.published_at)}</small></span><ArrowUpRight size={14}/></button>)}{answer.sources.length>3&&<button className="radius-more-sources" onClick={()=>setExpandedSources(!expandedSources)}>{expandedSources?'收起来源':`查看其余 ${answer.sources.length-3} 篇来源`}<ChevronDown size={12}/></button>}</div>
         <p className="radius-answer-foot">{Number(answer.run.spent_micros)>0?`本次估算用量 ¥${(Number(answer.run.spent_micros)/1000000).toFixed(3)} · `:''}依据已采集资料，不代表全网观点。</p>
       </div>:null}

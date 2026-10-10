@@ -32,6 +32,7 @@ import {
 import { buildArticleAgentPrompt, type ArticleAgentPromptKey } from '../../lib/reading-assets';
 import { getPreferredReaderSourceText, normalizeAiSummary } from './presentation';
 import { useAuth } from '../../lib/use-auth';
+import { selectFeedDetailForRoute } from '../../lib/feed-query-cache';
 import {
   useFeedList,
   useFeedDetail,
@@ -392,12 +393,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
 
   // Route-driven detail loading
   useEffect(() => {
-    if (selectedIdFromRoute) {
-      const existing = items.find((i) => i.id === selectedIdFromRoute);
-      if (existing) setSelectedItem(existing);
-      return;
-    }
-    setSelectedItem(null);
+    setSelectedItem((current) => selectFeedDetailForRoute(current, selectedIdFromRoute, items));
   }, [items, selectedIdFromRoute]);
 
   // 宽屏下详情区占 2/3 版面，无选中时整片空白；自动选中首条填满版面（窄屏不做，见 shouldAutoSelectFirstFeedItem）
@@ -454,7 +450,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
   };
 
   const handleOpenDetail = async (item: FeedItem) => {
-    setSelectedItem(item); setDetailActionNotice(null); setStageNotice(null); setFeedbackNotice(null);
+    setSelectedItem((current) => selectFeedDetailForRoute(current, item.id, [item])); setDetailActionNotice(null); setStageNotice(null); setFeedbackNotice(null);
     const queryString = searchParams.toString();
     navigate(`/feed/${item.id}${queryString ? `?${queryString}` : ''}`);
     if (!item.isRead) void handleMarkRead(item.id);

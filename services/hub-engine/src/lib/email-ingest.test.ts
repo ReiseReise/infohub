@@ -102,3 +102,22 @@ test('parses multipart eml messages and prefers text/plain over html', () => {
   assert.equal(String(message.bodyText || ''), 'Plain text 摘要优先');
   assert.equal(String(message.bodyHtml || ''), '<p>HTML 摘要</p>');
 });
+
+test('reads nested MIME bodies and preserves case-sensitive boundaries', () => {
+  const raw = [
+    'Subject: Newsletter with an attachment',
+    'Content-Type: multipart/mixed; boundary="OuterABC"', '',
+    '--OuterABC', 'Content-Type: text/plain',
+    'Content-Disposition: attachment; filename="notes.txt"', '', 'ATTACHMENT_ONLY',
+    '--OuterABC', 'Content-Type: multipart/alternative; boundary="InnerXYZ"', '',
+    '--InnerXYZ', 'Content-Type: text/plain; charset=utf-8', '', 'REAL_NEWSLETTER_BODY',
+    '--InnerXYZ', 'Content-Type: text/html; charset=utf-8', '', '<p>REAL_NEWSLETTER_BODY</p>',
+    '--InnerXYZ--', '--OuterABC--',
+  ].join('\r\n');
+  const [message] = parseEmlMessages([{ content: raw }]);
+  assert.equal(message.bodyText, 'REAL_NEWSLETTER_BODY');
+  assert.equal(message.bodyHtml, '<p>REAL_NEWSLETTER_BODY</p>');
+  const [item] = normalizeEmailIngestItems([message]);
+  assert.match(item.content, /REAL_NEWSLETTER_BODY/);
+  assert.doesNotMatch(item.content, /ATTACHMENT_ONLY|OuterABC|InnerXYZ/);
+});

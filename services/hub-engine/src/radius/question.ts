@@ -53,12 +53,14 @@ export function comparisonWindow(input:AskInput,now=new Date()){
  return{current,previous:{...current,from:iso(start-span),to:iso(start-DAY)}};
 }
 export type Candidate={id:string;source_id?:unknown;content_basis?:unknown;qa_eligible?:unknown;canonical_url?:unknown;url?:unknown;content_hash?:unknown;body_hash?:unknown;published_at?:unknown};
-export function selectQuestionSources<T extends Candidate>(items:T[],limit=12):T[]{
+export function selectQuestionSources<T extends Candidate>(items:T[],limit=12,seen=new Set<string>()):T[]{
  const eligible=items.filter(x=>x.qa_eligible===true||(x.qa_eligible===undefined&&x.content_basis==='body'));
- const unique:T[]=[],seen=new Set<string>();
- for(const item of eligible){const keys=[canonicalKey(item.canonical_url||item.url),item.body_hash?String(item.body_hash):item.content_hash?String(item.content_hash):''].filter(Boolean);if(keys.some(k=>seen.has(k)))continue;keys.forEach(k=>seen.add(k));unique.push(item);}
+ const unique:T[]=[],candidatesSeen=new Set(seen);
+ const keysFor=(item:T)=>[canonicalKey(item.canonical_url||item.url),item.body_hash?String(item.body_hash):item.content_hash?String(item.content_hash):''].filter(Boolean);
+ for(const item of eligible){const keys=keysFor(item);if(keys.some(k=>candidatesSeen.has(k)))continue;keys.forEach(k=>candidatesSeen.add(k));unique.push(item);}
  const selected:T[]=[],counts=new Map<unknown,number>();
- for(const item of unique){const n=counts.get(item.source_id)||0;if(n>=3)continue;selected.push(item);counts.set(item.source_id,n+1);if(selected.length===limit)return selected;}
- for(const item of unique)if(!selected.some(s=>s.id===item.id)&&selected.length<limit)selected.push(item);
+ const remember=(item:T)=>{selected.push(item);keysFor(item).forEach(k=>seen.add(k));};
+ for(const item of unique){const n=counts.get(item.source_id)||0;if(n>=3)continue;remember(item);counts.set(item.source_id,n+1);if(selected.length===limit)return selected;}
+ for(const item of unique)if(!selected.some(s=>s.id===item.id)&&selected.length<limit)remember(item);
  return selected;
 }
