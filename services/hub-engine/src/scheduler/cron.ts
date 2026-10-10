@@ -1,4 +1,6 @@
 import cron from 'node-cron';
+import type { ScheduledTask } from 'node-cron';
+import { getCronJobSchedule } from './cron-specs.js';
 import { eq } from 'drizzle-orm';
 import { logger } from '../lib/logger.js';
 import { config } from '../config/index.js';
@@ -21,7 +23,7 @@ import {
 import { enqueueAutomaticTranslationCandidates } from './item-translation-jobs.js';
 import { resolveDailyReportRuntimePolicy } from '../lib/runtime-security-policy.js';
 
-const jobs: cron.ScheduledTask[] = [];
+const jobs: ScheduledTask[] = [];
 const FALLBACK_USER_ID = '11ec2268-1635-4e3c-9add-e51c48d0639a';
 
 async function getAiProcessingUsers(): Promise<UserFetchSettings[]> {
@@ -63,7 +65,7 @@ export function startCronJobs() {
   let lastDailyRecoveryCheckKey: string | null = null;
 
   // 每 5 分钟：混合调度，仅入队到期来源
-  const hourlyFetch = cron.schedule('*/5 * * * *', async () => {
+  const hourlyFetch = cron.schedule(getCronJobSchedule('hybrid-fetch').schedule, async () => {
     logger.info('Cron: hybrid fetch scheduling triggered');
     try {
       const result = await enqueueDueFetches(50);
@@ -75,7 +77,7 @@ export function startCronJobs() {
   jobs.push(hourlyFetch);
 
   // 每10分钟：AI处理管道（评分→摘要→翻译）— 受 config.ai 开关控制
-  const aiProcessing = cron.schedule('*/10 * * * *', async () => {
+  const aiProcessing = cron.schedule(getCronJobSchedule('ai-processing').schedule, async () => {
     if (!config.ai.enabled) return;
     try {
       const users = await getAiProcessingUsers();
@@ -102,7 +104,7 @@ export function startCronJobs() {
   jobs.push(aiProcessing);
 
   // 每15分钟：优先补最老的正式来源处理债；单源可小批追赶，但不能占满全局恢复车道。
-  const processingDebtRecovery = cron.schedule('3,18,33,48 * * * *', async () => {
+  const processingDebtRecovery = cron.schedule(getCronJobSchedule('processing-debt-recovery').schedule, async () => {
     if (!config.ai.enabled) return;
     try {
       const users = await getAiProcessingUsers();
@@ -139,7 +141,7 @@ export function startCronJobs() {
   jobs.push(processingDebtRecovery);
 
   // 每30分钟：优先级评分更新
-  const priorityUpdate = cron.schedule('15,45 * * * *', async () => {
+  const priorityUpdate = cron.schedule(getCronJobSchedule('priority-update').schedule, async () => {
     try {
       const users = await getPriorityUserIds();
       let count = 0;
@@ -166,7 +168,7 @@ export function startCronJobs() {
   jobs.push(priorityUpdate);
 
   // 每15分钟检查一次：只重跑素材状态发生变化的降级日报。
-  const dailyReport = cron.schedule('*/15 * * * *', async () => {
+  const dailyReport = cron.schedule(getCronJobSchedule('daily-report-recovery').schedule, async () => {
     const runtimePolicy = resolveDailyReportRuntimePolicy({
       trigger: 'cron',
       globalEnabled: config.ai.enabled,
@@ -192,7 +194,7 @@ export function startCronJobs() {
   }, { timezone: DEFAULT_DAILY_REPORT_TIME_ZONE });
   jobs.push(dailyReport);
 
-  const retentionCleanup = cron.schedule('30 3 * * *', async () => {
+  const retentionCleanup = cron.schedule(getCronJobSchedule('retention-cleanup').schedule, async () => {
     try {
       const result = await runRetention({ retentionDays: 30, dryRun: false });
       logger.info(result, 'Cron: retention cleanup complete');
@@ -202,7 +204,7 @@ export function startCronJobs() {
   });
   jobs.push(retentionCleanup);
 
-  const nightlyPreferenceRebuild = cron.schedule('15 2 * * *', async () => {
+  const nightlyPreferenceRebuild = cron.schedule(getCronJobSchedule('preference-profile-rebuild').schedule, async () => {
     try {
       const result = await rebuildStalePreferenceProfiles(100);
       logger.info(result, 'Cron: preference profile rebuild complete');
