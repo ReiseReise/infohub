@@ -49,8 +49,8 @@ test('default desktop selection retains complete detail across lean list refresh
   const { selectFeedDetailForRoute } = await import('../src/lib/feed-query-cache.ts');
   const detail = { id: 'a', content: 'Full original', aiTranslation: '完整译文', readingAssets: [{ content: 'Saved answer' }] };
   const items = [{ id: 'a' }, { id: 'b' }];
-  assert.equal(selectFeedDetailForRoute(detail, resolveFeedDetailId(undefined, items, 1440), items), detail);
-  assert.equal(selectFeedDetailForRoute(detail, resolveFeedDetailId(undefined, [items[1]], 1440), [items[1]]), items[1]);
+  assert.equal(selectFeedDetailForRoute(detail, resolveFeedDetailId(undefined, items, 1440, detail.id), items), detail);
+  assert.equal(selectFeedDetailForRoute(detail, resolveFeedDetailId(undefined, [items[1]], 1440, detail.id), [items[1]]), detail);
 });
 
 test('late action refreshes never replace a different or closed article', async () => {

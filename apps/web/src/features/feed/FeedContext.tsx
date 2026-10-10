@@ -280,7 +280,7 @@ export function FeedProvider({ children }: { children: ReactNode }) {
     return result;
   }, [feedListQuery.data?.pages]);
 
-  const effectiveDetailId = resolveFeedDetailId(selectedIdFromRoute, items);
+  const effectiveDetailId = resolveFeedDetailId(selectedIdFromRoute, items, undefined, selectedItem?.id);
   const currentDetailIdRef = useRef(effectiveDetailId);
   useEffect(() => { currentDetailIdRef.current = effectiveDetailId; }, [effectiveDetailId]);
 

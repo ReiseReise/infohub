@@ -869,6 +869,15 @@ test('default desktop Feed loads first detail while narrow screens retain the li
   assert.equal(resolveFeedDetailId('outside-list', items, 1440), 'outside-list');
 });
 
+test('default desktop reading stays on the selected article when the list reorders or drops it', async () => {
+  const { resolveFeedDetailId } = await import('../src/lib/feed-layout.ts');
+  for (const items of [[{ id: 'b' }, { id: 'a' }], [{ id: 'b' }], []]) {
+    assert.equal(resolveFeedDetailId(undefined, items, 1440, 'a'), 'a');
+  }
+  assert.equal(resolveFeedDetailId('b', [{ id: 'a' }], 1440, 'a'), 'b');
+  assert.equal(resolveFeedDetailId(undefined, [{ id: 'a' }], 390, 'a'), null);
+});
+
 test('auto-selects the first feed item on wide screens so the detail pane is not blank', async () => {
   const { shouldAutoSelectFirstFeedItem } = await import('../src/lib/feed-layout.ts');
 

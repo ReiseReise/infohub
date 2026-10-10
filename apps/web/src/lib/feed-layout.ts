@@ -188,11 +188,13 @@ export function resolveFeedDetailId(
   routeId: string | undefined,
   items: Array<{ id: string }>,
   viewportWidth?: number,
+  selectedId?: string | null,
 ): string | null {
   if (routeId) return routeId;
-  return shouldAutoSelectFirstFeedItem({
-    hasRouteId: false, hasSelectedItem: false, itemCount: items.length, viewportWidth,
-  }) ? items[0].id : null;
+  const width = viewportWidth ?? (typeof window !== 'undefined' ? window.innerWidth : 1280);
+  if (width < 1280) return null;
+  // Default selection fills an empty reader once; list refreshes must not move it.
+  return selectedId || items[0]?.id || null;
 }
 
 export function shouldAutoScrollFeedDetailIntoView(hasSelectedItem: boolean, viewportWidth?: number): boolean {
