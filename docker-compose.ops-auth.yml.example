@@ -1,0 +1,6 @@
+# Copy this file to docker-compose.ops-auth.yml only on the deployment host.
+# The real override and local-secrets/ are ignored by Git and Docker build context.
+services:
+  nginx:
+    volumes:
+      - ./local-secrets/ops.htpasswd:/etc/nginx/ops.htpasswd:ro

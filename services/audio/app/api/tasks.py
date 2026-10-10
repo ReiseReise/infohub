@@ -2,26 +2,108 @@
 
 import re
 import uuid
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, status
-from pydantic import BaseModel
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request, status
+from fastapi.responses import FileResponse, RedirectResponse, Response
+from jose import JWTError, jwt
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.models.user import User
 from app.models.audio_task import AudioTask, TaskStatus
 from app.models.prompt_template import PromptTemplate
 from app.models.usage_log import UsageLog, ServiceType
-from app.schemas.task import TaskCreateRequest, TaskResponse, TaskListResponse
+from app.schemas.task import TaskCreateRequest, TaskResponse, TaskListResponse, TaskAudioUrlResponse
 from app.api.deps import get_current_user
-from app.services.storage_service import get_storage
-from app.tasks.audio_pipeline import start_audio_pipeline, resolve_url_and_start_pipeline
+from app.services.storage_service import LocalStorage, OSSStorage, get_storage
+from app.services.audio_playback import is_supported_audio_range
+from app.services.audio_config_guard import (
+    AUDIO_PROMPT_CATEGORIES,
+    DEFAULT_ENDPOINT_SENTINEL,
+    is_audio_prompt_category,
+    require_audio_llm_selection,
+    resolve_audio_llm_selection,
+)
+from app.services.audio_artifacts import build_audio_artifacts_v1, preserve_audio_qa_answers
+from app.services.audio_reprocess import (
+    metadata_only_summary,
+    resolve_effective_task_status,
+    resolve_reprocess_stage,
+)
+from app.services.audio_qa import (
+    build_audio_qa_answer,
+    build_audio_qa_prompt,
+    select_audio_qa_evidence,
+    upsert_audio_qa_answer,
+)
+from app.services.llm_service import LLMService
+from app.tasks.audio_pipeline import start_audio_pipeline, start_audio_summary_pipeline, resolve_url_and_start_pipeline
 
 router = APIRouter(prefix="/tasks", tags=["任务"])
 
 ALLOWED_FORMATS = {"mp3", "m4a", "wav", "flac", "ogg", "mp4", "webm", "aac", "wma"}
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+AUDIO_PLAYBACK_EXPIRES_SECONDS = 7200
+
+
+def _is_http_url(value: str | None) -> bool:
+    return bool(value and value.startswith(("http://", "https://")))
+
+
+def _looks_like_oss_key(value: str | None) -> bool:
+    normalized = (value or "").strip()
+    return normalized.startswith("audio-insight/")
+
+
+def _has_oss_config() -> bool:
+    return bool(settings.oss_access_key_id and settings.oss_access_key_secret and settings.oss_bucket_name)
+
+
+def _storage_for_audio_url(audio_url: str):
+    if settings.storage_backend == "oss":
+        return get_storage()
+    if _looks_like_oss_key(audio_url) and _has_oss_config():
+        return OSSStorage()
+    return get_storage()
+
+
+def _audio_media_type(task: AudioTask) -> str:
+    ext = (task.audio_format or "").lower()
+    return {
+        "mp3": "audio/mpeg",
+        "m4a": "audio/mp4",
+        "mp4": "audio/mp4",
+        "wav": "audio/wav",
+        "flac": "audio/flac",
+        "ogg": "audio/ogg",
+        "webm": "audio/webm",
+        "aac": "audio/aac",
+        "wma": "audio/x-ms-wma",
+    }.get(ext, "application/octet-stream")
+
+
+def _create_audio_playback_token(task: AudioTask) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(seconds=AUDIO_PLAYBACK_EXPIRES_SECONDS)
+    payload = {
+        "sub": str(task.user_id),
+        "task_id": str(task.id),
+        "scope": "audio_playback",
+        "exp": expire,
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
+
+
+def _decode_audio_playback_token(token: str) -> dict | None:
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
+    except JWTError:
+        return None
+    if payload.get("scope") != "audio_playback":
+        return None
+    return payload
 
 
 def _extract_source_meta(task: AudioTask) -> dict:
@@ -51,6 +133,49 @@ def _normalize_text(value: str | None) -> str:
     return " ".join((value or "").split()).strip()
 
 
+def _default_llm_endpoint_id() -> str:
+    for candidate in (settings.default_llm_endpoint_id, settings.doubao_endpoint_id):
+        normalized = (candidate or "").strip()
+        if normalized.startswith("ep-"):
+            return normalized
+    return ""
+
+
+def _assert_audio_llm_ready(requested_model: str | None):
+    try:
+        return require_audio_llm_selection(
+            requested_model,
+            default_endpoint_id=_default_llm_endpoint_id(),
+            has_ark_key=bool(settings.ark_api_key),
+            has_dashscope_key=bool(settings.dashscope_api_key),
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
+async def _assert_audio_template(db: AsyncSession, template_id: str | None) -> PromptTemplate | None:
+    normalized = (template_id or "").strip()
+    if not normalized:
+        return None
+    try:
+        parsed_id = uuid.UUID(normalized)
+    except ValueError as error:
+        raise HTTPException(400, "音频纪要模板 ID 无效") from error
+
+    result = await db.execute(
+        select(PromptTemplate).where(
+            PromptTemplate.id == parsed_id,
+            PromptTemplate.is_active == True,
+        )
+    )
+    template = result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(400, "所选音频纪要模板不存在或已停用")
+    if not is_audio_prompt_category(template.category):
+        raise HTTPException(400, "所选模板不属于音频工作坊，请改用会议、学习、日记或多模态模板")
+    return template
+
+
 def _extract_summary_text(task: AudioTask) -> str:
     if isinstance(task.summary_result, dict):
         text = task.summary_result.get("text")
@@ -63,7 +188,13 @@ def _compute_task_integrity(task: AudioTask) -> tuple[str, str | None]:
     transcript_ready = len(_normalize_text(task.transcript_text)) >= 80
     summary_ready = len(_normalize_text(_extract_summary_text(task))) >= 20
 
-    if task.status != TaskStatus.done:
+    effective_status = resolve_effective_task_status(
+        task.status,
+        transcript_text=task.transcript_text,
+        transcript_raw=task.transcript_raw,
+        summary_result=task.summary_result,
+    )
+    if effective_status != TaskStatus.done.value:
         return "pending", None
 
     if not transcript_ready:
@@ -101,12 +232,19 @@ def _task_to_response(task: AudioTask) -> TaskResponse:
     transcript_ready = len(_normalize_text(task.transcript_text)) >= 80
     summary_ready = len(_normalize_text(_extract_summary_text(task))) >= 20
     integrity_status, integrity_reason = _compute_task_integrity(task)
-    effective_status = TaskStatus.failed if integrity_status == "repair_needed" else task.status
+    recovered_status = resolve_effective_task_status(
+        task.status,
+        transcript_text=task.transcript_text,
+        transcript_raw=task.transcript_raw,
+        summary_result=task.summary_result,
+    )
+    effective_status = TaskStatus.failed if integrity_status == "repair_needed" else TaskStatus(recovered_status)
+    recovered_from_retry_failure = task.status == TaskStatus.failed and effective_status == TaskStatus.done
     return TaskResponse(
         id=str(task.id),
         title=task.title,
         status=effective_status,
-        error_message=task.error_message,
+        error_message=None if recovered_from_retry_failure else task.error_message,
         audio_url=task.audio_url,
         audio_format=task.audio_format,
         audio_duration=task.audio_duration,
@@ -141,8 +279,8 @@ def _task_to_response(task: AudioTask) -> TaskResponse:
         asr_selection_reason=(str(source_meta.get("asr_selection_reason")) if source_meta.get("asr_selection_reason") else None),
         fallback_provider=(str(source_meta.get("fallback_provider")) if source_meta.get("fallback_provider") else None),
         fallback_reason=(str(source_meta.get("fallback_reason")) if source_meta.get("fallback_reason") else None),
-        failure_code=failure_code,
-        failure_detail=failure_detail,
+        failure_code=None if recovered_from_retry_failure else failure_code,
+        failure_detail=None if recovered_from_retry_failure else failure_detail,
         asr_status="ready" if transcript_ready else ("failed" if effective_status == TaskStatus.failed else "pending"),
         summary_status="ready" if summary_ready else ("failed" if effective_status == TaskStatus.failed else "pending"),
         render_status="ready" if summary_ready or transcript_ready else ("failed" if effective_status == TaskStatus.failed else "pending"),
@@ -180,6 +318,9 @@ async def upload_audio(
                 403,
                 f"本月配额已用完（已用 {used_seconds // 60} 分钟 / 配额 {current_user.quota_seconds_monthly // 60} 分钟）。请联系管理员提升配额。",
             )
+
+    await _assert_audio_template(db, prompt_template_id)
+    _assert_audio_llm_ready(llm_model)
 
     # 校验文件格式
     ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename else ""
@@ -252,6 +393,9 @@ async def create_from_url(
         raise HTTPException(400, "链接不能为空")
     if not (url.startswith("http://") or url.startswith("https://")):
         raise HTTPException(400, "仅支持 http/https 链接")
+
+    await _assert_audio_template(db, req.prompt_template_id)
+    _assert_audio_llm_ready(req.llm_model)
 
     title = (req.title or "").strip() or "链接抓取中"
 
@@ -345,7 +489,10 @@ async def list_templates_for_user(
 ):
     result = await db.execute(
         select(PromptTemplate)
-        .where(PromptTemplate.is_active == True)
+        .where(
+            PromptTemplate.is_active == True,
+            PromptTemplate.category.in_(tuple(AUDIO_PROMPT_CATEGORIES)),
+        )
         .order_by(PromptTemplate.is_system.desc(), PromptTemplate.created_at)
     )
     templates = result.scalars().all()
@@ -364,18 +511,122 @@ async def list_templates_for_user(
 async def list_models_for_user(
     current_user: User = Depends(get_current_user),
 ):
+    endpoint = _default_llm_endpoint_id()
+    llm_options = [
+        {
+            "id": DEFAULT_ENDPOINT_SENTINEL,
+            "name": "豆包 Endpoint（跟随默认配置）",
+            "description": "使用系统已绑定供应商的默认 Endpoint",
+            "price": "按豆包 Endpoint 计费",
+            "provider": "volcengine_ark",
+        },
+        {"id": "dashscope/qwen-flash", "name": "Qwen Flash", "description": "作为回退模型保留", "price": "~0.01 元/小时音频", "provider": "dashscope"},
+        {"id": "dashscope/qwen-max", "name": "Qwen Max", "description": "高质量总结", "price": "~0.09 元/小时音频", "provider": "dashscope"},
+    ]
+    for option in llm_options:
+        selection = resolve_audio_llm_selection(
+            option["id"],
+            default_endpoint_id=endpoint,
+            has_ark_key=bool(settings.ark_api_key),
+            has_dashscope_key=bool(settings.dashscope_api_key),
+        )
+        option["available"] = selection.available
+        option["unavailable_reason"] = selection.reason
     return {
-        "llm_models": [
-            {"id": "__default_doubao_endpoint__", "name": "豆包 Endpoint（跟随默认配置）", "description": "实际 endpoint 请在设置里配置 DEFAULT_LLM_ENDPOINT_ID=ep-...", "price": "按豆包 endpoint 计费"},
-            {"id": "dashscope/qwen-flash", "name": "Qwen Flash", "description": "作为回退模型保留", "price": "~0.01 元/小时音频"},
-            {"id": "dashscope/qwen-max", "name": "Qwen Max", "description": "高质量总结", "price": "~0.09 元/小时音频"},
-        ],
+        "llm_models": llm_options,
         "asr_models": [
             {"id": "auto", "name": "自动选择", "description": "根据配置自动选择最优 ASR"},
             {"id": "tingwu", "name": "通义听悟", "description": "阿里听悟 ASR，适合高质量会议/播客转写"},
             {"id": "paraformer", "name": "Paraformer", "description": "0.288 元/小时，性价比高"},
         ],
     }
+
+
+@router.get("/{task_id}/audio-url", response_model=TaskAudioUrlResponse)
+async def get_task_audio_url(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(AudioTask).where(AudioTask.id == uuid.UUID(task_id), AudioTask.user_id == current_user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    if not task.audio_url:
+        raise HTTPException(404, "当前任务还没有可播放的音频文件")
+
+    audio_url = task.audio_url.strip()
+    if _is_http_url(audio_url):
+        return TaskAudioUrlResponse(
+            url=audio_url,
+            expires_in=AUDIO_PLAYBACK_EXPIRES_SECONDS,
+            mode="direct",
+        )
+
+    try:
+        signed_url = await _storage_for_audio_url(audio_url).get_url(audio_url, expires=AUDIO_PLAYBACK_EXPIRES_SECONDS)
+    except Exception:
+        signed_url = ""
+
+    if _is_http_url(signed_url):
+        return TaskAudioUrlResponse(
+            url=signed_url,
+            expires_in=AUDIO_PLAYBACK_EXPIRES_SECONDS,
+            mode="signed",
+        )
+
+    token = _create_audio_playback_token(task)
+    return TaskAudioUrlResponse(
+        url=f"/api/audio/tasks/{task_id}/audio-stream?token={token}",
+        expires_in=AUDIO_PLAYBACK_EXPIRES_SECONDS,
+        mode="stream",
+    )
+
+
+@router.get("/{task_id}/audio-stream")
+async def stream_task_audio(
+    task_id: str,
+    request: Request,
+    token: str = Query(""),
+    db: AsyncSession = Depends(get_db),
+):
+    payload = _decode_audio_playback_token(token)
+    if not payload or str(payload.get("task_id")) != task_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="播放地址已失效，请重新打开任务")
+
+    try:
+        task_uuid = uuid.UUID(task_id)
+        user_uuid = uuid.UUID(str(payload.get("sub")))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="播放地址无效")
+
+    result = await db.execute(
+        select(AudioTask).where(AudioTask.id == task_uuid, AudioTask.user_id == user_uuid)
+    )
+    task = result.scalar_one_or_none()
+    if not task or not task.audio_url:
+        raise HTTPException(404, "当前任务还没有可播放的音频文件")
+
+    try:
+        storage = _storage_for_audio_url(task.audio_url)
+        if isinstance(storage, LocalStorage):
+            path = storage.playback_path(task.audio_url)
+            file_stat = path.stat()
+            if not is_supported_audio_range(request.headers.getlist("range")):
+                raise HTTPException(416, "仅支持单段音频范围请求", headers={"Content-Range": f"bytes */{file_stat.st_size}"})
+            return FileResponse(path, media_type=_audio_media_type(task), stat_result=file_stat)
+        signed_url = await storage.get_url(task.audio_url, expires=AUDIO_PLAYBACK_EXPIRES_SECONDS)
+        if not _is_http_url(signed_url):
+            raise HTTPException(502, "暂时无法取得音频播放地址，请重试")
+        return RedirectResponse(signed_url, status_code=307)
+    except HTTPException:
+        raise
+    except FileNotFoundError:
+        raise HTTPException(404, "音频文件不存在，建议重新上传或重跑任务")
+    except Exception:
+        raise HTTPException(502, "音频文件读取失败，请重试")
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
@@ -391,6 +642,195 @@ async def get_task(
     if not task:
         raise HTTPException(404, "任务不存在")
     return _task_to_response(task)
+
+
+@router.post("/{task_id}/artifacts/rebuild", response_model=TaskResponse)
+async def rebuild_task_artifacts(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """基于已保存的逐字稿和纪要重建复盘资产，不重复调用 ASR 或 LLM。"""
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError as error:
+        raise HTTPException(400, "音频任务 ID 无效") from error
+
+    result = await db.execute(
+        select(AudioTask).where(AudioTask.id == task_uuid, AudioTask.user_id == current_user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+
+    summary_text = _extract_summary_text(task)
+    transcript_text = (task.transcript_text or "").strip()
+    if not summary_text:
+        raise HTTPException(400, "当前任务没有可用纪要，无法生成复盘资产")
+    if not transcript_text:
+        raise HTTPException(400, "当前任务没有可用逐字稿，无法生成带依据的复盘资产")
+
+    summary = dict(task.summary_result or {})
+    previous_artifacts = summary.get("artifacts")
+    summary["artifacts"] = preserve_audio_qa_answers(build_audio_artifacts_v1(
+        title=task.title,
+        summary_text=summary_text,
+        transcript_text=transcript_text,
+        transcript_raw=task.transcript_raw,
+    ), previous_artifacts)
+    task.summary_result = summary
+    await db.commit()
+    await db.refresh(task)
+    return _task_to_response(task)
+
+
+class AudioQaRequest(BaseModel):
+    question: str = Field(..., min_length=2, max_length=500)
+    prompt_key: str | None = Field(default=None, max_length=40)
+
+
+class AudioQaResponse(BaseModel):
+    answer: dict
+    task: TaskResponse
+
+
+@router.post("/{task_id}/qa", response_model=AudioQaResponse)
+async def generate_task_qa(
+    task_id: str,
+    req: AudioQaRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """针对当前音频生成可回听的问答资产；无有效 ASR 引用时不保存回答。"""
+    try:
+        task_uuid = uuid.UUID(task_id)
+    except ValueError as error:
+        raise HTTPException(400, "音频任务 ID 无效") from error
+
+    result = await db.execute(
+        select(AudioTask).where(AudioTask.id == task_uuid, AudioTask.user_id == current_user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+
+    question = _normalize_text(req.question)
+    if len(question) < 2:
+        raise HTTPException(400, "请输入需要核对的问题")
+    if not (task.transcript_text or "").strip():
+        raise HTTPException(400, "当前任务没有可用逐字稿，无法生成带时间引用的回答")
+
+    evidence = select_audio_qa_evidence(
+        task.transcript_raw,
+        question,
+        prompt_key=req.prompt_key,
+    )
+    if not evidence:
+        raise HTTPException(400, "当前逐字稿缺少可用时间段，无法生成可回听回答")
+
+    selection = _assert_audio_llm_ready(task.llm_model or "")
+    summary_text = _extract_summary_text(task)
+    prompt = build_audio_qa_prompt(
+        title=task.title,
+        question=question,
+        summary_text=summary_text,
+        evidence=evidence,
+    )
+    label = f"audio_qa:{_normalize_text(req.prompt_key) or 'custom'}"
+    completion = None
+    try:
+        completion = await LLMService().complete(
+            model=selection.model,
+            prompt=prompt,
+            provider=selection.provider,
+            extra_config=(
+                {"accessMode": "endpoint", "endpointId": selection.model}
+                if selection.provider == "volcengine_ark"
+                else None
+            ),
+            temperature=0.2,
+            max_tokens=1800,
+        )
+        answer = build_audio_qa_answer(
+            question=question,
+            prompt_key=req.prompt_key,
+            raw_response=completion.text,
+            evidence=evidence,
+            model=completion.model,
+            provider=completion.provider or selection.provider,
+            input_tokens=completion.input_tokens,
+            output_tokens=completion.output_tokens,
+        )
+    except Exception as error:
+        db.add(UsageLog(
+            task_id=task.id,
+            user_id=current_user.id,
+            service_type=ServiceType.llm.value,
+            provider=(completion.provider if completion else selection.provider) or "unknown",
+            model_name=(completion.model if completion else selection.model) or "unknown",
+            endpoint_id=completion.endpoint_id if completion else None,
+            input_tokens=completion.input_tokens if completion else None,
+            output_tokens=completion.output_tokens if completion else None,
+            total_tokens=completion.total_tokens if completion else None,
+            estimated_cost=completion.estimated_cost if completion else None,
+            latency_ms=completion.latency_ms if completion else None,
+            provider_request_id=completion.provider_request_id if completion else None,
+            api_kind=completion.api_kind if completion else None,
+            prompt_preview=prompt[:400],
+            response_preview=(completion.text[:400] if completion else None),
+            label=label,
+            error_message=str(error)[:800],
+        ))
+        await db.commit()
+        raise HTTPException(502, f"AI 问答生成失败：{str(error)[:180]}") from error
+
+    # Refresh the identity-map instance after the model call, under the row lock.
+    # Concurrent answers must merge into the latest persisted JSON and cost.
+    result = await db.execute(
+        select(AudioTask)
+        .where(AudioTask.id == task_uuid, AudioTask.user_id == current_user.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+
+    summary_text = _extract_summary_text(task)
+    summary = dict(task.summary_result or {})
+    artifacts = summary.get("artifacts")
+    if not isinstance(artifacts, dict) or artifacts.get("schema") != "audio_artifacts_v1":
+        artifacts = build_audio_artifacts_v1(
+            title=task.title,
+            summary_text=summary_text,
+            transcript_text=task.transcript_text or "",
+            transcript_raw=task.transcript_raw,
+        )
+    summary["artifacts"] = upsert_audio_qa_answer(artifacts, answer)
+    task.summary_result = summary
+    if completion.estimated_cost is not None:
+        task.llm_cost = float(task.llm_cost or 0) + float(completion.estimated_cost)
+    db.add(UsageLog(
+        task_id=task.id,
+        user_id=current_user.id,
+        service_type=ServiceType.llm.value,
+        provider=completion.provider or selection.provider or "unknown",
+        model_name=completion.model or selection.model,
+        endpoint_id=completion.endpoint_id,
+        input_tokens=completion.input_tokens,
+        output_tokens=completion.output_tokens,
+        total_tokens=completion.total_tokens,
+        estimated_cost=completion.estimated_cost,
+        latency_ms=completion.latency_ms,
+        provider_request_id=completion.provider_request_id,
+        api_kind=completion.api_kind,
+        prompt_preview=prompt[:400],
+        response_preview=completion.text[:400],
+        label=label,
+    ))
+    await db.commit()
+    await db.refresh(task)
+    return AudioQaResponse(answer=answer, task=_task_to_response(task))
 
 
 class TagsUpdateRequest(BaseModel):
@@ -443,6 +883,7 @@ async def reprocess_task(
     task_id: str,
     prompt_template_id: str = "",
     llm_model: str = "",
+    stage: str = "auto",
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -453,16 +894,72 @@ async def reprocess_task(
     if not task:
         raise HTTPException(404, "任务不存在")
 
+    effective_template_id = prompt_template_id or (str(task.prompt_template_id) if task.prompt_template_id else "")
+    stored_llm_model = (task.llm_model or "").strip()
+    effective_llm_model = (llm_model or "").strip()
+    if not effective_llm_model:
+        effective_llm_model = (
+            DEFAULT_ENDPOINT_SENTINEL
+            if stored_llm_model.startswith("ep-") and stored_llm_model == _default_llm_endpoint_id()
+            else stored_llm_model
+        )
+    await _assert_audio_template(db, effective_template_id)
+    _assert_audio_llm_ready(effective_llm_model)
+
+    try:
+        reprocess_stage = resolve_reprocess_stage(
+            stage,
+            transcript_text=task.transcript_text,
+            transcript_raw=task.transcript_raw,
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
     if prompt_template_id:
         task.prompt_template_id = uuid.UUID(prompt_template_id)
     if llm_model:
         task.llm_model = llm_model
-    task.status = TaskStatus.uploading
-    task.summary_result = None
+    elif stored_llm_model.startswith("ep-") and effective_llm_model == DEFAULT_ENDPOINT_SENTINEL:
+        task.llm_model = DEFAULT_ENDPOINT_SENTINEL
+
+    preserved_summary = metadata_only_summary(
+        task.summary_result if isinstance(task.summary_result, dict) else None,
+        task.transcript_raw if isinstance(task.transcript_raw, dict) else None,
+        preserve_artifacts=reprocess_stage == "summary",
+    )
+    source_meta = _extract_source_meta(task)
+    callback_meta = (
+        preserved_summary.get("_callback")
+        if isinstance(preserved_summary, dict) and isinstance(preserved_summary.get("_callback"), dict)
+        else {}
+    )
+
+    task.status = TaskStatus.summarizing if reprocess_stage == "summary" else TaskStatus.uploading
+    task.error_message = None
+    task.summary_result = preserved_summary
     task.multimodal_result = None
+    task.processing_started_at = datetime.now(timezone.utc)
+    task.processing_finished_at = None
+    if reprocess_stage == "full":
+        task.transcript_text = None
+        task.transcript_raw = None
     await db.commit()
 
-    start_audio_pipeline(str(task.id))
+    if reprocess_stage == "summary":
+        start_audio_summary_pipeline({
+            "task_id": str(task.id),
+            "user_id": str(task.user_id),
+            "audio_url": task.audio_url,
+            "duration": task.audio_duration or 0,
+            "transcript_text": task.transcript_text or "",
+            "transcript_raw": task.transcript_raw or {},
+            "asr_cost": task.asr_cost or 0,
+            "source_meta": source_meta,
+            "webhook_url": callback_meta.get("webhook_url"),
+            "article_id": callback_meta.get("article_id"),
+        })
+    else:
+        start_audio_pipeline(str(task.id))
     await db.refresh(task)
     return _task_to_response(task)
 

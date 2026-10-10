@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "updatedAt": "2026-07-21",
+  "description": "从 QMReader、Follow Builders 和 AI HOT 候选库中经 Reise 人工确认后正式采纳的来源清单。影子观察不等于正式采纳。",
+  "policy": {
+    "userConfirmationRequired": true,
+    "shadowDoesNotCountAsAdopted": true,
+    "mustMatchDecisionLedger": true,
+    "mustMatchRawSourceRegistry": true,
+    "refreshScriptsMayNotModify": true
+  },
+  "sources": []
+}

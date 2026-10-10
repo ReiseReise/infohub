@@ -12,17 +12,17 @@ from app.models.model_config import ModelConfig, TestStatus
 from app.schemas.admin import ModelConfigCreate, ModelConfigUpdate, ModelConfigResponse
 from app.api.deps import get_admin_user
 from app.services.crypto_service import encrypt_api_key, decrypt_api_key
+from app.services.audio_config_guard import validate_model_config_target
+from app.services.model_config_sync import model_connection_settings_changed
 
 router = APIRouter(prefix="/admin/models", tags=["管理-模型配置"])
 
 
-def _is_ark_endpoint(provider: str | None, model_name: str | None) -> bool:
-    return (provider or "").strip().lower() == "volcengine_ark" and str(model_name or "").strip().startswith("ep-")
-
-
 def _assert_valid_model_target(provider: str | None, model_name: str | None):
-    if (provider or "").strip().lower() == "volcengine_ark" and not _is_ark_endpoint(provider, model_name):
-        raise HTTPException(400, "Volcengine Ark 必须填写 endpoint id（ep-...），不再支持 doubao-pro-* 作为默认模型名")
+    try:
+        return validate_model_config_target(provider, model_name)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.get("", response_model=list[ModelConfigResponse])
@@ -41,15 +41,15 @@ async def create_model(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(get_admin_user),
 ):
-    _assert_valid_model_target(req.provider, req.model_name)
+    provider, model_name = _assert_valid_model_target(req.provider, req.model_name)
     # 如果设为默认，先取消同类型其他默认
     if req.is_default:
         await _clear_default(db, req.model_type)
 
     model = ModelConfig(
-        provider=req.provider,
+        provider=provider,
         alias=req.alias,
-        model_name=req.model_name,
+        model_name=model_name,
         model_type=req.model_type,
         api_key_encrypted=encrypt_api_key(req.api_key) if req.api_key else None,
         base_url=req.base_url,
@@ -76,14 +76,28 @@ async def update_model(
 
     next_provider = req.provider if req.provider is not None else model.provider
     next_model_name = req.model_name if req.model_name is not None else model.model_name
-    _assert_valid_model_target(next_provider, next_model_name)
+    next_provider, next_model_name = _assert_valid_model_target(next_provider, next_model_name)
+    current_api_key = decrypt_api_key(model.api_key_encrypted) if model.api_key_encrypted else ""
+    next_api_key = req.api_key if req.api_key is not None else current_api_key
+    next_base_url = req.base_url if req.base_url is not None else model.base_url
+    next_extra_config = req.extra_config if req.extra_config is not None else model.extra_config
+    connection_changed = model_connection_settings_changed(
+        current_provider=model.provider,
+        current_model_name=model.model_name,
+        current_api_key=current_api_key,
+        current_base_url=model.base_url,
+        current_extra_config=model.extra_config,
+        next_provider=next_provider,
+        next_model_name=next_model_name,
+        next_api_key=next_api_key,
+        next_base_url=next_base_url,
+        next_extra_config=next_extra_config,
+    )
 
-    if req.provider is not None:
-        model.provider = req.provider
+    model.provider = next_provider
     if req.alias is not None:
         model.alias = req.alias
-    if req.model_name is not None:
-        model.model_name = req.model_name
+    model.model_name = next_model_name
     if req.api_key is not None:
         model.api_key_encrypted = encrypt_api_key(req.api_key) if req.api_key else None
     if req.base_url is not None:
@@ -96,6 +110,10 @@ async def update_model(
         model.is_default = req.is_default
     if req.is_active is not None:
         model.is_active = req.is_active
+    if connection_changed:
+        model.test_status = TestStatus.untested
+        model.test_message = "连接配置已变更，请重新测试"
+        model.tested_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(model)

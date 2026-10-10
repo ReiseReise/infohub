@@ -1,4 +1,5 @@
-import { Hono } from 'hono';
+import { observeJev } from '../jev/queue.js';
+import { Hono, type Context } from 'hono';
 import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
@@ -9,8 +10,160 @@ import {
   normalizeCaptureIngestItem,
   resolveIngestSourceDefaults,
 } from '../lib/capture-inbox.js';
+import { emailIngestReceipt, normalizeEmailIngestItems, parseEmlMessages, redactEmailIngestLog } from '../lib/email-ingest.js';
 
 const app = new Hono();
+
+// POST /api/hooks/email-ingest — 安全邮件投递入口（手动/半手动导入）
+export function createEmailIngestHandler(database = db, authenticate = requireAuth, ingestLogger: Pick<typeof logger, 'info'> = logger) {
+ return async (c: Context) => {
+  const authUser = authenticate(c);
+  const contentType = c.req.header('content-type') || '';
+  let body: Record<string, unknown> = {};
+  let rawItems: Record<string, unknown>[] = [];
+
+  if (contentType.includes('multipart/form-data')) {
+    const formData = await c.req.formData();
+    const sourceLabel = typeof formData.get('sourceLabel') === 'string'
+      ? String(formData.get('sourceLabel')).trim()
+      : undefined;
+    const sourceIdRaw = formData.get('sourceId');
+    if (typeof sourceIdRaw === 'string') body.sourceId = sourceIdRaw;
+    if (sourceLabel) body.sourceLabel = sourceLabel;
+
+    const files = [...formData.getAll('file'), ...formData.getAll('files')]
+      .filter((file): file is File => file instanceof File);
+    if (files.length === 0) {
+      return c.json({ error: 'No .eml file provided' }, 400);
+    }
+    const emlInputs = await Promise.all(files.map(async (file) => ({
+      filename: file.name,
+      content: await file.text(),
+    })));
+    rawItems = parseEmlMessages(emlInputs, sourceLabel);
+  } else {
+    const parsed = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    if (!parsed) {
+      return c.json({ error: 'Invalid payload' }, 400);
+    }
+    body = parsed;
+    rawItems = Array.isArray(body.items)
+      ? body.items.filter((item): item is Record<string, unknown> => item && typeof item === 'object' && !Array.isArray(item))
+      : [body].filter((item): item is Record<string, unknown> => item && typeof item === 'object' && !Array.isArray(item));
+  }
+
+  if (rawItems.length === 0) {
+    return c.json({ error: 'Expected email payload or { items: [...] }' }, 400);
+  }
+
+  const items = normalizeEmailIngestItems(rawItems);
+  if (items.length === 0) {
+    return c.json({ error: 'No readable email content found' }, 400);
+  }
+
+  let sourceId = Number(body.sourceId);
+  if (body.sourceId != null && (!Number.isSafeInteger(sourceId) || sourceId <= 0)) {
+    return c.json({ error: 'Invalid email source ID' }, 400);
+  }
+  if (Number.isSafeInteger(sourceId) && sourceId > 0) {
+    const owned = await database.select({ id: schema.sources.id }).from(schema.sources)
+      .where(and(eq(schema.sources.id, sourceId), eq(schema.sources.userId, authUser.userId)))
+      .limit(1);
+    if (!owned.length) return c.json({ error: 'Email source not found for current user' }, 404);
+  }
+  if (!Number.isInteger(sourceId) || sourceId <= 0) {
+    const existing = await database.select({ id: schema.sources.id })
+      .from(schema.sources)
+      .where(and(
+        eq(schema.sources.userId, authUser.userId),
+        eq(schema.sources.sourceType, 'email'),
+        eq(schema.sources.collectorType, 'custom')
+      ))
+      .limit(1);
+    if (existing.length > 0) {
+      sourceId = existing[0].id;
+    } else {
+      const created = await database.insert(schema.sources).values({
+        userId: authUser.userId,
+        name: 'Email Inbox',
+        sourceType: 'email',
+        collectorType: 'custom',
+        sourceKind: 'email',
+        sourceRole: 'inbox',
+        sourceTier: 'B',
+        authorityWeight: 0.9,
+        processingProfile: 'smart',
+        trustScore: 65,
+        noiseScore: 35,
+        growthAxes: ['认知升级'],
+        config: {
+          inboxKind: 'email',
+          privacy: 'manual_ingest',
+          sourceLabel: typeof body.sourceLabel === 'string' ? body.sourceLabel : undefined,
+        },
+        category: '邮箱',
+        tags: ['email', 'manual-ingest'],
+        priority: 3,
+        fetchInterval: 1440,
+        autoFetchEnabled: false,
+        lastOutcome: 'manual_ingest_ready',
+      }).returning({ id: schema.sources.id });
+      sourceId = created[0].id;
+    }
+  }
+
+  let inserted = 0;
+  let duplicates = rawItems.length - items.length;
+  let failed = 0;
+  for (const item of items) {
+    try {
+      const contentLength = item.content.trim().length;
+      const contentStatus = contentLength >= 180 ? 'ready' : contentLength >= 24 ? 'degraded' : 'missing';
+      const result = await database.insert(schema.items).values({
+        sourceId,
+        userId: authUser.userId,
+        sourceType: 'email',
+        sourceTier: 'B',
+        processingProfile: 'smart',
+        growthAxes: ['认知升级'],
+        guid: item.guid,
+        title: item.title,
+        url: item.url,
+        author: item.author,
+        content: item.content,
+        snippet: item.snippet,
+        publishedAt: item.publishedAt || new Date(),
+        processingStatus: 'raw',
+        contentStatus,
+        contentError: contentStatus === 'missing' ? '邮件正文为空或过短' : undefined,
+        fetchEngine: 'email-ingest',
+        renderMode: 'manual',
+        summaryStatus: 'pending',
+        translationStatus: 'pending',
+      }).onConflictDoNothing().returning({ id: schema.items.id });
+      if (result.length > 0) inserted++;
+      else duplicates++;
+    } catch {
+      // ON CONFLICT handles duplicates. Other database failures must remain visible.
+      failed++;
+    }
+  }
+
+  const redactedItems = items.map(redactEmailIngestLog);
+  ingestLogger.info({ ingested: inserted, duplicates, failed, total: rawItems.length, items: redactedItems }, 'Email content ingested');
+  return c.json({
+    ...(failed ? { error: 'Some emails could not be saved; retry the import.' } : {}),
+    message: failed ? 'Email import incomplete' : 'Email ingested',
+    sourceId,
+    ingested: inserted,
+    duplicates,
+    failed,
+    total: rawItems.length,
+    items: items.map(emailIngestReceipt),
+  }, failed ? 503 : 200);
+ };
+}
+app.post('/email-ingest', createEmailIngestHandler());
 
 // POST /api/hooks/audio-callback — audio-service 回调更新 Feed 条目
 app.post('/audio-callback', async (c) => {
@@ -86,6 +239,7 @@ app.post('/audio-callback', async (c) => {
     return c.json({ error: 'Item not found' }, 404);
   }
 
+  if (patch.transcript) observeJev('transcript', itemId);
   logger.info({ taskId, itemId, audioStatus }, 'Audio callback applied');
   return c.json({ message: 'Audio callback applied', taskId, itemId, audioStatus });
 });
@@ -139,7 +293,7 @@ app.post('/ingest', async (c) => {
     if (!sourceId) continue;
 
     try {
-      await db.insert(schema.items).values({
+      const insertedCapture = await db.insert(schema.items).values({
         sourceId,
         userId: authUser.userId,
         sourceType: item.sourceType,
@@ -151,7 +305,8 @@ app.post('/ingest', async (c) => {
         snippet: item.snippet,
         publishedAt: item.publishedAt || new Date(),
         processingStatus: 'raw',
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning({ id: schema.items.id });
+      if (insertedCapture[0]) observeJev('capture', insertedCapture[0].id);
       ingested++;
     } catch (err) {
       // skip duplicates

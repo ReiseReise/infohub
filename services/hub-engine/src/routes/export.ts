@@ -1,7 +1,11 @@
 import { Hono } from 'hono';
+import { and, desc, eq } from 'drizzle-orm';
+import { db, schema } from '../db/index.js';
 import { exportToKnowledgeFiles, exportManifest } from '../outputs/knowledge.js';
 import { exportToObsidian } from '../outputs/obsidian.js';
 import { requireAuth } from '../lib/auth.js';
+import { buildDailyInsightType } from '../outputs/daily-report.js';
+import { resolveSavedDailyReportMarkdownExport } from '../lib/saved-daily-report.js';
 
 const app = new Hono();
 
@@ -32,9 +36,34 @@ app.post('/knowledge', async (c) => {
 app.post('/markdown', async (c) => {
   const authUser = requireAuth(c);
   try {
-    const { generateDailyReport } = await import('../outputs/daily-report.js');
-    const report = await generateDailyReport(authUser.userId);
-    return c.text(report.markdown, 200, { 'Content-Type': 'text/markdown; charset=utf-8' });
+    const rows = await db
+      .select({
+        payload: schema.insights.payload,
+        summary: schema.insights.summary,
+      })
+      .from(schema.insights)
+      .where(and(
+        eq(schema.insights.userId, authUser.userId),
+        eq(schema.insights.type, buildDailyInsightType(null)),
+      ))
+      .orderBy(
+        desc(schema.insights.date),
+        desc(schema.insights.generatedAt),
+        desc(schema.insights.id),
+      )
+      .limit(1);
+    const result = resolveSavedDailyReportMarkdownExport(rows[0] || null);
+    if (result.status === 'missing') {
+      return c.json({ error: result.error }, result.httpStatus);
+    }
+    if (result.status === 'degraded') {
+      return c.json({
+        error: result.error,
+        qualityStatus: result.status,
+        qualityReasons: result.qualityReasons,
+      }, result.httpStatus);
+    }
+    return c.text(result.markdown, result.httpStatus, { 'Content-Type': 'text/markdown; charset=utf-8' });
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500);
   }

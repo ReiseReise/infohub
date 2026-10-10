@@ -1,0 +1,111 @@
+{
+  "projectId": "6a900814e4b0af516656f3af",
+  "authority": "36-信息中枢V3可信可用收口任务跟踪.md",
+  "tasks": [
+    {
+      "id": "6aa76e76e4b019cf133686c6",
+      "title": "信息中枢整体升级：可信日报与专题研究",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜ROOT"
+    },
+    {
+      "id": "6aa76e9ae4b019cf13368a3f",
+      "title": "P00｜保存现场与可恢复基线",
+      "parentId": "6aa76e76e4b019cf133686c6",
+      "syncKey": "I10｜可信研究｜P00"
+    },
+    {
+      "id": "6aa76e9ae4b019cf13368a40",
+      "title": "P01｜固定评测集与比较记录",
+      "parentId": "6aa76e76e4b019cf133686c6",
+      "syncKey": "I10｜可信研究｜P01"
+    },
+    {
+      "id": "6aa76e9be4b064a6e8f17b52",
+      "title": "P02｜增量证据与稿件数据模型",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P02",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900821e4b027e851ea1a1f"
+    },
+    {
+      "id": "6aa76e9be4b06381a630611f",
+      "title": "P03｜阶段任务、幂等与恢复",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P03",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    },
+    {
+      "id": "6aa76e9be4b064a6e8f17b53",
+      "title": "P04｜Pi、DeepSeek与费用控制",
+      "parentId": "6aa76e76e4b019cf133686c6",
+      "syncKey": "I10｜可信研究｜P04"
+    },
+    {
+      "id": "6aa76e9be4b019cf13368a41",
+      "title": "P05｜受控联网与业务工具",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P05",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    },
+    {
+      "id": "6aa76e9be4b05134f0b90cdb",
+      "title": "P06｜单事件研究、核对与修订",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P06",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    },
+    {
+      "id": "6aa76e9be4b019cf13368a48",
+      "title": "P07｜替换日报生成及局部重跑",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P07",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    },
+    {
+      "id": "6aa76e9be4b064a6e8f17b61",
+      "title": "P08｜专题研究与编辑页面",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P08",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    },
+    {
+      "id": "6aa76e9be4b064a6e8f17b62",
+      "title": "P09｜工程与浏览器验收",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P09",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    },
+    {
+      "id": "6aa76e9be4b06381a6306124",
+      "title": "P10｜同模型盲选与内容验收",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P10",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    },
+    {
+      "id": "6aa76e9be4b064a6e8f17b65",
+      "title": "P11｜连续三个自然日真实使用",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P11",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    },
+    {
+      "id": "6aa76e9be4b05134f0b90cdf",
+      "title": "P12｜默认切换、回退验证与交付",
+      "parentId": null,
+      "syncKey": "I10｜可信研究｜P12",
+      "logicalParentId": "6aa76e76e4b019cf133686c6",
+      "columnId": "6a900824e4b0f3894703e53b"
+    }
+  ],
+  "boardNote": "等待阶段使用独立卡片；保留logicalParentId和依赖。P00—P03已完成，进行中为ROOT/P04，等待P05—P12。不得自动恢复等待卡片的远端嵌套。"
+}

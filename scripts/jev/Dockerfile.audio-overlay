@@ -1,0 +1,7 @@
+# Deployment fallback when the base OS mirror is unavailable.
+# BASE_IMAGE must be the locally preserved, already running image for this service.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY app/tasks/audio_pipeline.py /app/app/tasks/audio_pipeline.py
+COPY app/services/jev_shadow.py /app/app/services/jev_shadow.py
+RUN python -m py_compile /app/app/tasks/audio_pipeline.py /app/app/services/jev_shadow.py

@@ -3,7 +3,7 @@ title: 多剪藏入口 Capture Inbox 接入
 type: implementation
 status: active
 version: 0.1
-owner: AIReie
+owner: AIReise
 created: 2026-05-19
 updated: 2026-05-19
 tags: [capture, obsidian, zotero, organic-notes, knowledge]

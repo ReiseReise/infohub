@@ -106,18 +106,13 @@ export async function runRetention(options?: { retentionDays?: number; dryRun?: 
   }
 
   if (!dryRun) {
-    await db.execute(sql`
-      delete from hub.items
-      where created_at < ${cutoffIso}::timestamptz
-        and coalesce(is_favorite, false) = false
-        and coalesce(is_later, false) = false
-    `);
-    await db.execute(sql`delete from hub.insights where generated_at < ${cutoffIso}::date`);
+    // Trusted research upgrade: original material and historical reports are retained.
+    // Cleanup candidates remain visible in the dry-run report; deletion requires a separate reviewed policy.
     await db.execute(sql`delete from hub.fetch_logs where started_at < ${cutoffIso}::timestamptz`);
     await db.execute(sql`delete from hub.ai_usage_logs where created_at < ${cutoffIso}::timestamptz`);
     summary.deleted = {
-      items: summary.items,
-      insights: summary.insights,
+      items: 0,
+      insights: 0,
       fetchLogs: summary.fetchLogs,
       aiUsageLogs: summary.aiUsageLogs,
       audioTasks: 0,

@@ -13,17 +13,26 @@ import type {
   AudioTask,
   AudioTaskListResponse,
   AudioTaskModelsResponse,
+  AudioTaskPlaybackUrl,
+  AudioTaskQaResponse,
   AudioTaskTemplate,
   AuthResponse,
   AuthUser,
   BatchSubscriptionResult,
   AiConfigMeta,
   DiscoveryCandidate,
+  DailyGenerationJob,
   DailyReportWorkflowConfig,
+  DailyCandidatesPayload,
+  DailyReportLatestPayload,
+  DailyReportSettings,
   DailyReportWorkflowPayload,
   DailyReportWorkflowPreview,
+  DailyWorkbenchPayload,
+  DibaoStatusPayload,
   ExportMutationResult,
   FallbackScoringRecoverySummary,
+  FetchJobStatus,
   FetchSettings,
   FetchQueueDiagnosticResponse,
   FetchStatusResponse,
@@ -37,10 +46,15 @@ import type {
   InsightRecord,
   ItemQualityCheckPayload,
   ItemsStats,
+  ItemTranslationJob,
   NetworkDiagnosticResponse,
   PreferenceProfileRecord,
   PreferenceProfileSummary,
   QualityPolicySnapshot,
+  ReadingAsset,
+  ReferenceIntegrationCatalogPayload,
+  ReferenceSourceCatalogPayload,
+  ReferenceSourcePreviewPayload,
   RetentionRunRecord,
   RetentionSummary,
   ScoringModelRemediationApplyResult,
@@ -72,6 +86,17 @@ type AiUsageEventsQuery = {
   search?: string;
   from?: string;
   to?: string;
+};
+
+type EmailIngestPayload = {
+  subject?: string;
+  from?: string;
+  date?: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  sourceLabel?: string;
+  messageId?: string;
+  items?: Array<Record<string, unknown>>;
 };
 
 function uploadAudioTaskWithProgress(
@@ -136,6 +161,8 @@ export const api = {
       request<{ data: SourceRecord[]; total: number }>(withQuery('/sources', params)),
     categories: () => request<{ data: Array<{ category: string }> }>('/sources/categories'),
     stats: () => request<SourceStats>('/sources/stats'),
+    health: (id: number) =>
+      request<{ data: SourceRecord['sourceHealth'] & { source: SourceRecord; stats: Record<string, number> } }>(`/sources/${id}/health`),
     create: (data: Partial<SourceRecord> & { config?: Record<string, unknown> }) =>
       request<{ data: SourceRecord }>('/sources', { method: 'POST', body: data }),
     update: (id: number, data: Partial<SourceRecord> & { config?: Record<string, unknown> }) =>
@@ -174,11 +201,72 @@ export const api = {
         method: 'POST',
         body: { items, categoryDefault },
       }),
+    referenceCatalog: (params?: {
+      q?: string;
+      provider?: string;
+      channel?: string;
+      recommended?: boolean;
+      importable?: boolean;
+      offset?: number;
+      limit?: number;
+    }) => request<{ data: ReferenceSourceCatalogPayload }>(withQuery('/subscriptions/reference-catalog', params)),
+    importReferenceCatalog: (keys: string[]) =>
+      request<BatchSubscriptionResult>('/subscriptions/reference-catalog/import', {
+        method: 'POST',
+        body: { keys },
+      }),
+  },
+
+  integrations: {
+    dibaoStatus: () =>
+      request<{ data: DibaoStatusPayload }>('/integrations/dibao/status'),
+    dibaoOpml: () =>
+      request<string>('/integrations/dibao/opml', { asText: true }),
+    referenceCatalog: () =>
+      request<{ data: ReferenceIntegrationCatalogPayload }>('/integrations/reference-sources/catalog'),
+    referencePreview: (key: string) =>
+      request<{ data: ReferenceSourcePreviewPayload }>(`/integrations/reference-sources/${encodeURIComponent(key)}/preview`, {
+        method: 'POST',
+      }),
+    referenceEnable: (key: string, status: 'shadow' | 'active' = 'shadow') =>
+      request<{ message: string; data: Record<string, unknown> }>(`/integrations/reference-sources/${encodeURIComponent(key)}/enable`, {
+        method: 'POST',
+        body: { status },
+      }),
+    referenceDisable: (key: string, status: 'paused' | 'removed' = 'paused') =>
+      request<{ message: string; data: Record<string, unknown> }>(`/integrations/reference-sources/${encodeURIComponent(key)}/disable`, {
+        method: 'POST',
+        body: { status },
+      }),
+  },
+
+  hooks: {
+    emailIngest: (data: EmailIngestPayload) =>
+      request<{ message: string; sourceId: number; ingested: number; duplicates: number; total: number; items: Array<Record<string, unknown>> }>(
+        '/hooks/email-ingest',
+        { method: 'POST', body: data },
+      ),
+    emailIngestEml: (files: File[], sourceLabel?: string) => {
+      const form = new FormData();
+      files.forEach((file) => form.append('file', file));
+      if (sourceLabel) form.append('sourceLabel', sourceLabel);
+      return request<{ message: string; sourceId: number; ingested: number; duplicates: number; total: number; items: Array<Record<string, unknown>> }>(
+        '/hooks/email-ingest',
+        { method: 'POST', body: form },
+      );
+    },
   },
 
   items: {
     list: (params?: Record<string, string>) =>
-      request<{ data: FeedItemRecord[]; total: number; hasMore: boolean; nextOffset: number | null }>(
+      request<{
+        data: FeedItemRecord[];
+        total: number;
+        hasMore: boolean;
+        nextOffset: number | null;
+        collapsedEvents?: boolean;
+        eventCountOnPage?: number | null;
+      }>(
         withQuery('/items', params),
       ),
     get: (id: string) => request<{ data: FeedItemRecord }>(`/items/${id}`),
@@ -198,6 +286,28 @@ export const api = {
       ),
     enrich: (id: string) =>
       request<ItemEnrichResult>(`/items/${id}/enrich`, { method: 'POST' }),
+    translateFull: (id: string, data?: { async?: boolean }) =>
+      request<{
+        message: string;
+        stage?: 'content' | 'translation' | 'done' | string;
+        contentFetched?: boolean;
+        translated?: number;
+        skipped?: number;
+        errors?: string[];
+        errorReason?: string | null;
+        data?: FeedItemRecord | ItemTranslationJob | null;
+        jobId?: string;
+        pollUrl?: string;
+        enqueued?: boolean;
+        status?: string;
+      }>(
+        `/items/${id}/translate-full`,
+        { method: 'POST', body: data || {} },
+      ),
+    translationJob: (jobId: string) =>
+      request<{ data: ItemTranslationJob }>(`/items/translate-full/jobs/${encodeURIComponent(jobId)}`),
+    generateAsset: (id: string, data: { type: 'qa' | 'rewrite'; promptKey: string; force?: boolean }) =>
+      request<{ data: { asset: ReadingAsset; item?: FeedItemRecord } }>(`/items/${id}/assets`, { method: 'POST', body: data }),
     feedback: (id: string, data: { feedbackType: string; reasonTags?: string[]; note?: string; targetSkillId?: number | null }) =>
       request<{ message: string; data: ItemFeedbackRecord }>(`/items/${id}/feedback`, { method: 'POST', body: data }),
     scoreBreakdown: (id: string) =>
@@ -229,8 +339,9 @@ export const api = {
   fetch: {
     trigger: () => request<FetchTriggerResult>('/fetch/trigger', { method: 'POST' }),
     triggerDue: () => request<FetchTriggerResult>('/fetch/due', { method: 'POST' }),
-    triggerSource: (id: number, params?: { contentLimit?: number; aiLimit?: number; translationLimit?: number }) =>
+    triggerSource: (id: number, params?: { contentLimit?: number; aiLimit?: number; translationLimit?: number; mode?: 'sync' | 'async' | 'queue' }) =>
       request<FetchTriggerResult>(withQuery(`/fetch/source/${id}`, params), { method: 'POST' }),
+    job: (jobId: string) => request<FetchJobStatus>(`/fetch/jobs/${encodeURIComponent(jobId)}`),
     status: () => request<FetchStatusResponse>('/fetch/status'),
   },
 
@@ -249,6 +360,9 @@ export const api = {
     fetch: () => request<{ data: FetchSettings }>('/settings/fetch'),
     updateFetch: (data: Partial<FetchSettings>) =>
       request<{ data: FetchSettings }>('/settings/fetch', { method: 'PUT', body: data }),
+    daily: () => request<{ data: DailyReportSettings }>('/settings/daily'),
+    updateDaily: (data: Pick<DailyReportSettings, 'dailyReportEnabled'>) =>
+      request<{ data: DailyReportSettings }>('/settings/daily', { method: 'PUT', body: data }),
   },
 
   insights: {
@@ -266,6 +380,44 @@ export const api = {
     get: (date: string) => request<{ data: InsightRecord }>(`/insights/${date}`),
     generate: (opts?: { date?: string; topN?: number; minScore?: number; preset?: 'full' | 'decision' | 'research' | 'reading'; compareWindowDays?: number; generationMode?: 'fast' | 'full'; mode?: 'fast' | 'full' }) =>
       request<{ data?: InsightGeneratePayload }>(withQuery('/insights/generate', opts), { method: 'POST' }),
+  },
+
+  daily: {
+    workbench: (params?: { date?: string; sourceId?: string | number }) =>
+      request<{ data: DailyWorkbenchPayload }>(withQuery('/daily/workbench', params)),
+    workflow: () => request<{ data: DailyReportWorkflowPayload }>('/daily/workflow'),
+    updateWorkflow: (workflow: DailyReportWorkflowConfig) =>
+      request<{ data: { workflow: DailyReportWorkflowConfig } }>('/daily/workflow', { method: 'PUT', body: { workflow } }),
+    previewWorkflow: (workflow: DailyReportWorkflowConfig) =>
+      request<{ data: { workflow: DailyReportWorkflowConfig; preview: DailyReportWorkflowPreview } }>(
+        '/daily/workflow/preview',
+        { method: 'POST', body: { workflow } },
+      ),
+    candidates: (params?: {
+      date?: string;
+      status?: string;
+      reason?: string;
+      source?: string;
+      sourceId?: string | number;
+      category?: string;
+      sourceTier?: string;
+      translationStatus?: string;
+      q?: string;
+      minScore?: string | number;
+      maxScore?: string | number;
+    }) =>
+      request<{ data: DailyCandidatesPayload }>(withQuery('/daily/candidates', params)),
+    generate: (data?: { date?: string; sourceId?: number; mode?: 'fast' | 'full'; generationMode?: 'fast' | 'full'; preset?: 'full' | 'decision' | 'research' | 'reading'; async?: boolean }) =>
+      request<{ data?: InsightGeneratePayload | DailyGenerationJob; markdown?: string; message?: string; jobId?: string; pollUrl?: string; enqueued?: boolean; status?: string }>('/daily/generate', { method: 'POST', body: data || {} }),
+    generationJob: (jobId: string) =>
+      request<{ data: DailyGenerationJob }>(`/daily/generate/jobs/${encodeURIComponent(jobId)}`),
+    rerunAgent: (scene: string, data?: { date?: string; sourceId?: number }) =>
+      request<{ data?: InsightGeneratePayload; markdown?: string; message?: string }>(
+        `/daily/agents/${encodeURIComponent(scene)}/rerun`,
+        { method: 'POST', body: data || {} },
+      ),
+    latestReport: (params?: { date?: string; sourceId?: string | number }) =>
+      request<{ data: DailyReportLatestPayload }>(withQuery('/daily/reports/latest', params)),
   },
 
   export: {
@@ -355,8 +507,11 @@ export const api = {
     listTasks: (params?: { page?: number; page_size?: number; status?: string; tag?: string }) =>
       request<AudioTaskListResponse>(withQuery('/audio/tasks', params)),
     getTask: (taskId: string) => request<AudioTask>(`/audio/tasks/${taskId}`),
+    getTaskAudioUrl: (taskId: string) => request<AudioTaskPlaybackUrl>(`/audio/tasks/${taskId}/audio-url`),
+    askTask: (taskId: string, data: { question: string; prompt_key?: string }) =>
+      request<AudioTaskQaResponse>(`/audio/tasks/${taskId}/qa`, { method: 'POST', body: data }),
     deleteTask: (taskId: string) => request<void>(`/audio/tasks/${taskId}`, { method: 'DELETE' }),
-    reprocessTask: (taskId: string, params?: { prompt_template_id?: string; llm_model?: string }) =>
+    reprocessTask: (taskId: string, params?: { prompt_template_id?: string; llm_model?: string; stage?: 'auto' | 'full' | 'summary' }) =>
       request<AudioTask>(withQuery(`/audio/tasks/${taskId}/reprocess`, params), { method: 'POST' }),
     getTaskTemplates: () => request<AudioTaskTemplate[]>('/audio/tasks/config/templates'),
     getTaskModels: () => request<AudioTaskModelsResponse>('/audio/tasks/config/models'),

@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "updatedAt": "2026-08-10",
+  "description": "外部参考来源的人工选择账本。未列出的候选均视为 undecided；本文件不由运行数据库导出覆盖。",
+  "policy": {
+    "defaultDecision": "undecided",
+    "formalAdoptionRequiresUserConfirmation": true,
+    "shadowIsNotFormalSubscription": true,
+    "formalSourcesMustAlsoEnterRawSources": true
+  },
+  "decisions": [
+    {
+      "catalogKey": "aihot:channel:selected",
+      "name": "AI HOT 精选雷达",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-07-20",
+      "reason": "首批质量观察；等待 7 天门禁与 Reise 人工决定。"
+    },
+    {
+      "catalogKey": "follow_builders:blog:anthropic-engineering",
+      "name": "Anthropic Engineering",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-07-20",
+      "reason": "首批质量观察；等待 7 天门禁与 Reise 人工决定。"
+    },
+    {
+      "catalogKey": "follow_builders:blog:claude-blog",
+      "name": "Claude Blog",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-07-20",
+      "reason": "首批质量观察；等待 7 天门禁与 Reise 人工决定。"
+    },
+    {
+      "catalogKey": "follow_builders:podcast:no-priors",
+      "name": "No Priors",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-07-20",
+      "reason": "首批质量观察；等待 7 天门禁与 Reise 人工决定。"
+    },
+    {
+      "catalogKey": "follow_builders:podcast:training-data",
+      "name": "Training Data",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-07-20",
+      "reason": "首批质量观察；等待 7 天门禁与 Reise 人工决定。"
+    },
+    {
+      "catalogKey": "origin12:ai-news",
+      "name": "AI News 雷达",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-08-10",
+      "reason": "源头信息员首批影子观察；只作发现材料，等待 7 天组件与来源质量门禁。"
+    },
+    {
+      "catalogKey": "origin12:the-batch",
+      "name": "The Batch 周报",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-08-10",
+      "reason": "源头信息员首批影子观察；保留原链但不冒充一手证据，等待 7 天门禁。"
+    },
+    {
+      "catalogKey": "origin12:research-radar",
+      "name": "论文雷达",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-08-10",
+      "reason": "源头信息员首批影子观察；三站组件必须分别通过 7 天质量门禁。"
+    },
+    {
+      "catalogKey": "origin12:model-reality",
+      "name": "模型现实监测",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-08-10",
+      "reason": "源头信息员首批影子观察；首次仅建基线，之后只报告达到阈值的显著变化。"
+    },
+    {
+      "catalogKey": "origin12:semianalysis",
+      "name": "SemiAnalysis",
+      "decision": "observing",
+      "runtimeStatus": "shadow",
+      "formalSubscription": false,
+      "startedAt": "2026-08-10",
+      "reason": "源头信息员首批影子观察；仅公开标题、链接和摘要，不绕过付费墙。"
+    }
+  ]
+}

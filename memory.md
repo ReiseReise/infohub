@@ -9,6 +9,24 @@ tags: [memory, integration, folo]
 
 # 项目记忆
 
+## 2026-05-22（公开前生产依赖加固）
+
+- 目标：在仓库改 Public 前，把 `services/hub-engine` 生产依赖门禁提升到 `npm audit --omit=dev` 零漏洞。
+- 执行方式：
+  - 当前坚果云项目目录 `.git` 对象库损坏，因此在 `/private/tmp/infohub-public-hardening` 重新 clone 远端 `codex/folo-rss-parity`，再创建 `codex/public-dependency-hardening`。
+  - 因 GitHub CLI token 仍 invalid，未代为合并原 PR 或创建 PR；已将新分支推送到 `ReiseReise/infohub`。
+- 本轮改造：
+  - `hub-engine` 升级 `drizzle-orm / fast-xml-parser / node-cron / hono / @hono/node-server / undici / bullmq` 到公开前 audit 安全版本。
+  - `parseOpml` 增加 DTD/entity 输入拒绝与解析异常兜底，避免 OPML 导入触发实体展开风险。
+  - cron 定时规格拆到无副作用模块，补轻量测试，不再为了检查 schedule 导入 Redis/BullMQ 运行链路。
+  - `npm test` 脚本显式设置 `NODE_ENV=test`，保证干净 clone 无 `.env` 时也能跑测试。
+- 验证结果：
+  - `services/hub-engine`: `npm audit --omit=dev` 通过，0 vulnerabilities。
+  - `services/hub-engine`: `npm test` 通过，48/48。
+  - `services/hub-engine`: `npm run build` 通过。
+  - 敏感路径跟踪检查无命中；私钥/GitHub/OpenAI/AWS 常见真实 token 模式扫描无命中。
+- 产出：`ReiseReise/infohub` 分支 `codex/public-dependency-hardening`，提交 `94227b5 chore: harden hub-engine dependencies`。
+
 ## 2026-05-22（公开化清理与推送前验收）
 
 - 目标：把当前 `codex/folo-rss-parity` 分支整理成可公开审查的 GitHub 分支，保留代码、产品文档和示例资产，但不公开本机运行数据、个人 OPML、Playwright 快照或真实密钥。

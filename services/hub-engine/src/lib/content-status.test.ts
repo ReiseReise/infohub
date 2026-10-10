@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyCollectedContentStatus, classifyContentBasisFromLengths, contentStatusMessage } from './content-status.js';
+import {
+  classifyCollectedContentStatus,
+  classifyCollectedReadabilityState,
+  classifyContentBasisFromLengths,
+  contentStatusMessage,
+} from './content-status.js';
 
 test('classifies short RSS excerpts as degraded instead of ready', () => {
   const status = classifyCollectedContentStatus({
@@ -34,4 +39,40 @@ test('classifies list content basis from stored text lengths without selecting f
   assert.equal(classifyContentBasisFromLengths({ contentLength: 58073, snippetLength: 120 }), 'content');
   assert.equal(classifyContentBasisFromLengths({ contentLength: 172, snippetLength: 80 }), 'snippet');
   assert.equal(classifyContentBasisFromLengths({ contentLength: 0, snippetLength: 8 }), 'title');
+});
+
+test('marks collected items as readability ready when readable markdown is present', () => {
+  const state = classifyCollectedReadabilityState({
+    readabilityContent: 'This article has real readable markdown paragraphs. '.repeat(10),
+    contentStatus: 'ready',
+  });
+
+  assert.deepEqual(state, {
+    readabilityStatus: 'ready',
+    readabilityReason: null,
+  });
+});
+
+test('does not mark short readable excerpts as readability ready', () => {
+  const state = classifyCollectedReadabilityState({
+    readabilityContent: 'Short readable excerpt from a feed item. '.repeat(3),
+    contentStatus: 'ready',
+  });
+
+  assert.deepEqual(state, {
+    readabilityStatus: 'missing',
+    readabilityReason: 'readability_not_available',
+  });
+});
+
+test('keeps readiness but explains when collected article lacks readability layer', () => {
+  const state = classifyCollectedReadabilityState({
+    readabilityContent: null,
+    contentStatus: 'ready',
+  });
+
+  assert.deepEqual(state, {
+    readabilityStatus: 'missing',
+    readabilityReason: 'readability_not_available',
+  });
 });

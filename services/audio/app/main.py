@@ -2,6 +2,7 @@
 
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -104,7 +105,8 @@ async def _seed_model_configs(db):
     """确保系统默认模型与当前 env 凭证保持同步。"""
     from sqlalchemy import select
     from app.models.model_config import ModelConfig, ModelType, TestStatus
-    from app.services.crypto_service import encrypt_api_key
+    from app.services.crypto_service import decrypt_api_key, encrypt_api_key
+    from app.services.model_config_sync import model_connection_settings_changed
 
     def _clean(value: str | None) -> str:
         return (value or "").strip()
@@ -161,24 +163,45 @@ async def _seed_model_configs(db):
             ModelConfig.model_type == model_type,
         ))
         model = result.scalar_one_or_none()
-        encrypted = encrypt_api_key(api_key) if api_key else None
-
         if model:
+            current_api_key = decrypt_api_key(model.api_key_encrypted) if model.api_key_encrypted else ""
+            should_sync_api_key = bool(api_key) and (force_sync_existing or not model.api_key_encrypted)
+            should_sync_base_url = base_url is not None and (force_sync_existing or not model.base_url)
+            next_api_key = api_key if should_sync_api_key else current_api_key
+            next_base_url = base_url if should_sync_base_url else model.base_url
+            next_extra_config = {
+                **(model.extra_config or {}),
+                **(extra_config or {}),
+            }
+            connection_changed = model_connection_settings_changed(
+                current_provider=model.provider,
+                current_model_name=model.model_name,
+                current_api_key=current_api_key,
+                current_base_url=model.base_url,
+                current_extra_config=model.extra_config,
+                next_provider=model.provider,
+                next_model_name=model.model_name,
+                next_api_key=next_api_key,
+                next_base_url=next_base_url,
+                next_extra_config=next_extra_config,
+            )
             if alias and not model.alias:
                 model.alias = alias
-            if encrypted and (force_sync_existing or not model.api_key_encrypted):
-                model.api_key_encrypted = encrypted
-            if base_url is not None and (force_sync_existing or not model.base_url):
-                model.base_url = base_url
+            if should_sync_api_key and current_api_key != next_api_key:
+                model.api_key_encrypted = encrypt_api_key(next_api_key)
+            if should_sync_base_url and model.base_url != next_base_url:
+                model.base_url = next_base_url
             if extra_config:
-                model.extra_config = {**(model.extra_config or {}), **extra_config}
+                model.extra_config = next_extra_config
             if api_key and (force_sync_existing or not model.is_active):
                 model.is_active = is_active
-            if force_sync_existing:
+            if connection_changed:
                 model.test_status = TestStatus.untested
-                model.test_message = "Synced from env at startup"
+                model.test_message = "Connection settings changed; verification required"
+                model.tested_at = datetime.now(timezone.utc)
             return
 
+        encrypted = encrypt_api_key(api_key) if api_key else None
         existing_default = await db.execute(select(ModelConfig).where(
             ModelConfig.model_type == model_type,
             ModelConfig.is_default == True,

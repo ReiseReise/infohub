@@ -12,6 +12,12 @@ import {
 } from '../lib/subscription-packages.js';
 import { deriveSourceProfile } from '../lib/growth.js';
 import { classifySourceKind, normalizeAuthorityWeight } from '../lib/aihot-governance.js';
+import {
+  buildReferenceSourcePayload,
+  enrichReferenceSourceCatalog,
+  filterReferenceSourceCatalog,
+  loadReferenceSourceCatalog,
+} from '../lib/reference-source-catalog.js';
 
 const app = new Hono();
 
@@ -74,7 +80,12 @@ function validatePayload(payload: SourcePayload): string | null {
   if (!payload.sourceType) return 'sourceType is required';
   if (!payload.collectorType) return 'collectorType is required';
 
-  if (payload.collectorType === 'rss' || payload.collectorType === 'changedetection' || payload.collectorType === 'webpage') {
+  if (
+    payload.collectorType === 'rss'
+    || payload.collectorType === 'changedetection'
+    || payload.collectorType === 'webpage'
+    || payload.collectorType === 'webpage_index'
+  ) {
     if (!payload.config.url) return 'config.url is required';
   }
   if (payload.collectorType === 'rsshub' && !payload.config.route) {
@@ -223,6 +234,161 @@ app.post('/packages/:slug/import', async (c) => {
     message: 'Subscription package imported',
     summary: {
       total: feeds.length,
+      created: created.length,
+      duplicates: duplicates.length,
+      failed: failed.length,
+    },
+    created,
+    duplicates,
+    failed,
+  });
+});
+
+function queryBoolean(value?: string): boolean | undefined {
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  return undefined;
+}
+
+function normalizedSourceName(value: string): string {
+  return value.normalize('NFKC').trim().toLocaleLowerCase('zh-CN');
+}
+
+// GET /api/subscriptions/reference-catalog
+app.get('/reference-catalog', async (c) => {
+  const authUser = requireAuth(c);
+  try {
+    const [catalog, existing] = await Promise.all([
+      loadReferenceSourceCatalog(),
+      getUserSources(authUser.userId),
+    ]);
+    const enriched = enrichReferenceSourceCatalog(catalog.sources, existing);
+    const filtered = filterReferenceSourceCatalog(enriched, {
+      q: c.req.query('q'),
+      provider: c.req.query('provider'),
+      channel: c.req.query('channel'),
+      recommended: queryBoolean(c.req.query('recommended')),
+      importable: queryBoolean(c.req.query('importable')),
+    });
+    const offset = Math.max(0, Number.parseInt(c.req.query('offset') || '0', 10) || 0);
+    const limit = Math.max(1, Math.min(Number.parseInt(c.req.query('limit') || '100', 10) || 100, 500));
+
+    return c.json({
+      data: {
+        version: catalog.version,
+        updatedAt: catalog.updatedAt,
+        description: catalog.description,
+        sourcePolicy: catalog.sourcePolicy,
+        stats: catalog.stats,
+        total: filtered.length,
+        offset,
+        limit,
+        providers: Array.from(new Set(catalog.sources.map((source) => source.provider))).sort(),
+        channels: Array.from(new Set(catalog.sources.map((source) => source.channel))).sort(),
+        items: filtered.slice(offset, offset + limit),
+      },
+    });
+  } catch (err) {
+    logger.error({ err, userId: authUser.userId }, 'Reference source catalog unavailable');
+    return c.json({ error: '参考源候选库暂时不可用，请稍后重试' }, 503);
+  }
+});
+
+// POST /api/subscriptions/reference-catalog/import
+app.post('/reference-catalog/import', async (c) => {
+  const authUser = requireAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const requestedKeys: string[] = Array.isArray(body.keys)
+    ? Array.from(new Set<string>(body.keys.map((key: unknown) => String(key || '').trim()).filter(Boolean)))
+    : [];
+
+  if (requestedKeys.length === 0) {
+    return c.json({ error: '请至少选择一个候选来源' }, 400);
+  }
+
+  let catalog;
+  try {
+    catalog = await loadReferenceSourceCatalog();
+  } catch (err) {
+    logger.error({ err, userId: authUser.userId }, 'Reference source catalog unavailable for import');
+    return c.json({ error: '参考源候选库暂时不可用，请稍后重试' }, 503);
+  }
+
+  if (requestedKeys.length > catalog.sourcePolicy.maxImportPerRequest) {
+    return c.json({ error: `单次最多选择 ${catalog.sourcePolicy.maxImportPerRequest} 个来源` }, 400);
+  }
+
+  const existing = await getUserSources(authUser.userId);
+  const existingFingerprintMap = new Map<string, (typeof existing)[number]>();
+  const existingNameMap = new Map<string, (typeof existing)[number]>();
+  for (const source of existing) {
+    const fingerprint = buildSourceFingerprint(source.collectorType, source.config);
+    if (fingerprint && !existingFingerprintMap.has(fingerprint)) existingFingerprintMap.set(fingerprint, source);
+    const sourceName = normalizedSourceName(source.name);
+    if (sourceName && !existingNameMap.has(sourceName)) existingNameMap.set(sourceName, source);
+  }
+
+  const catalogByKey = new Map(catalog.sources.map((source) => [source.key, source]));
+  const created: Array<{ index: number; key: string; data: unknown }> = [];
+  const duplicates: Array<{ index: number; key: string; data: unknown }> = [];
+  const failed: Array<{ index: number; key: string; error: string }> = [];
+
+  for (let index = 0; index < requestedKeys.length; index += 1) {
+    const key = requestedKeys[index];
+    const candidate = catalogByKey.get(key);
+    if (!candidate) {
+      failed.push({ index, key, error: '候选来源不存在或目录已更新' });
+      continue;
+    }
+
+    const duplicateByName = existingNameMap.get(normalizedSourceName(candidate.name));
+    if (duplicateByName) {
+      duplicates.push({ index, key, data: duplicateByName });
+      continue;
+    }
+
+    let payload: SourcePayload;
+    try {
+      payload = normalizePayload(buildReferenceSourcePayload(candidate), candidate.category);
+    } catch (err) {
+      failed.push({ index, key, error: err instanceof Error ? err.message : '该来源暂不能直接导入' });
+      continue;
+    }
+
+    const validationError = validatePayload(payload);
+    if (validationError) {
+      failed.push({ index, key, error: validationError });
+      continue;
+    }
+
+    const fingerprint = buildSourceFingerprint(payload.collectorType, payload.config);
+    if (fingerprint && existingFingerprintMap.has(fingerprint)) {
+      duplicates.push({ index, key, data: existingFingerprintMap.get(fingerprint) });
+      continue;
+    }
+
+    try {
+      const row = await createSource(authUser.userId, payload);
+      created.push({ index, key, data: row });
+      if (fingerprint) existingFingerprintMap.set(fingerprint, row);
+      existingNameMap.set(normalizedSourceName(row.name), row);
+    } catch (err) {
+      failed.push({ index, key, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  logger.info({
+    userId: authUser.userId,
+    requested: requestedKeys.length,
+    created: created.length,
+    duplicates: duplicates.length,
+    failed: failed.length,
+  }, 'Reference source candidates imported');
+
+  return c.json({
+    message: '候选来源处理完成',
+    summary: {
+      total: requestedKeys.length,
       created: created.length,
       duplicates: duplicates.length,
       failed: failed.length,

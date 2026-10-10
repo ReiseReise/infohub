@@ -7,7 +7,7 @@ ARCHIVE_DIR="$ROOT_DIR/docs/归档"
 
 STAGE_ID="${STAGE_ID:-}"
 TOPIC="${TOPIC:-}"
-OWNER="${OWNER:-AIReie}"
+OWNER="${OWNER:-AIReise}"
 
 usage() {
   cat <<'EOF'
@@ -17,7 +17,7 @@ usage() {
 参数:
   --stage   阶段标识（如 phase3 / stage-bc）
   --topic   迭代主题（用于文件名）
-  --owner   归档 owner（可选，默认 AIReie）
+  --owner   归档 owner（可选，默认 AIReise）
 EOF
 }
 
@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --owner)
-      OWNER="${2:-AIReie}"
+      OWNER="${2:-AIReise}"
       shift 2
       ;;
     -h|--help)

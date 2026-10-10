@@ -3,6 +3,11 @@ export interface RawItem {
   url: string;
   guid?: string;
   content?: string;
+  readabilityContent?: string | null;
+  originalUrl?: string | null;
+  curationUrl?: string | null;
+  curationSource?: string | null;
+  curationMeta?: Record<string, unknown> | null;
   author?: string;
   publishedAt?: Date;
   mediaUrl?: string;

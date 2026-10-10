@@ -19,6 +19,7 @@ BASE_URL="${HUB_ENGINE_URL:-http://localhost:3001}"
 TS="$(date +%s)"
 HELPER_DIR="$(cd "$(dirname "$0")/.." && pwd)/helpers"
 source "$HELPER_DIR/auth.sh"
+qa_auth_enable_autocleanup   # SEC-007: 退出时清理本次注册的 QA 账号
 
 CREATED_SOURCE_IDS=()
 FALLBACK_EMAIL="${ACCEPTANCE_USER_EMAIL:-acceptance.user@infohub.local}"

@@ -31,6 +31,11 @@ for arg in "$@"; do
   esac
 done
 
+if [ "$CONFIRM_RESTORE" = false ]; then
+  echo "恢复 config 或 data 模块都可能覆盖当前项目，请追加 --yes 再执行。" >&2
+  exit 1
+fi
+
 if [ -z "$BUNDLE_INPUT" ]; then
   echo "用法: bash scripts/portable/import-bundle.sh <bundle.tar.gz|bundle_dir> --yes" >&2
   exit 1
@@ -118,18 +123,13 @@ else
 fi
 
 if [ "$SKIP_DATA" = false ]; then
-  if [ "$CONFIRM_RESTORE" = false ]; then
-    echo "恢复 data 模块会覆盖当前数据库和 data/ 文件，请追加 --yes 再执行。" >&2
-    exit 1
-  fi
-
   echo "[2/2] 恢复 data 模块..."
   mkdir -p "$BACKUP_ROOT/data"
 
   docker compose -f "$ROOT_DIR/docker-compose.yml" stop \
     nginx hub-engine audio-service audio-worker audio-worker-asr changedetection ntfy rsshub >/dev/null 2>&1 || true
 
-  for dir_name in knowledge audio-uploads changedetection ntfy; do
+  for dir_name in knowledge audio-uploads changedetection ntfy dibao; do
     if [ -d "$ROOT_DIR/data/$dir_name" ]; then
       mv "$ROOT_DIR/data/$dir_name" "$BACKUP_ROOT/data/$dir_name"
     fi

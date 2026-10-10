@@ -1,3 +1,4 @@
+import { untrustedMaterial } from '../lib/untrusted-material.js';
 import { and, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { logger } from '../lib/logger.js';
@@ -6,6 +7,7 @@ import { getAiUsageEvents, logAiUsage } from '../lib/ai-usage.js';
 import { applyRulesAndPriority } from './priority.js';
 import { ensureItemContent, resolveItemText } from '../lib/item-enrichment.js';
 import { AI_TOKEN_BUDGETS } from '../lib/ai-token-budgets.js';
+import { applyAutomaticSourceAiBudget } from '../lib/source-ai-budget.js';
 import {
   aggregateSkillScores,
   buildDeterministicFallbackScore,
@@ -48,6 +50,8 @@ export type AiStageResult = {
 
 type LlmCallOptions = {
   maxTokens?: number;
+  responseFormat?: 'json_object';
+  thinking?: 'enabled' | 'disabled';
 };
 
 export function buildAiStageResult(processed: number, attempted: number, errors: string[], skipped = 0): AiStageResult {
@@ -66,6 +70,8 @@ async function callLLM(config: AiConfig, prompt: string, options: LlmCallOptions
     return completeWithModelConfig(config.modelConfigId, prompt, {
       temperature: config.temperature,
       maxTokens,
+      responseFormat: options.responseFormat,
+      thinking: options.thinking,
     });
   }
 
@@ -122,7 +128,7 @@ async function callLLM(config: AiConfig, prompt: string, options: LlmCallOptions
     };
   }
 
-  const resp = await fetch(`${baseUrl}/chat/completions`, {
+  const resp = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -133,6 +139,8 @@ async function callLLM(config: AiConfig, prompt: string, options: LlmCallOptions
       temperature: config.temperature,
       messages: [{ role: 'user', content: prompt }],
       max_tokens: maxTokens,
+      response_format: options.responseFormat ? { type: options.responseFormat } : undefined,
+      thinking: options.thinking ? { type: options.thinking } : undefined,
     }),
   });
 
@@ -173,6 +181,8 @@ type ScoreOptions = {
   itemId?: string;
   itemIds?: string[];
   bypassQualityGate?: boolean;
+  automatic?: boolean;
+  budgetExempt?: boolean;
 };
 
 export function shouldRequireQualityCheckedForScoring(activeScenes: Set<string>, options: ScoreOptions) {
@@ -217,18 +227,41 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
     conditions.push(isNotNull(schema.items.qualityCheckedAt));
   }
 
-  const rawItems = await db
+  const candidateItems = await db
     .select({
       id: schema.items.id,
+      sourceId: schema.items.sourceId,
       title: schema.items.title,
       snippet: schema.items.snippet,
       content: schema.items.content,
       contentStatus: schema.items.contentStatus,
+      sourceName: schema.sources.name,
+      sourceTier: schema.sources.sourceTier,
+      collectorType: schema.sources.collectorType,
+      sourceType: schema.sources.sourceType,
+      sourceKind: schema.sources.sourceKind,
+      category: schema.sources.category,
+      sourceStatus: schema.sources.status,
+      sourceAutoFetchEnabled: schema.sources.autoFetchEnabled,
+      sourceTags: schema.sources.tags,
+      sourceConfig: schema.sources.config,
     })
     .from(schema.items)
+    .leftJoin(schema.sources, eq(schema.items.sourceId, schema.sources.id))
     .where(and(...conditions))
     .orderBy(desc(schema.items.fetchedAt))
-    .limit(options.itemId ? 1 : limit);
+    .limit(options.itemId ? 1 : options.automatic ? Math.max(limit * 50, 500) : limit);
+
+  const rawItems = options.automatic
+    ? await applyAutomaticSourceAiBudget(
+      userId,
+      candidateItems.map((item) => ({
+        ...item,
+        budgetExempt: options.budgetExempt === true,
+      })),
+      limit,
+    )
+    : candidateItems.slice(0, limit);
 
   if (rawItems.length === 0) return buildAiStageResult(0, 0, []);
 
@@ -325,7 +358,7 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
             skill,
             profileSummary: preferenceProfile.profile?.profileSummary || null,
             title: effectiveItem.title,
-            content: source.text.slice(0, 6000),
+            content: untrustedMaterial(source.text.slice(0, 6000)),
           });
           try {
             const result = await callSkillLLM(config, skill, skillPrompt);
@@ -628,7 +661,7 @@ export async function scoreItemsDetailed(userId: string, limit = 10, options: Sc
       } else {
         prompt = config.promptTemplate
           .replace('{title}', effectiveItem.title)
-          .replace('{content}', source.text.slice(0, 4000));
+          .replace('{content}', untrustedMaterial(source.text.slice(0, 4000)));
 
         const result = await callLLM(config, prompt, { maxTokens: AI_TOKEN_BUDGETS.feedScoringLegacy });
         const scoreMatch = result.text.match(/(\d{1,3})/);

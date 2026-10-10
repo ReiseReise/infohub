@@ -12,7 +12,7 @@ services:
       - "${HOST_DATA_ROOT:-./data}/pg:/var/lib/postgresql/data"
       - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: infohub
       POSTGRES_USER: postgres
@@ -30,11 +30,13 @@ services:
     volumes:
       - "${HOST_DATA_ROOT:-./data}/redis:/data"
     ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes
+      - "127.0.0.1:6379:6379"
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD required}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD required}
     restart: always
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -44,11 +46,11 @@ services:
     image: diygod/rsshub:latest
     container_name: infohub-rsshub
     ports:
-      - "1200:1200"
+      - "127.0.0.1:1200:1200"
     environment:
       NODE_ENV: production
       CACHE_TYPE: redis
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       REQUEST_TIMEOUT: "30000"
       BILIBILI_COOKIE: ${BILIBILI_COOKIE:-}
       TWITTER_AUTH_TOKEN: ${TWITTER_AUTH_TOKEN:-}
@@ -68,7 +70,7 @@ services:
     volumes:
       - "${HOST_DATA_ROOT:-./data}/changedetection:/datastore"
     ports:
-      - "5555:5000"
+      - "127.0.0.1:5555:5000"
     environment:
       BASE_URL: "http://localhost:5555"
       FETCH_WORKERS: "4"
@@ -89,7 +91,7 @@ services:
     volumes:
       - "${HOST_DATA_ROOT:-./data}/ntfy:/var/lib/ntfy"
     ports:
-      - "8081:80"
+      - "127.0.0.1:8081:80"
     environment:
       NTFY_BASE_URL: "http://localhost:8081"
     restart: always
@@ -103,7 +105,10 @@ services:
     build:
       context: ./services/scrapling
     container_name: infohub-scrapling
-    ports: ["8010:8010"]
+    ports: ["127.0.0.1:8010:8010"]
+    environment:
+      # SEC-005: 内部调用鉴权，与 hub-engine 共用同一把内部密钥
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY required}
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health')\" || exit 1"]
@@ -116,14 +121,22 @@ services:
     build:
       context: ./services/hub-engine
     container_name: infohub-engine
-    ports: ["3001:3001"]
+    stop_grace_period: 15m
+    ports: ["127.0.0.1:3001:3001"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       scrapling-service: { condition: service_started }
     environment:
+      TZ: Asia/Shanghai
       DATABASE_URL: postgres://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://localhost:5173}
+      TRUSTED_RESEARCH_ENABLED: ${TRUSTED_RESEARCH_ENABLED:-false}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
+      BRAVE_SEARCH_COST_MICROS: ${BRAVE_SEARCH_COST_MICROS:-}
       RSSHUB_BASE_URL: http://rsshub:1200
       CHANGEDETECTION_URL: http://changedetection:5000
       CHANGEDETECTION_API_KEY: ${CHANGEDETECTION_API_KEY:-}
@@ -131,6 +144,13 @@ services:
       NTFY_TOPIC: ${NTFY_TOPIC:-infohub}
       FEISHU_WEBHOOK_URL: ${FEISHU_WEBHOOK_URL:-}
       JWT_SECRET: ${JWT_SECRET}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      JEV_ENABLED: ${JEV_ENABLED:-false}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      AI_PROCESSING_ENABLED: ${AI_PROCESSING_ENABLED:-false}
+      AI_SCORING_ENABLED: ${AI_SCORING_ENABLED:-false}
+      AI_SUMMARY_ENABLED: ${AI_SUMMARY_ENABLED:-false}
+      AI_TRANSLATION_ENABLED: ${AI_TRANSLATION_ENABLED:-false}
       AUDIO_SERVICE_URL: ${AUDIO_SERVICE_URL:-http://audio-service:8000}
       HUB_ENGINE_INTERNAL_URL: ${HUB_ENGINE_INTERNAL_URL:-http://hub-engine:3001}
       AUDIO_WEBHOOK_SECRET: ${AUDIO_WEBHOOK_SECRET}
@@ -140,6 +160,9 @@ services:
       SCRAPLING_TIMEOUT_MS: ${SCRAPLING_TIMEOUT_MS:-20000}
       INFOHUB_FOLLOW_OPML_PATH: /app/fixtures/follow.opml
       INFOHUB_HN_POPULAR_BLOGS_PATH: /app/fixtures/hn-popular-blogs-2025.opml
+      INFOHUB_REFERENCE_SOURCE_CATALOG_PATH: /app/fixtures/reference-source-catalog.json
+      INFOHUB_REFERENCE_SOURCES_ENABLED: ${INFOHUB_REFERENCE_SOURCES_ENABLED:-true}
+      INFOHUB_EVENT_COLLAPSE_ENABLED: ${INFOHUB_EVENT_COLLAPSE_ENABLED:-true}
       KNOWLEDGE_DIR: ${KNOWLEDGE_DIR:-/app/knowledge}
       HOST_DATA_ROOT: ${HOST_DATA_ROOT:-./data}
       HOST_EXPORT_ROOT: ${HOST_EXPORT_ROOT:-./exports}
@@ -153,12 +176,15 @@ services:
       BACKUP_LOCAL_RETENTION: ${BACKUP_LOCAL_RETENTION:-7}
       BACKUP_OSS_RETENTION: ${BACKUP_OSS_RETENTION:-30}
       AUDIO_STORAGE_BACKEND: ${AUDIO_STORAGE_BACKEND:-local}
+      DIBAO_BASE_URL: ${DIBAO_BASE_URL:-http://dibao-reader:8080}
+      DIBAO_PUBLIC_URL: ${DIBAO_PUBLIC_URL:-http://localhost:8082}
     volumes:
       - "${HOST_DATA_ROOT:-./data}/knowledge:/app/knowledge"
       - "${HOST_BACKUP_ROOT:-./backups}:/app/backups"
       - "${HOST_EXPORT_ROOT:-./exports}:/app/exports"
       - ./follow.opml:/app/fixtures/follow.opml:ro
       - ./hn-popular-blogs-2025.opml:/app/fixtures/hn-popular-blogs-2025.opml:ro
+      - ./docs/source-registry/reference-source-catalog.json:/app/fixtures/reference-source-catalog.json:ro
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
@@ -166,18 +192,36 @@ services:
       timeout: 10s
       retries: 3
 
+  dibao-reader:
+    image: ghcr.io/pls-1q43/dibao:latest
+    container_name: infohub-dibao-reader
+    ports: ["127.0.0.1:8082:8080"]
+    environment:
+      DIBAO_HOST: 0.0.0.0
+      DIBAO_PORT: "8080"
+      DIBAO_DATABASE_PATH: /data/dibao.sqlite
+      DIBAO_COOKIE_SECURE: "false"
+    volumes:
+      - "${HOST_DATA_ROOT:-./data}/dibao:/data"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/api/system/health').then((resp) => { if (!resp.ok) process.exit(1); }).catch(() => process.exit(1))\""]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+
   audio-service:
     build:
       context: ./services/audio
     container_name: infohub-audio
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
       DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       SECRET_KEY: ${JWT_SECRET}
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
       STORAGE_BACKEND: ${AUDIO_STORAGE_BACKEND:-local}
       LOCAL_STORAGE_PATH: /app/uploads
       OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
@@ -196,6 +240,7 @@ services:
       TINGWU_ACCESS_KEY_SECRET: ${TINGWU_ACCESS_KEY_SECRET:-}
       TINGWU_REGION: ${TINGWU_REGION:-cn-beijing}
       TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
+      JEV_ENABLED: ${JEV_ENABLED:-false}
       INTERNAL_ARTICLE_URL: http://hub-engine:3001
       CORS_ORIGINS: http://localhost:5173,http://localhost
       ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:?Set AUDIO_ADMIN_EMAIL in .env}
@@ -226,10 +271,10 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
       DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       SECRET_KEY: ${JWT_SECRET}
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
       STORAGE_BACKEND: ${AUDIO_STORAGE_BACKEND:-local}
       LOCAL_STORAGE_PATH: /app/uploads
       OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
@@ -248,6 +293,7 @@ services:
       TINGWU_ACCESS_KEY_SECRET: ${TINGWU_ACCESS_KEY_SECRET:-}
       TINGWU_REGION: ${TINGWU_REGION:-cn-beijing}
       TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
+      JEV_ENABLED: ${JEV_ENABLED:-false}
       INTERNAL_ARTICLE_URL: http://hub-engine:3001
       CORS_ORIGINS: http://localhost:5173,http://localhost
       ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:?Set AUDIO_ADMIN_EMAIL in .env}
@@ -273,10 +319,10 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
       DATABASE_URL_SYNC: postgresql://postgres:${PG_PASSWORD:?Set PG_PASSWORD in .env}@postgres:5432/infohub
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       SECRET_KEY: ${JWT_SECRET}
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
       STORAGE_BACKEND: ${AUDIO_STORAGE_BACKEND:-local}
       LOCAL_STORAGE_PATH: /app/uploads
       OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
@@ -295,6 +341,7 @@ services:
       TINGWU_ACCESS_KEY_SECRET: ${TINGWU_ACCESS_KEY_SECRET:-}
       TINGWU_REGION: ${TINGWU_REGION:-cn-beijing}
       TINGWU_APP_KEY: ${TINGWU_APP_KEY:-}
+      JEV_ENABLED: ${JEV_ENABLED:-false}
       INTERNAL_ARTICLE_URL: http://hub-engine:3001
       CORS_ORIGINS: http://localhost:5173,http://localhost
       ADMIN_EMAIL: ${AUDIO_ADMIN_EMAIL:?Set AUDIO_ADMIN_EMAIL in .env}
@@ -319,10 +366,11 @@ services:
       context: .
       dockerfile: ./nginx/Dockerfile
     container_name: infohub-nginx
-    ports: ["80:80"]
+    ports: ["${INFOHUB_BIND_ADDRESS:-127.0.0.1}:80:80"]
     depends_on:
       hub-engine: { condition: service_started }
       audio-service: { condition: service_started }
+      dibao-reader: { condition: service_started }
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health || exit 1"]

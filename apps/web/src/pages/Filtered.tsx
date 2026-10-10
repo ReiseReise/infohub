@@ -3,7 +3,7 @@ import { AlertTriangle, ArchiveRestore, ArrowLeft, ArrowRight, Filter, Loader2, 
 import { Link, useSearchParams } from 'react-router-dom';
 import { api, type FeedItemRecord, type ItemQualityCheckPayload } from '../lib/api';
 
-const TIER_OPTIONS = ['all', 'T1', 'T1.5', 'T2', 'S', 'A', 'B', 'C', 'D'] as const;
+const TIER_OPTIONS = ['all', 'S', 'A', 'B', 'C', 'D'] as const;
 const FILTERED_MOBILE_BATCH_SIZE = 18;
 
 function isCompactFilteredViewport() {
@@ -12,14 +12,11 @@ function isCompactFilteredViewport() {
 
 function tierLabel(tier?: string | null) {
   const labels: Record<string, string> = {
-    T1: 'T1 一手官方',
-    'T1.5': 'T1.5 官方社媒',
-    T2: 'T2 观察信源',
-    S: 'S 质量策略',
-    A: 'A 质量策略',
-    B: 'B 质量策略',
-    C: 'C 质量策略',
-    D: 'D 质量策略',
+    S: 'S级信号',
+    A: 'A级分析',
+    B: 'B级资讯',
+    C: 'C级噪声观察',
+    D: 'D级哨兵',
   };
   return tier ? labels[tier] || tier : '未分级';
 }
@@ -178,7 +175,7 @@ export function Filtered() {
     if (tagFilter !== nextTag) setTagFilter(nextTag);
     if (selectedId !== nextItem) setSelectedId(nextItem);
     if (sourceIdFilter !== nextSourceId) setSourceIdFilter(nextSourceId);
-  }, [searchParams]);
+  }, [search, searchParams, selectedId, sourceIdFilter, tagFilter, tierFilter]);
 
   useEffect(() => {
     const next = new URLSearchParams(searchParams);
@@ -256,34 +253,34 @@ export function Filtered() {
   };
 
   return (
-    <div className="min-h-full bg-[radial-gradient(circle_at_top_left,_rgba(15,118,110,0.08),_transparent_42%),linear-gradient(180deg,_#f5f5f4_0%,_#ffffff_48%,_#fafaf9_100%)] p-6">
-      <div className="mx-auto max-w-[1500px] space-y-6">
+    <div className="min-h-full bg-[radial-gradient(circle_at_top_left,_rgba(15,118,110,0.08),_transparent_42%),linear-gradient(180deg,_#f5f5f4_0%,_#ffffff_48%,_#fafaf9_100%)] p-3 sm:p-4 lg:p-5">
+      <div className="mx-auto max-w-[1760px] space-y-4">
         <section className="overflow-hidden rounded-[28px] border border-zinc-200 bg-white shadow-[0_32px_80px_-52px_rgba(15,23,42,0.42)]">
-          <div className="grid gap-6 px-6 py-6 lg:grid-cols-[1.6fr_1fr] lg:px-8">
+          <div className="grid gap-5 px-5 py-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(480px,1fr)] lg:items-center lg:px-6 xl:px-8">
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-teal-700">
                 <Filter size={12} />
                 过滤池
               </div>
-              <h1 className="mt-4 max-w-3xl text-3xl font-semibold tracking-[-0.04em] text-zinc-950">把被挡掉的内容留在可复盘的地方，而不是消失在黑箱里。</h1>
+              <h1 className="mt-4 max-w-3xl text-2xl font-semibold tracking-[-0.04em] text-zinc-950 lg:text-3xl">把被挡掉的内容留在可复盘的地方，而不是消失在黑箱里。</h1>
               <p className="mt-3 max-w-2xl text-sm leading-7 text-zinc-600">
                 所有被 AI 质检或硬规则分流的条目都会正常入库，并在这里保留概要、过滤原因、命中标签与恢复入口。
               </p>
             </div>
-            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
-              <div className="rounded-[22px] border border-zinc-200 bg-zinc-50/90 p-4">
+            <div className="grid gap-2 sm:grid-cols-3">
+              <div className="rounded-[20px] border border-zinc-200 bg-zinc-50/90 p-3">
                 <div className="text-[10px] uppercase tracking-[0.24em] text-zinc-500">过滤池总量</div>
-                <div className="mt-2 text-3xl font-semibold text-zinc-950">{stats.total}</div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-950">{stats.total}</div>
                 <div className="mt-1 text-xs text-zinc-500">已加载 {stats.loaded} 条，等待查看或人工恢复</div>
               </div>
-              <div className="rounded-[22px] border border-rose-200 bg-rose-50/80 p-4">
+              <div className="rounded-[20px] border border-rose-200 bg-rose-50/80 p-3">
                 <div className="text-[10px] uppercase tracking-[0.24em] text-rose-700">高噪音层级</div>
-                <div className="mt-2 text-3xl font-semibold text-zinc-950">{stats.byTierHighRisk}</div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-950">{stats.byTierHighRisk}</div>
                 <div className="mt-1 text-xs text-zinc-500">来自 C / D 档的过滤条目</div>
               </div>
-              <div className="rounded-[22px] border border-amber-200 bg-amber-50/80 p-4">
+              <div className="rounded-[20px] border border-amber-200 bg-amber-50/80 p-3">
                 <div className="text-[10px] uppercase tracking-[0.24em] text-amber-700">已恢复</div>
-                <div className="mt-2 text-3xl font-semibold text-zinc-950">{stats.restored}</div>
+                <div className="mt-2 text-2xl font-semibold text-zinc-950">{stats.restored}</div>
                 <div className="mt-1 text-xs text-zinc-500">当前列表中曾被恢复的条目</div>
               </div>
             </div>
@@ -305,7 +302,7 @@ export function Filtered() {
           </div>
         )}
 
-        <section className="grid gap-5 xl:h-[calc(100vh-22rem)] xl:min-h-[620px] xl:grid-cols-[380px_minmax(0,1fr)]">
+        <section className="grid gap-4 xl:h-[calc(100dvh-18rem)] xl:min-h-[560px] xl:grid-cols-[minmax(320px,360px)_minmax(0,1fr)] 2xl:grid-cols-[380px_minmax(0,1fr)]">
           <div className="rounded-[28px] border border-zinc-200 bg-white p-4 shadow-[0_24px_64px_-52px_rgba(15,23,42,0.48)] xl:flex xl:min-h-0 xl:flex-col">
             <div className="flex items-center gap-2 rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3">
               <Search size={15} className="text-zinc-400" />
@@ -509,7 +506,7 @@ export function Filtered() {
                   </div>
                 </div>
 
-                <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+                <div className="grid gap-4 min-[1700px]:grid-cols-[minmax(0,1fr)_280px]">
                   <div className="rounded-[24px] border border-zinc-200 bg-zinc-50/80 p-5">
                     <div className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">概要</div>
                     <div className="mt-3 text-sm leading-7 text-zinc-700">
@@ -556,11 +553,11 @@ export function Filtered() {
                       )}
                     </div>
 
-                    <div className="rounded-[24px] border border-zinc-200 bg-white p-5">
-                      <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
+                    <details className="rounded-[24px] border border-zinc-200 bg-white p-5">
+                      <summary className="flex cursor-pointer list-none items-center gap-2 text-[10px] uppercase tracking-[0.22em] text-zinc-500">
                         <AlertTriangle size={13} />
                         审计痕迹
-                      </div>
+                      </summary>
                       <div className="mt-3 space-y-3 text-xs leading-6 text-zinc-600">
                         <div>过滤桶：{qualityDetail?.filterBucket || selectedItem.filterBucket || 'filtered'}</div>
                         <div>已质检：{formatDateLabel(qualityDetail?.qualityCheckedAt || selectedItem.qualityCheckedAt)}</div>
@@ -573,7 +570,7 @@ export function Filtered() {
                           </div>
                         )}
                       </div>
-                    </div>
+                    </details>
                   </div>
                 </div>
 

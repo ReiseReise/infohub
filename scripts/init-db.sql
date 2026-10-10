@@ -44,8 +44,8 @@ CREATE TABLE hub.sources (
   id               SERIAL PRIMARY KEY,
   user_id          UUID NOT NULL REFERENCES auth.users(id),
   name             TEXT NOT NULL,
-  source_type      TEXT NOT NULL CHECK (source_type IN ('rss', 'podcast', 'audio', 'rsshub', 'webpage', 'newsletter', 'custom')),
-  collector_type   TEXT NOT NULL DEFAULT 'rss' CHECK (collector_type IN ('rss', 'rsshub', 'changedetection', 'newsletter', 'youtube', 'custom', 'webpage')),
+  source_type      TEXT NOT NULL CHECK (source_type IN ('rss', 'podcast', 'audio', 'rsshub', 'webpage', 'newsletter', 'custom', 'email', 'curated_index')),
+  collector_type   TEXT NOT NULL DEFAULT 'rss' CHECK (collector_type IN ('rss', 'rsshub', 'changedetection', 'newsletter', 'youtube', 'custom', 'webpage', 'webpage_index')),
   source_kind      TEXT NOT NULL DEFAULT 'rss',
   source_role      TEXT NOT NULL DEFAULT 'normal',
   source_tier      TEXT NOT NULL DEFAULT 'B',
@@ -103,6 +103,10 @@ CREATE TABLE hub.items (
   guid               TEXT,
   title              TEXT NOT NULL,
   url                TEXT NOT NULL,
+  original_url       TEXT,
+  curation_url       TEXT,
+  curation_source    TEXT,
+  curation_meta      JSONB DEFAULT '{}',
   author             TEXT,
   content            TEXT,
   snippet            TEXT,
@@ -124,6 +128,7 @@ CREATE TABLE hub.items (
   ai_summary         TEXT,
   ai_tags            JSONB DEFAULT '[]',
   ai_translation     TEXT,
+  translated_title   TEXT,
   priority_score     REAL CHECK (priority_score IS NULL OR (priority_score >= 0 AND priority_score <= 1)),
   cluster_id         TEXT,
 
@@ -191,12 +196,16 @@ CREATE INDEX idx_rules_scope ON hub.filter_rules (scope, enabled);
 CREATE TABLE IF NOT EXISTS hub.user_settings (
   user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   auto_fetch_enabled BOOLEAN NOT NULL DEFAULT true,
+  auto_summary_enabled BOOLEAN NOT NULL DEFAULT true,
+  auto_translation_enabled BOOLEAN NOT NULL DEFAULT true,
+  daily_report_enabled BOOLEAN NOT NULL DEFAULT false,
   daily_report_workflow JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_settings_auto_fetch ON hub.user_settings (auto_fetch_enabled);
+CREATE INDEX IF NOT EXISTS idx_user_settings_daily_report ON hub.user_settings (daily_report_enabled);
 
 -- AI 配置表
 CREATE TABLE hub.ai_configs (

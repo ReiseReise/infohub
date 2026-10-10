@@ -18,6 +18,7 @@ TS=$(date +%s)
 HUB_SRC="$(cd "$(dirname "$0")/../../services/hub-engine/src" && pwd)"
 HELPER_DIR="$(cd "$(dirname "$0")/.." && pwd)/helpers"
 source "$HELPER_DIR/auth.sh"
+qa_auth_enable_autocleanup   # SEC-007: 退出时清理本次注册的 QA 账号
 
 log "============================================"
 log "Phase 4 扩展采集器 + Webhook QA 测试开始"

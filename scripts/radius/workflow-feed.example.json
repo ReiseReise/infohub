@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "creator-id:episode-id",
+      "title": "示例：一段已转成文字的内容",
+      "url": "https://example.invalid/original/episode-id",
+      "author": "你选择关注的创作者",
+      "publishedAt": "2026-10-01T10:00:00+08:00",
+      "content": "这里放已经取得的原文或完整转写，保留说话人、段落和时间码。不要用摘要替代原文。示例本身不会导入系统。"
+    }
+  ]
+}

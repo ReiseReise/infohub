@@ -1,0 +1,2 @@
+import { JevPanel } from '../components/JevPanel';
+export default function Jev(){return <main className="mx-auto max-w-6xl space-y-4 p-4 sm:p-8"><h1 className="text-2xl font-semibold">Jev 判断工作台</h1><p className="text-sm text-zinc-600">检查判断、记录反馈，逐场景验证是否值得启用。</p><JevPanel management />{['enrichment','monitor','fetch','source','transcribe','transcript','capture','same_event','injection','daily'].map(scene=><JevPanel key={scene} scene={scene}/>)}</main>;}

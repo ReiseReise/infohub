@@ -7,9 +7,9 @@ from typing import Optional
 # === 模型配置 ===
 
 class ModelConfigCreate(BaseModel):
-    provider: str
+    provider: str = Field(..., min_length=1)
     alias: str | None = None
-    model_name: str
+    model_name: str = Field(..., min_length=1)
     model_type: str  # asr | llm | multimodal
     api_key: str | None = None
     base_url: str | None = None

@@ -4,8 +4,30 @@ import { db, schema } from '../db/index.js';
 export interface UserFetchSettings {
   userId: string;
   autoFetchEnabled: boolean;
+  autoSummaryEnabled: boolean;
+  autoTranslationEnabled: boolean;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export const DEFAULT_USER_FETCH_SETTINGS = {
+  autoFetchEnabled: true,
+  autoSummaryEnabled: true,
+  autoTranslationEnabled: true,
+} as const;
+
+export function normalizeUserFetchSettings(
+  userId: string,
+  row?: Partial<typeof schema.userSettings.$inferSelect> | null,
+): UserFetchSettings {
+  return {
+    userId,
+    autoFetchEnabled: row?.autoFetchEnabled ?? DEFAULT_USER_FETCH_SETTINGS.autoFetchEnabled,
+    autoSummaryEnabled: row?.autoSummaryEnabled ?? DEFAULT_USER_FETCH_SETTINGS.autoSummaryEnabled,
+    autoTranslationEnabled: row?.autoTranslationEnabled ?? DEFAULT_USER_FETCH_SETTINGS.autoTranslationEnabled,
+    createdAt: row?.createdAt,
+    updatedAt: row?.updatedAt,
+  };
 }
 
 export async function getUserFetchSettings(userId: string): Promise<UserFetchSettings> {
@@ -15,48 +37,34 @@ export async function getUserFetchSettings(userId: string): Promise<UserFetchSet
     .where(eq(schema.userSettings.userId, userId))
     .limit(1);
 
-  const row = rows[0];
-  if (!row) {
-    return {
-      userId,
-      autoFetchEnabled: true,
-    };
-  }
-
-  return {
-    userId: row.userId,
-    autoFetchEnabled: Boolean(row.autoFetchEnabled),
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
+  return normalizeUserFetchSettings(userId, rows[0]);
 }
 
 export async function upsertUserFetchSettings(
   userId: string,
-  patch: Partial<Pick<UserFetchSettings, 'autoFetchEnabled'>>,
+  patch: Partial<Pick<UserFetchSettings, 'autoFetchEnabled' | 'autoSummaryEnabled' | 'autoTranslationEnabled'>>,
 ): Promise<UserFetchSettings> {
-  const nextAutoFetchEnabled = patch.autoFetchEnabled ?? true;
+  const current = await getUserFetchSettings(userId);
+  const next = {
+    autoFetchEnabled: patch.autoFetchEnabled ?? current.autoFetchEnabled,
+    autoSummaryEnabled: patch.autoSummaryEnabled ?? current.autoSummaryEnabled,
+    autoTranslationEnabled: patch.autoTranslationEnabled ?? current.autoTranslationEnabled,
+  };
   const rows = await db
     .insert(schema.userSettings)
     .values({
       userId,
-      autoFetchEnabled: nextAutoFetchEnabled,
+      ...next,
       updatedAt: new Date(),
     })
     .onConflictDoUpdate({
       target: schema.userSettings.userId,
       set: {
-        autoFetchEnabled: nextAutoFetchEnabled,
+        ...next,
         updatedAt: new Date(),
       },
     })
     .returning();
 
-  const row = rows[0];
-  return {
-    userId: row.userId,
-    autoFetchEnabled: Boolean(row.autoFetchEnabled),
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
+  return normalizeUserFetchSettings(userId, rows[0]);
 }

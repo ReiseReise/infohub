@@ -1,11 +1,15 @@
 import { resolvePublishedDate } from '../lib/date-normalization.js';
 import { logger } from '../lib/logger.js';
 import type { Collector, CollectorResult, RawItem, SourceConfig } from './base.js';
+import { fetchCustomProvider } from './custom-providers.js';
 
 export class CustomCollector implements Collector {
   readonly type = 'custom';
 
   async fetch(source: SourceConfig): Promise<CollectorResult> {
+    const providerResult = await fetchCustomProvider(source);
+    if (providerResult) return providerResult;
+
     const endpoint = (source.config as { endpoint?: string }).endpoint;
     const method = (source.config as { method?: string }).method || 'GET';
     const headers = (source.config as { headers?: Record<string, string> }).headers || {};

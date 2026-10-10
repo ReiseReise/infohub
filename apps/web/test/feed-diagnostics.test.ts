@@ -136,6 +136,12 @@ test('explains original and translation empty states with concrete next actions'
   assert.equal(translation.title, '翻译按策略跳过');
   assert.equal(translation.reason, '原文已是中文，跳过翻译');
   assert.match(translation.action, /无需翻译/);
+
+  const pendingTranslation = getDetailEmptyState('translation', {
+    translationStatus: 'pending',
+  });
+  assert.equal(pendingTranslation.title, '译文待补全');
+  assert.match(pendingTranslation.action, /一键精译全文/);
 });
 
 test('summarizes stage reprocess results by outcome severity', () => {

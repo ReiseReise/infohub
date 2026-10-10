@@ -84,7 +84,7 @@ export function buildSourceFingerprint(
     ? (configInput as Record<string, unknown>)
     : {};
 
-  if (collectorType === 'rss' || collectorType === 'changedetection' || collectorType === 'webpage') {
+  if (collectorType === 'rss' || collectorType === 'changedetection' || collectorType === 'webpage' || collectorType === 'webpage_index') {
     const normalizedUrl = normalizeHttpUrl(String(config.url || ''));
     return normalizedUrl ? `${collectorType}:${normalizedUrl}` : null;
   }

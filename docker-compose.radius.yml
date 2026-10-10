@@ -1,0 +1,44 @@
+# Explicit deployment overlay. Secrets/runtime must resolve outside the synced project.
+# docker compose -f docker-compose.yml -f docker-compose.radius.yml up -d --build
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.54.0
+    restart: unless-stopped
+    ports: ["127.0.0.1:7700:7700"]
+    environment:
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_DB_PATH: /meili_data/data.ms
+    entrypoint: ["sh", "-c", "export MEILI_MASTER_KEY=\"$$(cat /run/secrets/radius-meili-key)\"; exec /bin/meilisearch"]
+    volumes:
+      - "${RADIUS_DATA_ROOT:?Set private local-data I10 runtime path}:/meili_data"
+    secrets: [radius-meili-key]
+  radius-indexer:
+    image: ${RADIUS_ENGINE_IMAGE:-infohub-radius-engine:20260929}
+    build: {context: ./services/hub-engine}
+    command: ["node", "dist/radius/worker.js"]
+    restart: unless-stopped
+    stop_grace_period: 4m
+    healthcheck: {disable: true}
+    depends_on: [postgres, meilisearch]
+    environment:
+      DATABASE_URL: postgres://postgres:${PG_PASSWORD:?Set PG_PASSWORD}@postgres:5432/infohub
+      MEILI_URL: http://meilisearch:7700
+      MEILI_KEY_FILE: /run/secrets/radius-meili-key
+      RADIUS_SYNC_ENABLED: "true"
+    secrets: [radius-meili-key]
+  hub-engine:
+    image: ${RADIUS_ENGINE_IMAGE:-infohub-radius-engine:20260929}
+    environment:
+      MEILI_URL: http://meilisearch:7700
+      MEILI_KEY_FILE: /run/secrets/radius-meili-key
+      RADIUS_READER_KEY_FILE: /run/secrets/radius-reader-key
+      RADIUS_READER_USER_ID: ${RADIUS_READER_USER_ID:?Set existing primary corpus owner}
+    secrets: [radius-meili-key, radius-reader-key]
+  nginx:
+    image: ${RADIUS_WEB_IMAGE:-infohub-radius-nginx:20260929}
+secrets:
+  radius-meili-key:
+    file: ${RADIUS_KEY_FILE:?Set key file outside project and synced folders}
+  radius-reader-key:
+    file: ${RADIUS_READER_KEY_FILE:?Set private read-only integration key file}

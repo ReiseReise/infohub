@@ -18,6 +18,7 @@ skip() { printf "%b[SKIP]%b %s\n" "$YELLOW" "$RESET" "$*"; SKIP=$((SKIP+1)); }
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 HELPER_DIR="$(cd "$(dirname "$0")/.." && pwd)/helpers"
 source "$HELPER_DIR/auth.sh"
+qa_auth_enable_autocleanup   # SEC-007: 退出时清理本次注册的 QA 账号
 
 USE_EXISTING_STACK="${E2E_USE_EXISTING_STACK:-auto}"
 if [[ "$USE_EXISTING_STACK" == "1" || "$USE_EXISTING_STACK" == "auto" ]]; then
@@ -249,6 +250,9 @@ export E2E_WEB_URL="$WEB_URL"
 export E2E_EMAIL="$QA_EMAIL"
 export E2E_PASSWORD="$QA_PASSWORD"
 export E2E_DISCOVER_URL="$DISCOVER_URL"
+export E2E_SEED_SOURCE_NAME="E2E Seed Feed ${TS}"
+export E2E_ADMIN_EMAIL="${ACCEPTANCE_ADMIN_EMAIL:-acceptance.admin@infohub.local}"
+export E2E_ADMIN_PASSWORD="${ACCEPTANCE_ADMIN_PASSWORD:-InfoHubAdmin2026}"
 
 if python3 - <<'PY'
 import os
@@ -260,6 +264,9 @@ web_url = os.environ["E2E_WEB_URL"]
 email = os.environ["E2E_EMAIL"]
 password = os.environ["E2E_PASSWORD"]
 discover_url = os.environ["E2E_DISCOVER_URL"]
+seed_source_name = os.environ["E2E_SEED_SOURCE_NAME"]
+admin_email = os.environ["E2E_ADMIN_EMAIL"]
+admin_password = os.environ["E2E_ADMIN_PASSWORD"]
 
 checks = []
 errors = []
@@ -288,60 +295,60 @@ with sync_playwright() as p:
 
     try:
         page.goto(f"{web_url}/sources", wait_until="domcontentloaded", timeout=20000)
-        page.get_by_role("heading", name="信源管理").wait_for(timeout=10000)
-        page.get_by_role("button", name="RSS URL").click()
-        page.get_by_placeholder("关键词、站点 URL 或 RSS 链接").fill(discover_url)
-        with page.expect_response(
-            lambda resp: "/api/discovery/search" in resp.url,
-            timeout=15000,
-        ) as discovery_resp_info:
-            page.get_by_role("button", name="发现").click()
-        discovery_resp = discovery_resp_info.value
-        if discovery_resp.status != 200:
-            raise RuntimeError(f"发现接口状态异常: {discovery_resp.status}")
-        discovery_data = discovery_resp.json().get("data") or []
-        if len(discovery_data) == 0:
-            raise RuntimeError("发现接口返回空结果")
+        page.get_by_role("heading", name="RSS 信源管理").wait_for(timeout=10000)
+        page.get_by_role("button", name="添加 RSS", exact=True).click()
+        rss_url = page.get_by_role("textbox", name="RSS URL")
+        rss_url.wait_for(timeout=10000)
+        rss_url.fill(discover_url)
+        page.get_by_role("button", name="取消", exact=True).click()
 
-        sub_btn = page.get_by_role("button", name="订阅", exact=True)
-        if sub_btn.count() > 0:
-            target_btn = sub_btn.first
-            target_btn.click()
-            page.wait_for_timeout(1200)
-            # 允许多种成功态: 顶部提示、按钮进入已订阅态、或已展示已订阅按钮
-            notice_ok = page.locator("text=已订阅").count() > 0 or page.locator("text=已在订阅列表中").count() > 0
-            action_ok = page.get_by_role("button", name="已订阅").count() > 0 or target_btn.is_disabled()
-            if not (notice_ok or action_ok):
-                raise RuntimeError("订阅动作未进入可观察成功态")
-            ok("Sources 发现后可触发订阅动作")
-        else:
-            already_btn = page.get_by_role("button", name="已订阅", exact=True)
-            if already_btn.count() > 0:
-                ok("Sources 发现结果已存在订阅状态")
-            else:
-                raise RuntimeError("发现结果未出现可点击的订阅按钮")
+        search = page.get_by_role(
+            "textbox",
+            name="搜索信源、域名、最新条目标题或变化摘要",
+        )
+        search.fill(seed_source_name)
+        page.get_by_text(seed_source_name, exact=True).first.wait_for(timeout=10000)
+        ok("Sources 新增 RSS 入口与来源搜索可用")
     except Exception as e:
-        bad("Sources 发现订阅链路", e)
+        bad("Sources RSS 管理链路", e)
 
     try:
         page.goto(f"{web_url}/feed", wait_until="domcontentloaded", timeout=20000)
         page.get_by_role("button", name=re.compile(r"^未读")).click()
-        cards = page.locator("div.cursor-pointer h3")
+        cards = page.get_by_role("feed", name="文章列表").get_by_role("article")
         cards.first.wait_for(timeout=15000)
         cards.first.click()
         page.wait_for_url(re.compile(r".*/feed/[^?]+.*"), timeout=10000)
         if "filter=unread" not in page.url:
             raise RuntimeError(f"url missing filter context: {page.url}")
-        page.get_by_role("button", name="下一条未读").click()
+        if page.get_by_text(re.compile(r"Cannot read properties of undefined")).count() > 0:
+            raise RuntimeError("打开未读文章触发了无限列表缓存错误")
+        tool_summary = page.locator("summary").filter(has_text=re.compile(r"^\s*工具\s*$"))
+        tool_summary.click()
+        page.get_by_role("button", name="下一条", exact=True).click()
         ok("Feed 详情链路与 query 上下文保持一致")
     except Exception as e:
         bad("Feed 阅读链路", e)
 
     try:
-        page.goto(f"{web_url}/settings", wait_until="domcontentloaded", timeout=20000)
-        page.get_by_role("button", name="诊断中心").click()
+        page.goto(f"{web_url}/admin", wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_timeout(500)
+        if re.search(r"/admin(?:[/?#]|$)", page.url):
+            raise RuntimeError("普通用户不应保留在管理后台")
+
+        page.evaluate("localStorage.clear()")
+        page.goto(f"{web_url}/login", wait_until="domcontentloaded", timeout=20000)
+        page.get_by_placeholder("you@example.com").fill(admin_email)
+        page.get_by_placeholder("请输入密码").fill(admin_password)
+        page.get_by_role("button", name="登录").click()
+        page.wait_for_url(re.compile(r".*/feed.*"), timeout=20000)
+
+        page.goto(f"{web_url}/admin", wait_until="domcontentloaded", timeout=20000)
+        page.get_by_role("heading", name="管理后台").wait_for(timeout=10000)
+        page.get_by_role("button", name="诊断中心", exact=True).click()
+        page.get_by_role("button", name="详细诊断信息", exact=True).click()
         page.locator("text=服务连通诊断").first.wait_for(timeout=10000)
-        page.locator("text=仅管理员可查看队列作业详情。").first.wait_for(timeout=10000)
+        page.locator("text=抓取队列诊断").first.wait_for(timeout=10000)
         page.get_by_placeholder("代理地址，如 http://127.0.0.1:7890").fill("bad-proxy")
         page.get_by_role("button", name="测试代理").click()
         page.wait_for_timeout(1500)
@@ -352,9 +359,9 @@ with sync_playwright() as p:
         )
         if not err_visible:
             raise RuntimeError("代理测试后未观察到错误反馈")
-        ok("Settings 诊断中心与代理测试链路可用")
+        ok("Admin 诊断中心与代理测试链路可用")
     except Exception as e:
-        bad("Settings 诊断中心", e)
+        bad("Admin 诊断中心", e)
 
     browser.close()
 

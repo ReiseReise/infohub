@@ -141,7 +141,9 @@ log "--- T3: Fetch 触发与执行 ---"
 
 # T3.1: 手动触发单源采集
 if [ -n "$SOURCE_ID" ]; then
-  FETCH_RESP=$(api_curl -X POST "$BASE_URL/api/fetch/source/$SOURCE_ID" 2>/dev/null || echo '{}')
+  FETCH_RESP=$(api_curl -X POST \
+    "$BASE_URL/api/fetch/source/$SOURCE_ID?mode=sync&contentLimit=0&aiLimit=0&translationLimit=0" \
+    2>/dev/null || echo '{}')
   FETCH_MSG=$(echo "$FETCH_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('message',''))" 2>/dev/null || echo "")
   if [ "$FETCH_MSG" = "Fetch enqueued" ] || [ "$FETCH_MSG" = "Fetch finished" ]; then
     pass "T3.1: 手动触发单源采集成功"

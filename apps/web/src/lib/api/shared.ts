@@ -1,4 +1,12 @@
-import { getStoredToken } from '../auth-storage';
+import {
+  clearStoredToken,
+  getStoredToken,
+  shouldInvalidateSessionForRequest,
+} from '../auth-storage';
+import { notifyUnauthorized } from '../unauthorized-bus';
+
+// 认证入口自身的 401 是"密码错误"，不能触发登出跳转，否则会打断登录流程
+const AUTH_ENTRY_PATHS = ['/auth/login', '/auth/register'];
 
 declare const __API_BASE_URL__: string | undefined;
 
@@ -98,6 +106,20 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
   if (!resp.ok) {
     const payload = await resp.json().catch(() => null);
+
+    // SEC-008：会话中途失效时，此前只弹一条裸英文 Unauthorized，既不清 token 也不跳登录，
+    // 页面继续显示旧数据，用户会陷入"操作全失败但看起来还登录着"的死循环。
+    if (resp.status === 401 && !AUTH_ENTRY_PATHS.some((p) => path.startsWith(p))) {
+      if (shouldInvalidateSessionForRequest(token, getStoredToken())) {
+        clearStoredToken();
+        notifyUnauthorized();
+        throw new Error('登录状态已失效，请重新登录');
+      }
+      // A response from an older token must not invalidate a newer login from
+      // this tab or another tab. Preserve the ordinary request error instead.
+      throw new Error(extractErrorMessage(payload, resp.statusText, resp.status));
+    }
+
     throw new Error(extractErrorMessage(payload, resp.statusText, resp.status));
   }
 

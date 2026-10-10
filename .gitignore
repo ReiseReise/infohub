@@ -21,6 +21,7 @@ local-secrets/
 # Build artifacts
 dist/
 build/
+output/
 *.tgz
 
 # IDE
@@ -40,6 +41,9 @@ qa/reports/
 
 # Local browser inspection artifacts
 .playwright-cli/
+
+# Local Compose overrides may reference ignored host-side credentials.
+docker-compose.ops-auth.yml
 
 # OS
 Thumbs.db

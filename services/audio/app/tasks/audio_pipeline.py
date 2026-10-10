@@ -16,6 +16,9 @@ from app.config import settings
 from app.models.audio_task import AudioTask, TaskStatus
 from app.models.prompt_template import PromptTemplate
 from app.models.usage_log import UsageLog, ServiceType
+from app.services.audio_config_guard import require_audio_llm_selection
+from app.services.audio_artifacts import build_audio_artifacts_v1, preserve_audio_qa_answers
+from app.services.audio_reprocess import has_reusable_summary, has_reusable_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,33 @@ async def _update_task_source_meta(task_id: str, **meta_fields):
         source_meta = dict(raw_source_meta) if isinstance(raw_source_meta, dict) else {}
         source_meta.update({k: v for k, v in meta_fields.items() if v is not None})
         summary["_source_meta"] = source_meta
+        task.summary_result = summary
+        await db.commit()
+
+
+async def _persist_audio_artifacts(
+    task_id: str,
+    *,
+    summary_text: str,
+    transcript_text: str,
+    transcript_raw: dict | None,
+):
+    """将后端生成的版本化音频资产写回任务，供所有客户端复用。"""
+    async with _make_session()() as db:
+        result = await db.execute(select(AudioTask).where(AudioTask.id == uuid.UUID(task_id)))
+        task = result.scalar_one_or_none()
+        if not task:
+            raise RuntimeError("音频任务不存在，无法保存复盘资产")
+
+        raw_summary = task.summary_result if isinstance(task.summary_result, dict) else {}
+        summary = dict(raw_summary)
+        previous_artifacts = summary.get("artifacts")
+        summary["artifacts"] = preserve_audio_qa_answers(build_audio_artifacts_v1(
+            title=task.title,
+            summary_text=summary_text,
+            transcript_text=transcript_text,
+            transcript_raw=transcript_raw,
+        ), previous_artifacts)
         task.summary_result = summary
         await db.commit()
 
@@ -121,6 +151,28 @@ async def _send_failure_webhook(task_id: str, error_message: str):
 async def _mark_task_failed(task_id: str, error: Exception | str):
     message = str(error) if isinstance(error, Exception) else str(error)
     message = message.strip()[:1800] if message else "未知错误"
+
+    async with _make_session()() as db:
+        result = await db.execute(select(AudioTask).where(AudioTask.id == uuid.UUID(task_id)))
+        task = result.scalar_one_or_none()
+        if (
+            task
+            and has_reusable_transcript(task.transcript_text, task.transcript_raw)
+            and has_reusable_summary(task.summary_result)
+        ):
+            summary = dict(task.summary_result or {})
+            summary["_retry_warning"] = {
+                "message": "最近一次重做未成功，已保留上次可用结果",
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+            }
+            task.status = TaskStatus.done
+            task.error_message = None
+            task.summary_result = summary
+            task.processing_finished_at = datetime.now(timezone.utc)
+            await db.commit()
+            logger.warning("[pipeline] 重试失败但已有可用结果，保留完成状态: %s", task_id)
+            return
+
     await _update_task_status(
         task_id,
         TaskStatus.failed,
@@ -188,6 +240,16 @@ def start_audio_pipeline(task_id: str):
         audio_preprocess.s(task_id),
         asr_transcribe.s(),
         llm_summarize.s(),
+        multimodal_generate.s(),
+        post_process.s(),
+    )
+    pipeline.apply_async()
+
+
+def start_audio_summary_pipeline(prev_result: dict):
+    """复用已有逐字稿，只重做纪要及后续派生资产。"""
+    pipeline = chain(
+        llm_summarize.s(prev_result),
         multimodal_generate.s(),
         post_process.s(),
     )
@@ -366,6 +428,8 @@ def asr_transcribe(self, prev_result: dict) -> dict:
     logger.info(f"[Step 2] ASR 转写: {task_id}")
 
     from app.services.asr_service import (
+        DEFAULT_CHUNK_RETRIES,
+        DEFAULT_LOCAL_CHUNK_SECONDS,
         ParaformerASR,
         can_use_remote_asr,
         get_asr_provider,
@@ -392,6 +456,16 @@ def asr_transcribe(self, prev_result: dict) -> dict:
             audio_access_url = _run_async(get_storage().get_url(prev_result["audio_url"]))
 
         source_meta = dict(prev_result.get("source_meta") or {})
+        for stale_key in (
+            "asr_chunk_seconds",
+            "asr_chunk_retry_limit",
+            "asr_chunk_progress",
+            "asr_chunking",
+            "asr_staging_status",
+            "fallback_provider",
+            "fallback_reason",
+        ):
+            source_meta.pop(stale_key, None)
         expected_duration = float(prev_result.get("duration") or 0)
         is_local = (settings.storage_backend == "local" and Path(audio_access_url).exists())
         remote_capable = can_use_remote_asr(audio_access_url)
@@ -422,7 +496,56 @@ def asr_transcribe(self, prev_result: dict) -> dict:
             selection_reason = "tingwu_requires_remote_url"
 
         provider = get_asr_provider(effective_asr_model)
-        asr_mode = "batch_async" if effective_asr_model == "tingwu" else ("realtime_sync" if is_local else "remote_batch")
+        staged_storage = None
+        staged_audio_key: str | None = None
+        if (
+            is_local
+            and isinstance(provider, ParaformerASR)
+            and settings.oss_access_key_id
+            and settings.oss_access_key_secret
+            and settings.oss_bucket_name
+            and settings.oss_endpoint
+        ):
+            try:
+                from app.services.storage_service import OSSStorage
+
+                staged_storage = OSSStorage()
+                with open(audio_access_url, "rb") as audio_file:
+                    staged_audio_key = _run_async(staged_storage.upload(
+                        audio_file.read(),
+                        f"asr-stage-{task_id}.mp3",
+                        "audio/mpeg",
+                    ))
+                staged_url = _run_async(staged_storage.get_url(staged_audio_key))
+                if not can_use_remote_asr(staged_url):
+                    raise RuntimeError("临时音频地址不可供远程 ASR 访问")
+                audio_access_url = staged_url
+                is_local = False
+                remote_capable = True
+                selection_reason = "local_audio_staged_to_oss"
+                source_meta["asr_staging_status"] = "ready"
+            except Exception as staging_error:
+                logger.warning("[Step 2] 本地音频远程暂存失败，回退分块实时转写: %s", staging_error)
+                if staged_storage and staged_audio_key:
+                    try:
+                        _run_async(staged_storage.delete(staged_audio_key))
+                    except Exception:
+                        pass
+                staged_storage = None
+                staged_audio_key = None
+                source_meta["asr_staging_status"] = "failed"
+
+        local_chunk_seconds = (
+            provider._chunk_seconds_for_duration(expected_duration)
+            if is_local and isinstance(provider, ParaformerASR)
+            else DEFAULT_LOCAL_CHUNK_SECONDS
+        )
+        if effective_asr_model == "tingwu":
+            asr_mode = "batch_async"
+        elif is_local and expected_duration > local_chunk_seconds:
+            asr_mode = "chunked_realtime_sync"
+        else:
+            asr_mode = "realtime_sync" if is_local else "remote_batch"
 
         source_meta.update({
             "requested_asr_model": requested_asr_model,
@@ -430,6 +553,11 @@ def asr_transcribe(self, prev_result: dict) -> dict:
             "asr_mode": asr_mode,
             "storage_backend": settings.storage_backend,
         })
+        if asr_mode == "chunked_realtime_sync":
+            source_meta.update({
+                "asr_chunk_seconds": local_chunk_seconds,
+                "asr_chunk_retry_limit": DEFAULT_CHUNK_RETRIES,
+            })
         if selection_reason:
             source_meta["asr_selection_reason"] = selection_reason
         _run_async(_update_task_source_meta(
@@ -439,80 +567,110 @@ def asr_transcribe(self, prev_result: dict) -> dict:
             asr_mode=asr_mode,
             asr_selection_reason=selection_reason,
             storage_backend=settings.storage_backend,
+            asr_chunk_seconds=source_meta.get("asr_chunk_seconds"),
+            asr_chunk_retry_limit=source_meta.get("asr_chunk_retry_limit"),
         ))
-
-        if is_local and expected_duration > 900 and not has_tingwu_credentials():
-            raise RuntimeError(
-                "长音频当前不能走本地 Paraformer 实时转写；请切换到 OSS 存储后重试，"
-                "或补齐 Tingwu ACCESS_KEY_ID/SECRET 后再启用长音频兜底。"
-            )
 
         # 3) 调用 ASR — 本地文件同步调用（避免 WebSocket 死锁），远程 URL 走 async
         try:
-            if is_local and isinstance(provider, ParaformerASR):
-                logger.info(f"[Step 2] 本地文件，使用 Recognition 实时 API (sync): {effective_asr_model}")
-                transcription = provider.transcribe_local_sync(
-                    audio_access_url,
-                    speaker_diarization=True,
-                    expected_duration=expected_duration,
-                )
-            else:
-                transcription = _run_async(provider.transcribe(
-                    audio_url=audio_access_url,
-                    speaker_diarization=True,
-                ))
-        except TimeoutError as timeout_err:
-            logger.warning(f"[Step 2] Paraformer 超时，准备兜底: {task_id}: {timeout_err}")
-            if isinstance(provider, ParaformerASR) and remote_capable and has_tingwu_credentials():
-                fallback_provider = "tingwu"
-                fallback_reason = "paraformer_timeout"
-                provider = get_asr_provider("tingwu")
-                effective_asr_model = "tingwu"
-                asr_mode = "batch_async"
-                source_meta.update({
-                    "effective_asr_model": effective_asr_model,
-                    "asr_mode": asr_mode,
-                    "fallback_provider": fallback_provider,
-                    "fallback_reason": fallback_reason,
-                })
-                _run_async(_update_task_source_meta(
-                    task_id,
-                    effective_asr_model=effective_asr_model,
-                    asr_mode=asr_mode,
-                    fallback_provider=fallback_provider,
-                    fallback_reason=fallback_reason,
-                ))
-                transcription = _run_async(provider.transcribe(
-                    audio_url=audio_access_url,
-                    speaker_diarization=True,
-                ))
-            elif isinstance(provider, ParaformerASR) and is_local:
-                if expected_duration > 900:
-                    raise RuntimeError(
-                        "本地长音频 Paraformer 实时转写超时，且当前没有可用的远程 ASR 兜底；"
-                        "请将 AUDIO_STORAGE_BACKEND 切到 oss 后重试。"
-                    ) from timeout_err
-                fallback_provider = "paraformer"
-                fallback_reason = "paraformer_timeout_retry_small_chunks"
-                source_meta.update({
-                    "fallback_provider": fallback_provider,
-                    "fallback_reason": fallback_reason,
-                })
-                _run_async(_update_task_source_meta(
-                    task_id,
-                    fallback_provider=fallback_provider,
-                    fallback_reason=fallback_reason,
-                ))
-                transcription = provider.transcribe_local_sync(
-                    audio_access_url,
-                    speaker_diarization=True,
-                    expected_duration=expected_duration,
-                    chunk_seconds=180,
-                )
-            else:
-                raise timeout_err
+            try:
+                if is_local and isinstance(provider, ParaformerASR):
+                    logger.info(f"[Step 2] 本地文件，使用 Recognition 实时 API (sync): {effective_asr_model}")
+
+                    def _report_chunk_progress(progress: dict):
+                        _run_async(_update_task_source_meta(task_id, asr_chunk_progress=progress))
+
+                    transcription = provider.transcribe_local_sync(
+                        audio_access_url,
+                        speaker_diarization=True,
+                        expected_duration=expected_duration,
+                        chunk_seconds=(
+                            local_chunk_seconds
+                            if expected_duration > local_chunk_seconds
+                            else None
+                        ),
+                        chunk_retries=DEFAULT_CHUNK_RETRIES,
+                        progress_callback=_report_chunk_progress,
+                    )
+                else:
+                    transcription = _run_async(provider.transcribe(
+                        audio_url=audio_access_url,
+                        speaker_diarization=True,
+                    ))
+            except TimeoutError as timeout_err:
+                logger.warning(f"[Step 2] Paraformer 超时，准备兜底: {task_id}: {timeout_err}")
+                if isinstance(provider, ParaformerASR) and remote_capable and has_tingwu_credentials():
+                    fallback_provider = "tingwu"
+                    fallback_reason = "paraformer_timeout"
+                    provider = get_asr_provider("tingwu")
+                    effective_asr_model = "tingwu"
+                    asr_mode = "batch_async"
+                    source_meta.update({
+                        "effective_asr_model": effective_asr_model,
+                        "asr_mode": asr_mode,
+                        "fallback_provider": fallback_provider,
+                        "fallback_reason": fallback_reason,
+                    })
+                    _run_async(_update_task_source_meta(
+                        task_id,
+                        effective_asr_model=effective_asr_model,
+                        asr_mode=asr_mode,
+                        fallback_provider=fallback_provider,
+                        fallback_reason=fallback_reason,
+                    ))
+                    transcription = _run_async(provider.transcribe(
+                        audio_url=audio_access_url,
+                        speaker_diarization=True,
+                    ))
+                elif isinstance(provider, ParaformerASR) and is_local:
+                    if expected_duration > 900:
+                        raise RuntimeError(
+                            "本地长音频 Paraformer 实时转写超时，且当前没有可用的远程 ASR 兜底；"
+                            "请将 AUDIO_STORAGE_BACKEND 切到 oss 后重试。"
+                        ) from timeout_err
+                    fallback_provider = "paraformer"
+                    fallback_reason = "paraformer_timeout_retry_small_chunks"
+                    source_meta.update({
+                        "fallback_provider": fallback_provider,
+                        "fallback_reason": fallback_reason,
+                    })
+                    _run_async(_update_task_source_meta(
+                        task_id,
+                        fallback_provider=fallback_provider,
+                        fallback_reason=fallback_reason,
+                    ))
+                    transcription = provider.transcribe_local_sync(
+                        audio_access_url,
+                        speaker_diarization=True,
+                        expected_duration=expected_duration,
+                        chunk_seconds=180,
+                        chunk_retries=DEFAULT_CHUNK_RETRIES,
+                        progress_callback=lambda progress: _run_async(
+                            _update_task_source_meta(task_id, asr_chunk_progress=progress)
+                        ),
+                    )
+                else:
+                    raise timeout_err
+        finally:
+            if staged_storage and staged_audio_key:
+                try:
+                    _run_async(staged_storage.delete(staged_audio_key))
+                    source_meta["asr_staging_status"] = "cleaned"
+                except Exception as cleanup_error:
+                    logger.warning("[Step 2] 临时远程音频清理失败: %s", cleanup_error)
+                    source_meta["asr_staging_status"] = "cleanup_failed"
 
         # 4) 保存结果（async，短操作）
+        chunking = transcription.raw_response.get("chunking") if isinstance(transcription.raw_response, dict) else None
+        if isinstance(chunking, dict):
+            source_meta["asr_chunking"] = chunking
+            source_meta["asr_chunk_progress"] = {
+                "stage": "completed",
+                "chunk_index": chunking.get("chunk_count", 0),
+                "chunk_count": chunking.get("chunk_count", 0),
+                "attempt": 1,
+                "max_attempts": int(chunking.get("retry_limit", 0)) + 1,
+            }
         transcript_raw = {
             "segments": [
                 {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
@@ -583,18 +741,22 @@ def llm_summarize(self, prev_result: dict) -> dict:
                 ]
                 if candidate and candidate.strip().startswith("ep-")
             ), "")
-            default_llm_model = default_endpoint_id if (default_endpoint_id and settings.ark_api_key) else ""
-            if not default_llm_model and settings.dashscope_api_key:
-                default_llm_model = "dashscope/qwen-flash"
             requested_model = (task.llm_model or "").strip()
-            if requested_model == "__default_doubao_endpoint__":
-                llm_model = default_endpoint_id or default_llm_model
-            else:
-                llm_model = requested_model or default_llm_model
-            if not llm_model:
-                raise ValueError("未配置可用的默认 LLM。豆包请填写 DEFAULT_LLM_ENDPOINT_ID=ep-...，否则至少配置 DashScope 回退模型。")
+            selection = require_audio_llm_selection(
+                requested_model,
+                default_endpoint_id=default_endpoint_id,
+                has_ark_key=bool(settings.ark_api_key),
+                has_dashscope_key=bool(settings.dashscope_api_key),
+            )
+            llm_model = selection.model
+            llm_provider = selection.provider
             user_instruction = task.user_instruction or ""
             title = task.title
+            previous_artifacts = (
+                task.summary_result.get("artifacts")
+                if isinstance(task.summary_result, dict)
+                else None
+            )
 
             # 获取 Prompt 模板
             template_text = ""
@@ -629,6 +791,12 @@ def llm_summarize(self, prev_result: dict) -> dict:
             raise RuntimeError("[EMPTY_TRANSCRIPT] ASR 未产出有效逐字稿，已阻断摘要步骤")
 
         # 构建上下文并渲染 Prompt
+        # Only the linked item ID travels internally. Hub independently checks
+        # public provenance and reads the already persisted transcript.
+        if os.getenv("JEV_ENABLED") == "true" and prev_result.get("article_id"):
+            from app.services.jev_shadow import notify_transcript_ready
+            await notify_transcript_ready(str(prev_result["article_id"]))
+
         context = build_template_context(transcript_result, title, user_instruction)
         rendered = render_prompt(template_text, context)
 
@@ -638,6 +806,8 @@ def llm_summarize(self, prev_result: dict) -> dict:
             transcript=transcript_result.text,
             rendered_prompt=rendered,
             model=llm_model,
+            provider=llm_provider,
+            extra_config={"accessMode": "endpoint", "endpointId": llm_model} if llm_provider == "volcengine_ark" else None,
         )
 
         # 保存结果
@@ -656,6 +826,8 @@ def llm_summarize(self, prev_result: dict) -> dict:
             callback_meta["article_id"] = prev_result.get("article_id")
         if callback_meta:
             summary["_callback"] = callback_meta
+        if isinstance(previous_artifacts, dict):
+            summary["artifacts"] = previous_artifacts
         await _update_task_status(task_id, TaskStatus.generating, summary_result=summary)
 
         # 记录用量
@@ -788,6 +960,13 @@ def post_process(self, prev_result: dict) -> dict:
         if not _normalize_transcript_text(summary_text):
             raise RuntimeError("[EMPTY_SUMMARY] 缺少有效摘要，任务不能标记为完成")
         tags = _extract_tags(summary_text)
+
+        await _persist_audio_artifacts(
+            task_id,
+            summary_text=summary_text,
+            transcript_text=transcript_text,
+            transcript_raw=prev_result.get("transcript_raw"),
+        )
 
         total_cost = prev_result.get("asr_cost", 0) + prev_result.get("llm_cost", 0)
 
